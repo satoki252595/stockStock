@@ -1,0 +1,208 @@
+"""やのしん TDnet コレクターのテスト (DESIGN.md §4 トラックA, §12)。
+
+フィクスチャは 2026-06-10 に実取得したやのしんAPIレスポンス (§3-6):
+- tdnet/yanoshin_list_recent.json   … recent（items[].Tdnet ラップ形式）
+- tdnet/yanoshin_list_20260610.json … 日付指定（items[] フラット形式・180件）
+- tdnet/disclosure_140120260610567733.pdf … 実開示PDF
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import date, timedelta
+
+import pytest
+
+from jp_stock_pipeline.collectors import tdnet_yanoshin as ty
+from jp_stock_pipeline.config import load_settings
+from jp_stock_pipeline.http import FetchError
+from jp_stock_pipeline.licensing import LicenseTag
+from jp_stock_pipeline.models import Source, now_jst
+from jp_stock_pipeline.rawstore import sha256_bytes
+
+from conftest import fixture_path
+
+
+def _settings(tmp_path):
+    return load_settings(dry_run=True, env={"RAW_DATA_DIR": str(tmp_path)})
+
+
+def _load(relative: str) -> dict:
+    return json.loads(fixture_path(relative).read_text(encoding="utf-8"))
+
+
+class _StubResponse:
+    def __init__(self, content: bytes):
+        self.content = content
+
+
+# ---------------------------------------------------------------------------
+# フィールド正規化（純関数）
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeCompanyCode:
+    def test_5桁から4桁化(self):
+        # TDnet は末尾1桁付き5桁（フィクスチャ実例: "70500", "316A0", "16714"）
+        assert ty.normalize_company_code("70500") == "7050"
+        assert ty.normalize_company_code("316A0") == "316A"
+        # 末尾は "0" 以外の実例もある（ETF 等。2026-06-10 フィクスチャに存在）
+        assert ty.normalize_company_code("16714") == "1671"
+
+    def test_4桁はそのまま(self):
+        assert ty.normalize_company_code("7203") == "7203"
+
+    def test_解釈できない形式はNone(self):
+        # 推定しない (§3-1)
+        assert ty.normalize_company_code(None) is None
+        assert ty.normalize_company_code("") is None
+        assert ty.normalize_company_code("123") is None
+        assert ty.normalize_company_code("1234567") is None
+
+
+class TestDocId:
+    def test_rdphpラッパの展開(self):
+        # recent フィクスチャ実例の document_url 形式
+        wrapped = (
+            "https://webapi.yanoshin.jp/rd.php?"
+            "https://www.release.tdnet.info/inbs/140120260610567733.pdf"
+        )
+        direct = "https://www.release.tdnet.info/inbs/140120260610567733.pdf"
+        assert ty.direct_document_url(wrapped) == direct
+        assert ty.direct_document_url(direct) == direct
+
+    def test_doc_idはPDFファイル名由来(self):
+        # 公式フォールバックと同一の安定ID (CONTRACTS 不変条件5)
+        url = "https://www.release.tdnet.info/inbs/140120260610567733.pdf"
+        assert ty.doc_id_from_document_url(url) == "140120260610567733"
+
+    def test_導出不能はNone(self):
+        assert ty.doc_id_from_document_url(None) is None
+        assert ty.doc_id_from_document_url("https://example.com/page.html") is None
+
+
+# ---------------------------------------------------------------------------
+# レスポンスJSONのパース（実フィクスチャ・両形式）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "tdnet/yanoshin_list_recent.json",  # Tdnet ラップ形式
+        "tdnet/yanoshin_list_20260610.json",  # フラット形式
+    ],
+)
+def test_parse_両形式で全itemsがレコード化される(relative):
+    payload = _load(relative)
+    records = ty.parse_list_payload(payload, fetched_at=now_jst())
+    assert len(records) == len(payload["items"]) > 0
+
+    for rec, item in zip(records, payload["items"], strict=True):
+        t = item.get("Tdnet", item)
+        # フィールドマッピング（値不変 §5.2）
+        assert rec.title == t["title"].strip()
+        # 5桁→4桁
+        assert rec.code == t["company_code"][:4]
+        # JST tz付き datetime
+        assert rec.disclosed_at.utcoffset() == timedelta(hours=9)
+        assert rec.disclosed_at.strftime("%Y-%m-%d %H:%M:%S") == t["pubdate"]
+        # has_xbrl = url_xbrl の有無
+        assert rec.has_xbrl is bool(t["url_xbrl"])
+        # doc_id は document_url の PDF ファイル名由来
+        assert rec.doc_id == rec.source_url.rsplit("/", 1)[-1].removesuffix(".pdf")
+        # 来歴 (§3-3): TDnet / factual-cite / データ基準日=開示日
+        assert rec.provenance.source is Source.TDNET
+        assert rec.provenance.license_tag is LicenseTag.FACTUAL_CITE
+        assert rec.provenance.data_date == rec.disclosed_at.date()
+
+
+def test_parse_recent先頭レコードの具体値():
+    """recent フィクスチャ（2026-06-10 取得）の先頭1件を具体値で検証する。"""
+    payload = _load("tdnet/yanoshin_list_recent.json")
+    rec = ty.parse_list_payload(payload, fetched_at=now_jst())[0]
+    t = payload["items"][0]["Tdnet"]
+    assert rec.doc_id == ty.doc_id_from_document_url(t["document_url"])
+    # rd.php ラッパは直URLへ展開されている
+    assert rec.source_url.startswith("https://www.release.tdnet.info/")
+    assert "rd.php" not in rec.source_url
+    assert len(rec.code) == 4
+
+
+def test_parse_書類種別はclassify_titleと一致():
+    payload = _load("tdnet/yanoshin_list_20260610.json")
+    records = ty.parse_list_payload(payload, fetched_at=now_jst())
+    for rec in records:
+        assert rec.doc_type == ty.classify_title(rec.title)
+
+
+# ---------------------------------------------------------------------------
+# list_disclosures（fetch を実フィクスチャbytesで差し替え）
+# ---------------------------------------------------------------------------
+
+
+def test_list_disclosures_原本保存とレコード(tmp_path, monkeypatch):
+    raw = fixture_path("tdnet/yanoshin_list_20260610.json").read_bytes()
+    monkeypatch.setattr(ty, "fetch", lambda url, **kw: _StubResponse(raw))
+    settings = _settings(tmp_path)
+
+    artifact, records = ty.list_disclosures(settings, "20260610", limit=300)
+
+    # 原本 (§8.1 step 2): 無加工保存・SHA256・メタデータ
+    assert artifact.local_path.read_bytes() == raw
+    assert artifact.sha256 == sha256_bytes(raw)
+    assert artifact.source is Source.TDNET
+    assert artifact.datatype == "tdnet_list"
+    assert artifact.scope == "20260610"
+    assert artifact.data_date == date(2026, 6, 10)
+    assert artifact.license_tag is LicenseTag.FACTUAL_CITE
+    assert "limit=300" in artifact.url
+    # レコード（このフィクスチャは180件）
+    assert len(records) == 180
+
+
+def test_list_disclosures_recentはdata_dateなし(tmp_path, monkeypatch):
+    raw = fixture_path("tdnet/yanoshin_list_recent.json").read_bytes()
+    monkeypatch.setattr(ty, "fetch", lambda url, **kw: _StubResponse(raw))
+    artifact, records = ty.list_disclosures(_settings(tmp_path), "recent", limit=30)
+    # "recent" は特定日を指さない → 推定せず None (§3-1)
+    assert artifact.data_date is None
+    assert artifact.scope == "recent"
+    assert len(records) == len(json.loads(raw)["items"])
+
+
+# ---------------------------------------------------------------------------
+# fetch_disclosure_pdf（実PDFフィクスチャ）
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_disclosure_pdf(tmp_path, monkeypatch):
+    pdf = fixture_path("tdnet/disclosure_140120260610567733.pdf").read_bytes()
+    payload = _load("tdnet/yanoshin_list_20260610.json")
+    records = ty.parse_list_payload(payload, fetched_at=now_jst())
+    rec = next(r for r in records if r.doc_id == "140120260610567733")
+
+    fetched_urls: list[str] = []
+
+    def stub(url, **kw):
+        fetched_urls.append(url)
+        return _StubResponse(pdf)
+
+    monkeypatch.setattr(ty, "fetch", stub)
+    artifact = ty.fetch_disclosure_pdf(_settings(tmp_path), rec)
+
+    assert fetched_urls == [rec.source_url]
+    assert artifact.datatype == "tdnet_pdf"
+    assert artifact.scope == rec.doc_id  # doc_id でファイル名衝突を防ぐ
+    assert artifact.license_tag is LicenseTag.FACTUAL_CITE
+    assert artifact.local_path.read_bytes() == pdf  # 無加工 (§5.2)
+    assert artifact.data_date == rec.disclosed_at.date()
+
+
+def test_fetch_disclosure_pdf_PDF以外は原本にしない(tmp_path, monkeypatch):
+    """エラーページ等を PDF 原本として保存しない（ダミー原本の禁止 §3）。"""
+    payload = _load("tdnet/yanoshin_list_20260610.json")
+    rec = ty.parse_list_payload(payload, fetched_at=now_jst())[0]
+    monkeypatch.setattr(ty, "fetch", lambda url, **kw: _StubResponse(b"<html>error</html>"))
+    with pytest.raises(FetchError):
+        ty.fetch_disclosure_pdf(_settings(tmp_path), rec)
