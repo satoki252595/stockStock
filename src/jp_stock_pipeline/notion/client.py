@@ -195,7 +195,8 @@ class NotionClient:
         max_pages: int | None = None,
     ) -> list[dict]:
         """全ページをページネーションして返す。トークン無し dry-run では空。"""
-        if self._client is None:
+        if self._client is None or str(database_id).startswith("dry-run-"):
+            # dry-run の合成DB ID (runner が補完) への実クエリは行わない (§3-6)
             return []
         results: list[dict] = []
         cursor: str | None = None
