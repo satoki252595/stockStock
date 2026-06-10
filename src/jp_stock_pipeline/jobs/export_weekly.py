@@ -51,6 +51,7 @@ def _upload_dataset(
     license_tag: LicenseTag,
     source: Source,
     period: str | None,
+    raw_page_id: str | None = None,
 ) -> None:
     paths = _write_dataset(df, stem)
     uploads = [(file_upload.upload_file(ctx.client, p), p.name) for p in paths]
@@ -66,6 +67,7 @@ def _upload_dataset(
             license_tag=license_tag,
             data_date=now_jst().date(),
             fetched_at=now_jst(),
+            raw_page_id=raw_page_id,
         ),
         file_uploads=uploads,
     )
@@ -118,6 +120,7 @@ def export_prices_track_b(ctx: JobContext) -> None:
         license_tag=inherit([LicenseTag.PERSONAL_ONLY]),
         source=Source.YFINANCE,
         period=period,
+        raw_page_id=artifact.notion_page_id,  # 由来する取得単位の原本 (§3-3)
     )
 
 
@@ -181,9 +184,11 @@ def export_notion_db_track_a(
         dataset_name=dataset_name,
         stem=f"{stem}_{now_jst().strftime('%Y%m%d')}",
         schema_desc=schema_desc,
-        # 含まれる行の最も厳しいタグを継承 (§2.2)
+        # 含まれる行の最も厳しいタグを継承 (§2.2)。
+        # 複数ソース行の集約データセットのためソースは「計算」とし、
+        # 出典 (EDINET/TDnet) は schema_desc に明記する (§3-4)
         license_tag=inherit(tags) if tags else LicenseTag.FACTUAL_CITE,
-        source=Source.CALC if not tags else Source.EDINET,
+        source=Source.CALC,
         period=None,
     )
 

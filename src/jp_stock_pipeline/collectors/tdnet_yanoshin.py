@@ -257,7 +257,15 @@ def list_disclosures(
     url = f"{BASE_URL}/{target}.json"
     resp = fetch(url, params={"limit": limit})
     content = resp.content
-    payload = json.loads(content)  # JSONとして不正なら例外（欠損として扱う §3-2）
+    try:
+        payload = json.loads(content)
+    except ValueError as exc:
+        raise FetchError(f"やのしん list 応答が JSON でない: {url}") from exc
+    # 構造検証 (CONTRACTS「HTTP 200 のエラーレスポンス」): items が list でない
+    # 応答はエラー/制限メッセージとみなし、原本保存せず FetchError とする。
+    # {"items": []} は正当な0件として通す
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+        raise FetchError(f"やのしん list 応答が想定外構造 (items 欠落): {url}")
     artifact = save_raw(
         content,
         source=Source.TDNET,

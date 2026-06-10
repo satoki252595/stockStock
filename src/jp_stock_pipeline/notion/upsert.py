@@ -1,8 +1,12 @@
 """Record dataclass → Notion プロパティ payload 構築と冪等 upsert (DESIGN.md §8.1-6)。
 
 不変条件:
-- None の値は payload から除外し Notion 上は空欄のままにする
-  （ダミー・推定・補間の生成禁止 §3-1。欠損は欠損として表示する）
+- None の値は**明示的な空値**として payload に含める（{"number": None} 等）。
+  これにより update 時に前回値が残存せず、行は常に最新レコードの完全な姿になる
+  （§3-1 欠損は欠損として表示 / §3-3 行の来歴と値が常に同一ソース由来 /
+  §2.2 ライセンスタグと値の不整合＝personal-only 汚染の防止）
+- 行は「単一ソースのスナップショット」を表す完全置換セマンティクス。
+  別ソースが同一キー行を更新する場合は値・来歴・タグがまとめて置き換わる
 - 全行に Provenance (ソース/ライセンスタグ/データ基準日/取得日時/原本relation/
   データ品質) を設定する (§3-3, §6.3)
 - upsert は冪等: キー検索 → update or create (§8.1-6)
@@ -56,24 +60,27 @@ def title_prop(value: str) -> dict:
     return {"title": [{"type": "text", "text": {"content": _clip(str(value))}}]}
 
 
-def text_prop(value: str) -> dict:
+def text_prop(value: str | None) -> dict:
+    """None は空 rich_text（update 時に前回値をクリアする §3-1）。"""
+    if value is None:
+        return {"rich_text": []}
     return {"rich_text": [{"type": "text", "text": {"content": _clip(str(value))}}]}
 
 
-def number_prop(value: float | int) -> dict:
+def number_prop(value: float | int | None) -> dict:
     return {"number": value}
 
 
-def select_prop(value: str) -> dict:
-    return {"select": {"name": str(value)}}
+def select_prop(value: str | None) -> dict:
+    return {"select": {"name": str(value)} if value is not None else None}
 
 
-def date_prop(value: date | datetime) -> dict:
-    return {"date": {"start": value.isoformat()}}
+def date_prop(value: date | datetime | None) -> dict:
+    return {"date": {"start": value.isoformat()} if value is not None else None}
 
 
-def url_prop(value: str) -> dict:
-    return {"url": str(value)}
+def url_prop(value: str | None) -> dict:
+    return {"url": str(value) if value is not None else None}
 
 
 def checkbox_prop(value: bool) -> dict:
@@ -102,9 +109,8 @@ def real_page_id(page_id: str | None) -> str | None:
 
 
 def _set(props: dict, name: str, builder, value) -> None:
-    """None は payload から除外 = Notion 上は空欄のまま (§3-1 ダミー禁止)。"""
-    if value is not None:
-        props[name] = builder(value)
+    """None も明示的な空値として送信する (update 時の前回値残存防止 §3-1/§2.2)。"""
+    props[name] = builder(value)
 
 
 # ---------------------------------------------------------------------------
@@ -187,15 +193,25 @@ _PRICE_FIELD_TO_PROP: dict[str, str] = {
 
 
 def price_technical_properties(
-    record: PriceTechnicalRecord, master_page_id: str | None = None
+    record: PriceTechnicalRecord,
+    master_page_id: str | None = None,
+    extra_raw_page_ids: Iterable[str] | None = None,
 ) -> dict:
-    """② 株価テクニカル。取得できなかった指標は空欄のまま (§3-1)。"""
+    """② 株価テクニカル。取得できなかった指標は空欄 (§3-1)。
+
+    extra_raw_page_ids: 価格原本に加えて紐付ける ⑤ 行 (例: バリュエーション原本)。
+    """
     props = {
         S.PRICE_PROP_CODE: title_prop(record.code),
         **provenance_properties(record.provenance),
     }
     for field_name, prop_name in _PRICE_FIELD_TO_PROP.items():
         _set(props, prop_name, number_prop, getattr(record, field_name))
+    extra_ids = [rid for rid in (extra_raw_page_ids or []) if real_page_id(rid)]
+    if extra_ids:
+        existing = props.get(S.PROP_RAW_RELATION, {"relation": []})["relation"]
+        ids = [r["id"] for r in existing] + extra_ids
+        props[S.PROP_RAW_RELATION] = relation_prop(dict.fromkeys(ids))
     master_id = real_page_id(master_page_id)
     if master_id:
         props[S.PROP_MASTER_RELATION] = relation_prop([master_id])
@@ -335,6 +351,23 @@ def find_stock_master_page(client: NotionClient, settings: Settings, code: str) 
     return _find_page(client, settings.db_id("stock_master"), stock_master_filter(code))
 
 
+def load_stock_master_map(client: NotionClient, settings: Settings) -> dict[str, str]:
+    """① 全行の {銘柄コード: page_id} を一括取得する。
+
+    全銘柄ループでの find_stock_master_page (1req/銘柄) を置き換え、
+    §8.3 のレート試算 (②upsert=2req/銘柄) に収める。
+    """
+    pages = client.query_database(settings.db_id("stock_master"))
+    out: dict[str, str] = {}
+    for page in pages:
+        rich = page.get("properties", {}).get(S.MASTER_PROP_CODE, {}).get("rich_text", [])
+        if rich:
+            code = rich[0].get("plain_text", "").strip()
+            if code:
+                out[code] = page["id"]
+    return out
+
+
 def upsert_stock_master(
     client: NotionClient, settings: Settings, record: StockMasterRecord
 ) -> str:
@@ -352,13 +385,14 @@ def upsert_price_technical(
     settings: Settings,
     record: PriceTechnicalRecord,
     master_page_id: str | None = None,
+    extra_raw_page_ids: Iterable[str] | None = None,
 ) -> str:
     """② 株価テクニカルへ冪等 upsert (キー=銘柄コード title equals)。"""
     return _upsert(
         client,
         settings.db_id("prices"),
         price_technical_filter(record.code),
-        price_technical_properties(record, master_page_id),
+        price_technical_properties(record, master_page_id, extra_raw_page_ids),
     )
 
 

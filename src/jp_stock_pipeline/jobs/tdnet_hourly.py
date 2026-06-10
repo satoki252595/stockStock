@@ -12,7 +12,7 @@ import logging
 from datetime import date
 
 from ..collectors import tdnet_official_fallback, tdnet_yanoshin
-from ..convert import xbrl_to_csv
+from ..convert import convert_artifact, xbrl_to_csv
 from ..http import FetchError, fetch
 from ..licensing import source_license
 from ..models import DisclosureRecord, Provenance, RawArtifact, Source, now_jst
@@ -25,17 +25,37 @@ logger = logging.getLogger(__name__)
 
 JOB_NAME = "tdnet_hourly"
 
+# 繁忙日（決算集中日）は1日1000件超もあるため上限を大きく取り、
+# 上限到達時は公式ページ全件で補完する（無警告の取りこぼし防止）
+YANOSHIN_LIMIT = 1000
+
 
 def _collect(ctx: JobContext, target_date: date) -> list[tuple[RawArtifact, list[DisclosureRecord], dict[str, str]]]:
-    """一覧取得。やのしん → 失敗時は公式ページ (§11)。
+    """一覧取得。やのしん → 失敗時は公式ページ (§11)、上限到達時は公式で補完。
 
     返り値: [(原本, records, doc_id→XBRL URL), ...]（公式は1ページ=1原本 §5.1）
     """
     target = target_date.strftime("%Y%m%d")
     try:
-        artifact, records = tdnet_yanoshin.list_disclosures(ctx.settings, target)
+        artifact, records = tdnet_yanoshin.list_disclosures(
+            ctx.settings, target, limit=YANOSHIN_LIMIT
+        )
         payload = json.loads(artifact.local_path.read_bytes())
-        return [(artifact, records, tdnet_yanoshin.xbrl_url_map(payload))]
+        convert_artifact(artifact, "json")  # §5.2 ペア保存 (JSON→CSV+Parquet)
+        batches = [(artifact, records, tdnet_yanoshin.xbrl_url_map(payload))]
+        if len(records) >= YANOSHIN_LIMIT:
+            logger.warning(
+                "やのしん一覧が上限 %d 件に到達。公式TDnetページで補完する (§11)",
+                YANOSHIN_LIMIT,
+            )
+            seen = {r.doc_id for r in records}
+            for page_artifact, page_records in tdnet_official_fallback.fetch_list_pages(
+                ctx.settings, target_date
+            ):
+                extra = [r for r in page_records if r.doc_id not in seen]
+                seen |= {r.doc_id for r in extra}
+                batches.append((page_artifact, extra, {}))
+        return batches
     except (FetchError, ValueError) as exc:
         logger.warning("やのしんAPI失敗 → 公式TDnetページへフォールバック (§11): %s", exc)
         pages = tdnet_official_fallback.fetch_list_pages(ctx.settings, target_date)

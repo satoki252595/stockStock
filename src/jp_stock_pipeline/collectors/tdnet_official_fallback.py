@@ -161,6 +161,15 @@ def fetch_list_pages(
             break
         content = resp.content
         html_text = content.decode("utf-8")  # メタ宣言どおり UTF-8 を明示
+        # 構造検証 (CONTRACTS): 一覧テーブルが無い 200 応答 (メンテ/エラーページ)
+        # は原本保存しない。1ページ目なら一覧自体の取得不能として FetchError (§3)
+        if 'id="main-list-table"' not in html_text:
+            if page_no == 1:
+                raise FetchError(
+                    f"公式TDnet一覧に main-list-table が無い (エラーページ?): {url}"
+                )
+            logger.warning("ページ %d が一覧形式でない。ここまでで停止: %s", page_no, url)
+            break
         artifact = save_raw(
             content,
             source=Source.TDNET,

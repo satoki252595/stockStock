@@ -79,9 +79,12 @@ def _upload_single(client: NotionClient, path: Path) -> str:
         "POST", "file_uploads", json_body={"mode": "single_part", "filename": path.name}
     )
     upload_id = _created_upload_id(created, path)
-    with path.open("rb") as fp:
-        # multipart/form-data (requests の files= 経由)
-        client.raw_api("POST", f"file_uploads/{upload_id}/send", files={"file": (path.name, fp)})
+    # bytes で渡す: ファイルハンドルだと 429/5xx リトライ時に消費済みハンドルの
+    # 再送 = 空ボディ送信になるため (multipart/form-data, requests の files= 経由)
+    content = path.read_bytes()
+    client.raw_api(
+        "POST", f"file_uploads/{upload_id}/send", files={"file": (path.name, content)}
+    )
     return upload_id
 
 
