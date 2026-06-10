@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# 収集データ（原本は Notion ⑤ に保存。ローカルは作業領域）
+data/raw/
+data/export/
+
+# ローカル設定・資格情報
+.env
+db_ids.local.json
+
+# nix
+.direnv/
+result
