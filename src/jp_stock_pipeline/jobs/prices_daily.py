@@ -14,6 +14,7 @@ import logging
 import pandas as pd
 
 from ..collectors import edinet_codelist, stooq_prices, yfinance_prices
+from ..convert import attach_dataframe_parquet, convert_artifact
 from ..http import FetchError
 from ..licensing import inherit, source_license
 from ..models import (
@@ -27,7 +28,6 @@ from ..models import (
 from ..notion import file_upload, upsert
 from ..notion import schema as S
 from ..transform import technicals
-from ..transform.normalize import yf_info_to_valuation
 from .runner import JobContext, apply_limit, build_parser, main_exit, parse_codes_arg, run_job
 
 logger = logging.getLogger(__name__)
@@ -52,10 +52,15 @@ def resolve_codes(ctx: JobContext) -> list[str]:
             codes.append(rich[0].get("plain_text", "").strip())
     codes = [c for c in codes if c]
     if not codes:
-        # ① が未投入 / dry-run でトークン無しの場合はコードリストから直接 (実データ §3-2)
+        # ① が未投入 / dry-run でトークン無しの場合はコードリストから直接 (実データ §3-2)。
+        # この取得も1取得単位なので原本+変換版を ⑤ へ保存する (§5.1, §8.1-4)
         logger.info("① から銘柄を取得できないため EDINET コードリストから解決する")
         artifact = edinet_codelist.fetch_codelist(ctx.settings)
-        records = edinet_codelist.parse_codelist(artifact.local_path.read_bytes())
+        artifact = edinet_codelist.convert_codelist(artifact)
+        file_upload.upload_raw_artifact(ctx.client, ctx.settings, artifact)
+        records = edinet_codelist.parse_codelist(
+            artifact.local_path.read_bytes(), raw_page_id=artifact.notion_page_id
+        )
         codes = [r.code for r in records]
     return apply_limit(sorted(set(codes)), ctx.args.limit)
 
@@ -91,10 +96,12 @@ def _build_record(
     )
     record = PriceTechnicalRecord(code=code, provenance=prov, **tech)
     if valuation:
+        # fetch_valuation の出力キー (market_cap/per/pbr/dividend_yield) をそのまま使う。
+        # dividend_yield は yfinance 1.x 系で % 単位 (実フィクスチャで確認済み)
         record.per = valuation.get("per")
         record.pbr = valuation.get("pbr")
         record.market_cap = valuation.get("market_cap")
-        record.dividend_yield_pct = valuation.get("dividend_yield_pct")
+        record.dividend_yield_pct = valuation.get("dividend_yield")
     return record
 
 
@@ -115,22 +122,32 @@ def execute(ctx: JobContext) -> None:
     for code in missing:
         try:
             artifact, df = stooq_prices.fetch_daily(ctx.settings, code)
+            attach_dataframe_parquet(artifact, df)  # 株価履歴の型付き変換版 (§5.2)
             file_upload.upload_raw_artifact(ctx.client, ctx.settings, artifact)
             stooq_results[code] = (artifact, df)
         except FetchError as exc:
             # 全ソース失敗 → 欠損として記録 (§3-2。前日値コピー等は絶対にしない)
             ctx.add_failure(code, f"yfinance/stooq 両方失敗: {exc}")
 
-    # バリュエーション (取れた銘柄のみ §3-1)
+    # バリュエーション (取れた銘柄のみ §3-1)。取得単位の原本を ⑤ へ保存してから
+    # ② へ書く (§8.1-4)。アップロード失敗時はバリュエーション値を書かない
     valuations: dict[str, dict] = {}
+    valuation_artifact: RawArtifact | None = None
     if not getattr(ctx.args, "skip_valuation", False) and frames:
         try:
             raw_vals = yfinance_prices.fetch_valuation(ctx.settings, sorted(frames))
-            valuations = {c: yf_info_to_valuation(v) for c, v in raw_vals.items()}
-        except Exception as exc:
-            logger.warning("バリュエーション取得失敗 (②は価格系のみ更新): %s", exc)
+            if raw_vals:
+                valuation_artifact = yfinance_prices.save_valuation_raw(ctx.settings, raw_vals)
+                convert_artifact(valuation_artifact, "json")
+                file_upload.upload_raw_artifact(ctx.client, ctx.settings, valuation_artifact)
+                valuations = raw_vals
+        except (Exception, file_upload.RawUploadError) as exc:
+            valuations = {}
+            valuation_artifact = None
+            logger.warning("バリュエーション取得/原本UL失敗 (②は価格系のみ更新 §8.1-4): %s", exc)
 
-    # 5-6. テクニカル計算 → ② upsert
+    # 5-6. テクニカル計算 → ② upsert。①の relation は一括マップで解決 (§8.3 レート対策)
+    master_map = upsert.load_stock_master_map(ctx.client, ctx.settings)
     for code in codes:
         if code in frames:
             src, df, artifact = Source.YFINANCE, frames[code], yf_artifact
@@ -140,9 +157,16 @@ def execute(ctx: JobContext) -> None:
         else:
             continue  # failed_codes に記録済み
         try:
-            record = _build_record(code, df, src, artifact, valuations.get(code))
-            master_id = upsert.find_stock_master_page(ctx.client, ctx.settings, code)
-            upsert.upsert_price_technical(ctx.client, ctx.settings, record, master_id)
+            valuation = valuations.get(code)
+            record = _build_record(code, df, src, artifact, valuation)
+            extra_raw = (
+                [valuation_artifact.notion_page_id]
+                if valuation and valuation_artifact and valuation_artifact.notion_page_id
+                else None
+            )
+            upsert.upsert_price_technical(
+                ctx.client, ctx.settings, record, master_map.get(code), extra_raw
+            )
             ctx.add_success()
         except Exception as exc:
             ctx.add_failure(code, f"②upsert失敗: {exc}")

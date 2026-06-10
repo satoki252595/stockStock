@@ -166,6 +166,13 @@ def fetch_document(
             f"EDINET 書類取得エラーレスポンス: docID={doc_id} type={doc_type} "
             f"body={resp.content[:200]!r}"
         )
+    # マジックバイト検証 (CONTRACTS): 200 で返るエラー/メンテHTML等を原本化しない (§3)
+    magic = b"%PDF" if doc_type == 2 else b"PK\x03\x04"
+    if not resp.content.startswith(magic):
+        raise FetchError(
+            f"EDINET 書類本文が {ext} 形式でない (エラーページ?): "
+            f"docID={doc_id} type={doc_type} head={resp.content[:16]!r}"
+        )
 
     return save_raw(
         resp.content,

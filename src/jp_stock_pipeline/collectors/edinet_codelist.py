@@ -18,7 +18,7 @@ import zipfile
 from datetime import date
 
 from ..config import Settings
-from ..http import fetch
+from ..http import FetchError, fetch
 from ..licensing import LicenseTag
 from ..models import ConvertStatus, Provenance, RawArtifact, Source, StockMasterRecord, now_jst
 from ..rawstore import converted_filename, save_raw
@@ -62,6 +62,11 @@ def normalize_sec_code(sec_code: str | None) -> str | None:
 def fetch_codelist(settings: Settings) -> RawArtifact:
     """コードリスト zip を取得し、無加工で原本保存する (§8.1 step 1-2)。"""
     resp = fetch(CODELIST_URL)
+    # マジックバイト検証 (CONTRACTS): 200 で返るエラーページを正本の原本にしない (§3)
+    if not resp.content.startswith(b"PK\x03\x04"):
+        raise FetchError(
+            f"コードリスト応答が zip でない (エラーページ?): head={resp.content[:16]!r}"
+        )
     return save_raw(
         resp.content,
         source=Source.EDINET,

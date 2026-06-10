@@ -16,7 +16,7 @@ from ..collectors.edinet_codelist import normalize_sec_code
 from ..convert import json_to_parquet, xbrl_to_csv
 from ..http import FetchError
 from ..licensing import source_license
-from ..models import Provenance, RawArtifact, Source, now_jst
+from ..models import ConvertStatus, Provenance, RawArtifact, Source, now_jst
 from ..notion import file_upload, upsert
 from ..transform import normalize
 from .runner import JobContext, apply_limit, build_parser, main_exit, run_job
@@ -32,21 +32,32 @@ FINANCIAL_DOC_TYPES = frozenset({"120", "130", "140", "160"})
 def _fetch_financial_tidy(
     ctx: JobContext, doc_id: str, code: str, data_date: date | None
 ):
-    """type=5 CSV 優先 → 無ければ type=1 XBRL (§5.2)。(artifact, tidy) を返す。"""
+    """type=5 CSV 優先 → 無ければ type=1 XBRL (§5.2)。(artifact, tidy|None) を返す。
+
+    tidy 変換の失敗では原本を失わない: convert_status=失敗 を記録して
+    原本はそのまま ⑤ アップロードに進める (§5.2「変換失敗時も原本保存は成立」)。
+    """
     try:
         artifact = edinet.fetch_document(
             ctx.settings, doc_id, 5, code=code, data_date=data_date
         )
-        tidy = xbrl_to_csv.edinet_csv_zip_to_tidy(
-            artifact.local_path.read_bytes(), code, doc_id
-        )
-        return artifact, tidy
+        parser = xbrl_to_csv.edinet_csv_zip_to_tidy
     except FetchError:
         artifact = edinet.fetch_document(
             ctx.settings, doc_id, 1, code=code, data_date=data_date
         )
-        tidy = xbrl_to_csv.xbrl_zip_to_tidy(artifact.local_path.read_bytes(), code, doc_id)
-        return artifact, tidy
+        parser = xbrl_to_csv.xbrl_zip_to_tidy
+
+    tidy = None
+    try:
+        tidy = parser(artifact.local_path.read_bytes(), code, doc_id)
+        xbrl_to_csv.write_tidy(tidy, artifact)
+    except Exception:
+        logger.exception(
+            "tidy 変換失敗 (原本は保全し ⑤ へ。③ 反映はスキップ §5.2): doc_id=%s", doc_id
+        )
+        artifact.convert_status = ConvertStatus.FAILED
+    return artifact, tidy
 
 
 def _process_document(ctx: JobContext, doc: dict, list_page_id: str) -> None:
@@ -65,10 +76,9 @@ def _process_document(ctx: JobContext, doc: dict, list_page_id: str) -> None:
     tidy = None
     tidy_artifact: RawArtifact | None = None
 
-    # 財務系: CSV/XBRL → tidy 変換版付き原本を ⑤ へ
+    # 財務系: CSV/XBRL → tidy 変換版付き原本を ⑤ へ (変換失敗でも原本は上げる §5.2)
     if doc_type_code in FINANCIAL_DOC_TYPES:
         tidy_artifact, tidy = _fetch_financial_tidy(ctx, doc_id, code, data_date)
-        xbrl_to_csv.write_tidy(tidy, tidy_artifact)
         doc_raw_page = file_upload.upload_raw_artifact(ctx.client, ctx.settings, tidy_artifact)
 
     # PDF 原本 (§4 書類一覧の対象すべて)。失敗しても書類処理自体は継続

@@ -105,12 +105,29 @@ def to_csv_and_parquet(df: pd.DataFrame, artifact: RawArtifact) -> tuple[Path, P
     return csv_path, parquet_path
 
 
+def attach_dataframe_parquet(artifact: RawArtifact, df: pd.DataFrame) -> RawArtifact:
+    """型付き DataFrame を Parquet 変換版として原本に併置する (§5.2 株価履歴)。
+
+    変換失敗時も原本保存は成立したまま convert_status=失敗 を記録する。
+    """
+    try:
+        out = artifact.local_path.parent / converted_filename(artifact.filename, "parquet")
+        df.to_parquet(out, index=False)
+        artifact.converted_paths.append(out)
+        artifact.convert_status = ConvertStatus.DONE
+    except Exception:
+        logger.exception("Parquet 変換失敗 (原本保存は成立 §5.2): %s", artifact.filename)
+        artifact.convert_status = ConvertStatus.FAILED
+    return artifact
+
+
 def convert_artifact(artifact: RawArtifact, kind: str) -> RawArtifact:
     """非XBRL原本の変換版を生成する共通入口 (§5.2, §8.1 step 3)。
 
     Args:
         artifact: rawstore.save_raw が返した原本アーティファクト（保存済みであること）
-        kind: "json" / "pdf" / "xls"（.xls/.xlsx 共通。"xlsx" も受理）
+        kind: "json" / "jsonl"（改行区切りJSON。J-Quants原本等）/ "pdf" /
+            "xls"（.xls/.xlsx 共通。"xlsx" も受理）
 
     挙動:
     - 成功: 変換版を原本の隣に生成し artifact.converted_paths へ追加、
@@ -122,8 +139,8 @@ def convert_artifact(artifact: RawArtifact, kind: str) -> RawArtifact:
 
     未知の kind はプログラミングエラーとして ValueError を送出する（変換失敗とは扱わない）。
     """
-    if kind not in ("json", "pdf", "xls", "xlsx"):
-        raise ValueError(f"未対応の変換種別: {kind!r} (json/pdf/xls/xlsx)")
+    if kind not in ("json", "jsonl", "pdf", "xls", "xlsx"):
+        raise ValueError(f"未対応の変換種別: {kind!r} (json/jsonl/pdf/xls/xlsx)")
 
     new_paths: list[Path] = []
     try:
@@ -131,6 +148,19 @@ def convert_artifact(artifact: RawArtifact, kind: str) -> RawArtifact:
 
         if kind == "json":
             df = json_records(raw)
+            csv_path, parquet_path = to_csv_and_parquet(df, artifact)
+            new_paths.extend([csv_path, parquet_path])
+
+        elif kind == "jsonl":
+            # 1行=1JSON (J-Quants のページ毎レスポンス等)。各行を正規化して連結
+            frames = [
+                json_records(line)
+                for line in raw.splitlines()
+                if line.strip()
+            ]
+            if not frames:
+                raise ValueError("空の JSONL")
+            df = pd.concat(frames, ignore_index=True)
             csv_path, parquet_path = to_csv_and_parquet(df, artifact)
             new_paths.extend([csv_path, parquet_path])
 

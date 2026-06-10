@@ -65,6 +65,8 @@ def consolidated_from_context(context_ref: str) -> str:
     """
     if "NonConsolidatedMember" in context_ref:
         return "単体"
+    if "ConsolidatedMember" in context_ref:  # TDnet 短信サマリの明示メンバー
+        return "連結"
     if _DEFAULT_CONSOLIDATED_RE.match(context_ref):
         return "連結"
     return ""
@@ -164,21 +166,139 @@ def _facts_from_instance(xml_bytes: bytes, code: str, doc_id: str) -> list[dict[
     return rows
 
 
-def xbrl_zip_to_tidy(zip_bytes: bytes, code: str, doc_id: str) -> pd.DataFrame:
-    """EDINET type=1 zip 内の XBRL インスタンス文書 (*.xbrl) を tidy にする。
+# ------------------------------------------------------------------
+# インラインXBRL (*-ixbrl.htm。TDnet 短信 zip は .xbrl インスタンスを含まず
+# iXBRL のみ — 実フィクスチャ tanshin_xbrl_2751_20260610.zip で確認)
+# ------------------------------------------------------------------
 
-    zip 内の全 *.xbrl（XBRL/PublicDoc/ 配下等）を名前順にパースし連結する。
-    インスタンスが無い場合は空の DataFrame（列はスキーマどおり）を返す。
+# inline XBRL 名前空間: TDnet は 1.0 (2008)、EDINET 等は 1.1 (2013) — 両対応
+_IX_NAMESPACES = (
+    "http://www.xbrl.org/2008/inlineXBRL",
+    "http://www.xbrl.org/2013/inlineXBRL",
+)
+
+
+def _decode_ix_value(text: str, sign: str | None, scale: str | None) -> str:
+    """ix:nonFraction の表示文字列を XBRL ファクト値へ復号する。
+
+    inline XBRL 仕様の確定的復号（桁区切り除去 → ×10^scale → sign 適用）で
+    あり、推定・丸めではない (§3-4)。復号できない場合は空文字（欠損 §3-1）。
+    Decimal で計算し浮動小数の表現誤差を持ち込まない。
+    """
+    from decimal import Decimal, InvalidOperation
+
+    cleaned = text.strip().replace(",", "").replace("，", "")
+    if cleaned in ("", "-", "－", "―", "—"):
+        return ""
+    try:
+        value = Decimal(cleaned)
+    except InvalidOperation:
+        return ""
+    if scale:
+        try:
+            value = value.scaleb(int(scale))
+        except (ValueError, InvalidOperation):
+            return ""
+    if sign == "-":
+        value = -value
+    return format(value.normalize(), "f")
+
+
+def _facts_from_inline(html_bytes: bytes, code: str, doc_id: str) -> list[dict[str, str]]:
+    """1つのインラインXBRL文書 (ixbrl.htm) から全ファクトを tidy 行に展開する。
+
+    - context/unit は ix:header/ix:resources 内の xbrli 要素から収集
+    - ix:nonFraction は sign/scale を復号した数値文字列、ix:nonNumeric は
+      原文テキストをそのまま value にする
+    """
+    parser = etree.XMLParser(recover=True, huge_tree=True)
+    root = etree.fromstring(html_bytes, parser=parser)
+    if root is None:
+        return []
+    contexts = {
+        ctx.get("id"): _context_period(ctx)
+        for ctx in root.iter(f"{{{_XBRLI_NS}}}context")
+        if ctx.get("id")
+    }
+    units = {}
+    for unit in root.iter(f"{{{_XBRLI_NS}}}unit"):
+        if unit.get("id"):
+            measure = unit.findtext(f"{{{_XBRLI_NS}}}measure")
+            units[unit.get("id")] = _measure_local(measure or "")
+
+    rows: list[dict[str, str]] = []
+    fact_tags = [
+        (f"{{{ns}}}{local}", local == "nonFraction")
+        for ns in _IX_NAMESPACES
+        for local in ("nonFraction", "nonNumeric")
+    ]
+    for tag, is_numeric in fact_tags:
+        for el in root.iter(tag):
+            name = el.get("name")
+            context_ref = el.get("contextRef")
+            if not name or not context_ref:
+                continue
+            if el.get(f"{{{_XSI_NS}}}nil") == "true":
+                value = ""  # nil ファクトは欠損のまま (§3-1)
+            else:
+                text = "".join(el.itertext())
+                if is_numeric:
+                    value = _decode_ix_value(text, el.get("sign"), el.get("scale"))
+                else:
+                    value = text.strip()  # 原文そのまま (§5.2)
+            start, end, instant = contexts.get(context_ref, ("", "", ""))
+            unit_ref = el.get("unitRef")
+            rows.append(
+                {
+                    "code": code,
+                    "doc_id": doc_id,
+                    "element": name,
+                    "context_ref": context_ref,
+                    "period_start": start,
+                    "period_end": end,
+                    "instant_date": instant,
+                    "consolidated": consolidated_from_context(context_ref),
+                    "unit": units.get(unit_ref, "") if unit_ref else "",
+                    "value": value,
+                }
+            )
+    return rows
+
+
+def _context_period(ctx: etree._Element) -> tuple[str, str, str]:
+    period = ctx.find(f"{{{_XBRLI_NS}}}period")
+    if period is None:
+        return ("", "", "")
+    return (
+        (period.findtext(f"{{{_XBRLI_NS}}}startDate") or "").strip(),
+        (period.findtext(f"{{{_XBRLI_NS}}}endDate") or "").strip(),
+        (period.findtext(f"{{{_XBRLI_NS}}}instant") or "").strip(),
+    )
+
+
+def xbrl_zip_to_tidy(zip_bytes: bytes, code: str, doc_id: str) -> pd.DataFrame:
+    """XBRL zip (EDINET type=1 / TDnet 短信) を tidy にする。
+
+    - zip 内の全 *.xbrl（XBRL/PublicDoc/ 配下等）を名前順にパースし連結する
+    - *.xbrl インスタンスが1つも無い場合（TDnet 短信 zip は iXBRL のみ）は
+      *-ixbrl.htm をインラインXBRLとしてパースする
+    - どちらも無ければ空の DataFrame（列はスキーマどおり）を返す
     """
     rows: list[dict[str, str]] = []
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        for name in sorted(zf.namelist()):
-            if not name.lower().endswith(".xbrl"):
-                continue
+        names = sorted(zf.namelist())
+        instance_names = [n for n in names if n.lower().endswith(".xbrl")]
+        for name in instance_names:
             try:
                 rows.extend(_facts_from_instance(zf.read(name), code, doc_id))
             except etree.XMLSyntaxError:
                 logger.exception("XBRL インスタンスのパース失敗（スキップ）: %s", name)
+        if not instance_names:
+            for name in (n for n in names if n.lower().endswith("-ixbrl.htm")):
+                try:
+                    rows.extend(_facts_from_inline(zf.read(name), code, doc_id))
+                except Exception:
+                    logger.exception("インラインXBRL のパース失敗（スキップ）: %s", name)
     return _as_tidy_frame(rows)
 
 

@@ -11,9 +11,18 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta
 
-from ..collectors import jquants
+import pandas as pd
+
+from ..collectors import jquants, yfinance_prices
+from ..convert import convert_artifact
 from ..licensing import source_license
-from ..models import FinancialSummaryRecord, Provenance, Source, now_jst
+from ..models import (
+    FinancialSummaryRecord,
+    PriceTechnicalRecord,
+    Provenance,
+    Source,
+    now_jst,
+)
 from ..notion import file_upload, upsert
 from ..notion import schema as S
 from ..notion.client import NotionClient
@@ -140,33 +149,64 @@ def statement_to_record(row: dict, raw_page_id: str | None) -> FinancialSummaryR
     )
 
 
+def _same_date_records(
+    ctx: JobContext, codes: list[str], target: date
+) -> list["PriceTechnicalRecord"]:
+    """突合の自側値: 対象日(12週前)の終値を実データで再取得して組む (§3-5)。
+
+    ② は「最新スナップショット」しか持たないため、対象日と同一基準日の値は
+    価格履歴の実取得で得る。未調整終値同士 (yfinance auto_adjust=False の Close
+    vs J-Quants の Close) を比較する。対象日の行が無い銘柄は比較しない
+    （実在しない日付×値の組を作らない §3-3）。
+    """
+    if not codes:
+        return []
+    hist_artifact, frames, missing = yfinance_prices.fetch_daily_batch(
+        ctx.settings, codes, period="6mo"
+    )
+    file_upload.upload_raw_artifact(ctx.client, ctx.settings, hist_artifact)
+    if missing:
+        logger.info("突合用履歴を取得できない銘柄 %d 件は比較対象外 (§3-1)", len(missing))
+    records: list[PriceTechnicalRecord] = []
+    for code, df in frames.items():
+        cols = {str(c).lower(): c for c in df.columns}
+        date_col, close_col = cols.get("date"), cols.get("close")
+        if date_col is None or close_col is None:
+            continue
+        rows = df[pd.to_datetime(df[date_col]).dt.date == target]
+        if rows.empty or pd.isna(rows.iloc[-1][close_col]):
+            continue
+        records.append(
+            PriceTechnicalRecord(
+                code=code,
+                close=float(rows.iloc[-1][close_col]),
+                provenance=Provenance(
+                    source=Source.YFINANCE,
+                    license_tag=source_license(Source.YFINANCE),
+                    data_date=target,
+                    fetched_at=now_jst(),
+                    raw_page_id=hist_artifact.notion_page_id,
+                ),
+            )
+        )
+    return records
+
+
 def execute(ctx: JobContext) -> None:
     target = ctx.args.date or default_target_date()
     client_jq = jquants.JQuantsClient(ctx.settings)
 
     # --- 突合検証 (§3-5) ---
     artifact, jq_df = jquants.daily_quotes(ctx.settings, target_date=target, client=client_jq)
+    convert_artifact(artifact, "jsonl")
     file_upload.upload_raw_artifact(ctx.client, ctx.settings, artifact)
 
     snapshot = load_price_snapshot(ctx.client, ctx.settings)
     page_by_code = {code: page_id for page_id, code, _close in snapshot}
-    records = []
-    for _page_id, code, close in snapshot:
-        from ..models import PriceTechnicalRecord  # 局所 import (突合専用の軽量利用)
-
-        records.append(
-            PriceTechnicalRecord(
-                code=code,
-                close=close,
-                provenance=Provenance(
-                    source=Source.JQUANTS,
-                    license_tag=source_license(Source.JQUANTS),
-                    data_date=target,
-                    fetched_at=now_jst(),
-                ),
-            )
-        )
-    discrepancies = reconcile.reconcile_prices(jq_df, records)
+    codes = apply_limit(sorted(page_by_code), ctx.args.limit)
+    records = _same_date_records(ctx, codes, target)
+    # 未調整終値同士の同一日比較 (調整済 AdjustmentClose とは比較しない)
+    discrepancies = reconcile.reconcile_prices(jq_df, records, close_col="Close")
     logger.info("突合: %d 銘柄比較, 乖離 %d 件 (閾値 %.1f%%)",
                 len(records), len(discrepancies), reconcile.DEFAULT_THRESHOLD_PCT)
     for d in discrepancies:
@@ -192,6 +232,7 @@ def execute(ctx: JobContext) -> None:
     st_artifact, st_df = jquants.statements(
         ctx.settings, target_date=target, client=client_jq
     )
+    convert_artifact(st_artifact, "jsonl")
     st_page_id = file_upload.upload_raw_artifact(ctx.client, ctx.settings, st_artifact)
     rows = apply_limit(st_df.to_dict("records"), ctx.args.limit)
     for row in rows:

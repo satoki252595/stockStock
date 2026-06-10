@@ -109,22 +109,26 @@ _FORECAST_FIELDS: dict[str, str] = {
     "eps": "forecast_eps",
 }
 
-# 開示種別 (③ select) — tse-ed-t TypeOfCurrentPeriodDETAIL の値から導出
+# 開示種別 (③ select) — tse-ed-t TypeOfCurrentPeriodDETAIL / jpdei
+# TypeOfCurrentPeriodDEI (Q1/Q2/Q3/HY/FY) の値から導出
 PERIOD_TYPE_TO_DISCLOSURE: dict[str, str] = {
     "FY": "本決算",
     "1Q": "1Q",
     "2Q": "2Q",
     "HY": "2Q",
     "3Q": "3Q",
+    "Q1": "1Q",
+    "Q2": "2Q",
+    "Q3": "3Q",
 }
 
-# 会計基準 (AccountingStandardsDEI 等の値 → ③ select)
+# 会計基準 (AccountingStandardsDEI 等の値 → ③ select。schema.py の選択肢と一致させる)
 ACCOUNTING_STANDARD_MAP: dict[str, str] = {
     "Japan GAAP": "日本基準",
     "JapanGAAP": "日本基準",
     "IFRS": "IFRS",
-    "US GAAP": "米国基準",
-    "USGAAP": "米国基準",
+    "US GAAP": "US-GAAP",
+    "USGAAP": "US-GAAP",
 }
 
 
@@ -232,8 +236,18 @@ def derive_fiscal_period_end(tidy: pd.DataFrame) -> date | None:
 
 
 def derive_disclosure_type(tidy: pd.DataFrame) -> str | None:
-    """tse-ed-t TypeOfCurrentPeriodDETAIL (FY/1Q/2Q/3Q) → 本決算/1Q/2Q/3Q。"""
-    text = _pick_text(tidy, ("TypeOfCurrentPeriodDETAIL", "QuarterlyPeriod", "TypeOfCurrentPeriod"))
+    """開示種別の導出: tse-ed-t TypeOfCurrentPeriodDETAIL (FY/1Q/...) /
+    jpdei TypeOfCurrentPeriodDEI (Q1/Q2/Q3/HY/FY) / QuarterlyPeriodDEI (1/2/3)。"""
+    text = _pick_text(
+        tidy,
+        (
+            "TypeOfCurrentPeriodDETAIL",
+            "TypeOfCurrentPeriodDEI",
+            "QuarterlyPeriodDEI",
+            "QuarterlyPeriod",
+            "TypeOfCurrentPeriod",
+        ),
+    )
     if text is None:
         return None
     text = text.strip()

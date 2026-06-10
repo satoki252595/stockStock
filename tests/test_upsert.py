@@ -66,10 +66,10 @@ class TestProvenanceProperties:
         assert props[S.PROP_LICENSE_TAG]["select"]["name"] == LicenseTag.PERSONAL_ONLY.value
         assert props[S.PROP_QUALITY]["select"]["name"] == DataQuality.OK.value
 
-    def test_data_date_none_is_omitted(self):
-        """欠損は欠損のまま空欄 (§3-1 ダミー禁止)。"""
+    def test_data_date_none_is_explicit_clear(self):
+        """欠損は明示的な空値で送る (update 時の前回値残存防止 §3-1/§2.2)。"""
         props = upsert.provenance_properties(prov(data_date=None))
-        assert S.PROP_DATA_DATE not in props
+        assert props[S.PROP_DATA_DATE] == {"date": None}
 
     def test_raw_relation_set_for_real_page_id(self):
         props = upsert.provenance_properties(prov(raw_page_id="abc123"))
@@ -99,12 +99,13 @@ class TestProvenanceProperties:
 
 
 class TestStockMasterPayload:
-    def test_none_fields_omitted(self):
+    def test_none_fields_explicit_clear(self):
+        """None は明示クリア: update 時に前回値が残らない (§3-1)。"""
         rec = StockMasterRecord(code="7203", name="トヨタ自動車", provenance=prov())
         props = upsert.stock_master_properties(rec)
-        assert S.MASTER_PROP_MARKET not in props
-        assert S.MASTER_PROP_SECTOR33 not in props
-        assert S.MASTER_PROP_EDINET_CODE not in props
+        assert props[S.MASTER_PROP_MARKET] == {"select": None}
+        assert props[S.MASTER_PROP_SECTOR33] == {"select": None}
+        assert props[S.MASTER_PROP_EDINET_CODE] == {"rich_text": []}
 
     def test_full_payload(self):
         rec = StockMasterRecord(
@@ -128,8 +129,10 @@ class TestStockMasterPayload:
 
 
 class TestPriceTechnicalPayload:
-    def test_missing_indicators_omitted(self):
-        """取得できなかった指標は payload に含めない=空欄 (§3-1)。"""
+    def test_missing_indicators_explicit_clear(self):
+        """取得できなかった指標は {"number": None} で明示クリア (§3-1)。
+
+        例: stooq フォールバック行に前回 yfinance の PER が残存しない。"""
         rec = PriceTechnicalRecord(
             code="7203",
             provenance=prov(source=Source.YFINANCE, license_tag=LicenseTag.PERSONAL_ONLY),
@@ -137,9 +140,9 @@ class TestPriceTechnicalPayload:
         )
         props = upsert.price_technical_properties(rec)
         assert props[S.PRICE_PROP_CLOSE] == {"number": 3120.0}
-        assert S.PRICE_PROP_RSI14 not in props
-        assert S.PRICE_PROP_SMA200 not in props
-        assert S.PRICE_PROP_PER not in props
+        assert props[S.PRICE_PROP_RSI14] == {"number": None}
+        assert props[S.PRICE_PROP_SMA200] == {"number": None}
+        assert props[S.PRICE_PROP_PER] == {"number": None}
 
     def test_title_is_code(self):
         rec = PriceTechnicalRecord(code="7203", provenance=prov())
@@ -180,11 +183,14 @@ class TestFinancialSummaryPayload:
         assert props[S.FIN_PROP_PERIOD_END]["date"]["start"] == "2026-03-31"
         assert props[S.FIN_PROP_DISCLOSURE_TYPE]["select"]["name"] == "本決算"
 
-    def test_none_numbers_omitted(self):
+    def test_none_numbers_explicit_clear(self):
+        """§2.2 汚染防止: 別ソース更新時に前ソースの値 (例 J-Quants の予想値) が
+        commercial-ok 行に残存しないことの基盤 = 全マップ対象列の明示クリア。"""
         props = upsert.financial_summary_properties(self.make_record(net_sales=1000.0))
         assert props[S.FIN_PROP_NET_SALES] == {"number": 1000.0}
-        assert S.FIN_PROP_ROE not in props
-        assert S.FIN_PROP_CF_OPERATING not in props
+        assert props[S.FIN_PROP_ROE] == {"number": None}
+        assert props[S.FIN_PROP_CF_OPERATING] == {"number": None}
+        assert props[S.FIN_PROP_FC_NET_INCOME] == {"number": None}
 
 
 class TestFinancialSummaryFilter:
@@ -237,7 +243,7 @@ class TestDisclosurePayload:
         assert props[S.DISC_PROP_HAS_XBRL]["checkbox"] is True
         assert props[S.PROP_LICENSE_TAG]["select"]["name"] == "factual-cite"
 
-    def test_code_none_omitted(self):
+    def test_code_none_explicit_clear(self):
         rec = DisclosureRecord(
             doc_id="S100ABCD",
             title="全市場一括",
@@ -245,8 +251,8 @@ class TestDisclosurePayload:
             provenance=prov(),
         )
         props = upsert.disclosure_properties(rec)
-        assert S.DISC_PROP_CODE not in props
-        assert S.DISC_PROP_URL not in props
+        assert props[S.DISC_PROP_CODE] == {"rich_text": []}
+        assert props[S.DISC_PROP_URL] == {"url": None}
 
 
 class TestUpsertDryRunCreatePath:
@@ -339,12 +345,12 @@ class TestJobLog:
         with pytest.raises(ValueError):
             upsert.write_job_log(dry_client, settings, "x", "完了", 1, 0)
 
-    def test_no_failed_codes_omitted(self, dry_client):
+    def test_no_failed_codes_explicit_clear(self, dry_client):
         settings = make_settings()
         upsert.write_job_log(dry_client, settings, "master_sync", "成功", 3900, 0)
         (op,) = [o for o in dry_client.ops if o.op == "create_page"]
-        assert S.JOB_PROP_FAILED_CODES not in op.payload["properties"]
-        assert S.JOB_PROP_RUN_URL not in op.payload["properties"]
+        assert op.payload["properties"][S.JOB_PROP_FAILED_CODES] == {"rich_text": []}
+        assert op.payload["properties"][S.JOB_PROP_RUN_URL] == {"url": None}
 
 
 class TestExportRow:
