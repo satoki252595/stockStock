@@ -64,3 +64,22 @@ class TestSaveRaw:
         a2 = save_raw(b"date,close\n", **kwargs)
         assert a1.sha256 == a2.sha256
         assert a1.local_path == a2.local_path
+
+    def test_same_name_different_content_preserves_both(self, tmp_path):
+        """同日再取得で内容が変わった場合、旧原本を上書きしない (§5.1)。"""
+        kwargs = dict(
+            source=Source.TDNET,
+            datatype="tdnet_list",
+            scope="recent",
+            data_date=date(2026, 6, 10),
+            url="https://example.invalid/list",
+            ext="json",
+            license_tag=LicenseTag.FACTUAL_CITE,
+            base_dir=tmp_path,
+        )
+        a1 = save_raw(b'{"items": [1]}', **kwargs)
+        a2 = save_raw(b'{"items": [1, 2]}', **kwargs)
+        assert a1.local_path != a2.local_path
+        assert a1.local_path.read_bytes() == b'{"items": [1]}'  # 旧原本が残る
+        assert a2.local_path.read_bytes() == b'{"items": [1, 2]}'
+        assert a2.sha256[:8] in a2.local_path.name

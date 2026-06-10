@@ -155,6 +155,21 @@ def _unwrap_item(item: dict) -> dict:
     return inner if isinstance(inner, dict) else item
 
 
+def xbrl_url_map(payload: dict) -> dict[str, str]:
+    """payload から doc_id → XBRL zip 直URL の対応を作る（短信XBRL→③用 §8.2）。
+
+    url_xbrl が無い開示は含めない（欠損は欠損のまま §3-1）。
+    """
+    mapping: dict[str, str] = {}
+    for item in payload.get("items", []):
+        t = _unwrap_item(item)
+        doc_id = doc_id_from_document_url(t.get("document_url"))
+        url_xbrl = t.get("url_xbrl")
+        if doc_id and url_xbrl:
+            mapping[doc_id] = direct_document_url(str(url_xbrl))
+    return mapping
+
+
 def parse_list_payload(
     payload: dict,
     *,

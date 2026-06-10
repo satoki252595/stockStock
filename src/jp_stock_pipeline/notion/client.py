@@ -35,6 +35,15 @@ class NotionRequestError(RuntimeError):
     """リトライ後も失敗した Notion API 呼び出し。"""
 
 
+class _RetryableRawError(Exception):
+    """raw_api() の 429/5xx (requests.Response 由来)。Retry-After を保持する。"""
+
+    def __init__(self, status: int, headers):
+        super().__init__(f"Notion API HTTP {status}")
+        self.status = status
+        self.headers = headers
+
+
 @dataclass
 class RecordedOp:
     """dry-run 時に記録される書き込み操作。テスト検証にも使う。"""
@@ -110,7 +119,7 @@ class NotionClient:
                     last_exc = exc
                     continue
                 raise
-            except HTTPResponseError as exc:
+            except (HTTPResponseError, _RetryableRawError) as exc:
                 delay = _retry_after_seconds(exc, attempt)
                 logger.warning("Notion HTTP error (attempt %d) — %.1fs 待機: %s", attempt, delay, exc)
                 time.sleep(delay)
@@ -159,8 +168,7 @@ class NotionClient:
                 timeout=120,
             )
             if resp.status_code == 429 or resp.status_code >= 500:
-                err = HTTPResponseError(resp)
-                raise err
+                raise _RetryableRawError(resp.status_code, resp.headers)
             if resp.status_code >= 400:
                 raise NotionRequestError(f"Notion API {resp.status_code}: {resp.text[:500]}")
             return resp.json()

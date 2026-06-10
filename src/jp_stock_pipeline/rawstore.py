@@ -56,11 +56,16 @@ def save_raw(
 ) -> RawArtifact:
     """取得した生バイト列を無加工で保存し RawArtifact を返す (§8.1 step 2)。
 
-    同名ファイルが既に存在し SHA256 が一致する場合は上書きせずそのまま返す。
+    - 同名ファイルが既に存在し SHA256 が一致する場合は上書きせずそのまま返す
+    - 同名で内容が異なる場合（同日再取得 §5.1）は SHA256 先頭8桁を付与した
+      別名で保存し、旧原本の物理コピーを失わない（正本は ⑤ だがローカルも保全）
     """
     base_dir.mkdir(parents=True, exist_ok=True)
     digest = sha256_bytes(content)
     path = base_dir / raw_filename(source, datatype, scope, data_date, ext)
+    if path.exists() and sha256_bytes(path.read_bytes()) != digest:
+        stem, dot, suffix = path.name.rpartition(".")
+        path = base_dir / f"{stem}_{digest[:8]}{dot}{suffix}"
     if not (path.exists() and sha256_bytes(path.read_bytes()) == digest):
         path.write_bytes(content)
     return RawArtifact(

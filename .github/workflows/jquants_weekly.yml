@@ -1,0 +1,39 @@
+# 土曜 9:00 JST (DESIGN.md §8.2)。cron は UTC 表記
+name: jquants_weekly
+
+on:
+  schedule:
+    - cron: "0 0 * * 6"
+  workflow_dispatch:
+
+concurrency:
+  group: jquants_weekly
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Sync dependencies
+        run: nix develop -c uv sync
+      - name: Run jquants_weekly
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
+          JQUANTS_MAIL_ADDRESS: ${{ secrets.JQUANTS_MAIL_ADDRESS }}
+          JQUANTS_PASSWORD: ${{ secrets.JQUANTS_PASSWORD }}
+          NOTION_DB_STOCK_MASTER: ${{ secrets.NOTION_DB_STOCK_MASTER }}
+          NOTION_DB_PRICES: ${{ secrets.NOTION_DB_PRICES }}
+          NOTION_DB_FINANCIALS: ${{ secrets.NOTION_DB_FINANCIALS }}
+          NOTION_DB_DISCLOSURES: ${{ secrets.NOTION_DB_DISCLOSURES }}
+          NOTION_DB_RAW_FILES: ${{ secrets.NOTION_DB_RAW_FILES }}
+          NOTION_DB_EXPORTS: ${{ secrets.NOTION_DB_EXPORTS }}
+          NOTION_DB_JOB_LOG: ${{ secrets.NOTION_DB_JOB_LOG }}
+        run: nix develop -c uv run python -m jp_stock_pipeline.jobs.jquants_weekly
