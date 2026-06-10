@@ -39,6 +39,13 @@ DB論理キー（`Settings.db_id()` / schema.py / upsert.py で共通）:
 | F: transform | `transform/technicals.py`, `transform/normalize.py`, `transform/reconcile.py`, `scripts/capture_transform_fixtures.py`, `tests/test_technicals.py`, `tests/test_normalize.py`, `tests/test_reconcile.py`, `tests/fixtures/transform/` |
 | G: ジョブ+CI | `jobs/*.py`, `.github/workflows/*.yml`, `tests/test_jobs*.py`（A〜F完了後に実装） |
 
+## 注意: HTTP 200 のエラーレスポンス
+
+`http.fetch()` は HTTP 200 で返る本文の真偽判定をしない（docstring 通り）。
+実在の例: EDINET は 200 + `{"StatusCode":401}` JSON、stooq は 200 + ブラウザ検証
+HTML を返す。**全コレクターは本文の内容検証必須**（マジックバイト・JSON 構造・
+CSV ヘッダ等）。エラー応答を原本として保存してはならない (§3)。
+
 ## XBRL tidy 形式（B が生成、F が消費）
 
 §5.2「財務項目をフラットな tidy 形式」の列定義（CSV/Parquet 共通・この順）:

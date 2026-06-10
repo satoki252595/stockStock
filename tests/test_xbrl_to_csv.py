@@ -12,7 +12,6 @@ import json
 from datetime import date
 
 import pandas as pd
-import pytest
 from conftest import fixture_path
 
 from jp_stock_pipeline.collectors.edinet_codelist import normalize_sec_code
