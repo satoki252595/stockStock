@@ -124,7 +124,7 @@ def execute(ctx: JobContext) -> None:
     batches = _collect(ctx, target_date)
 
     for artifact, records, xbrl_urls in batches:
-        # 原本必須: 失敗時はこの取得単位の構造化書き込みをしない (§8.1-4)
+        # 原本必須: Notion⑤/ローカル⑤ の両系統とも失敗時のみ構造化を書かない (§7.1/§3-3)
         raw_page_id = ctx.upload_raw(artifact)
 
         for record in apply_limit(records, ctx.args.limit):
