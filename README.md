@@ -36,9 +36,13 @@ uv run pytest        # テスト
 
 ## ローカル API（端末B・任意）
 
-Notion への格納と同時に、LAN 内の別端末（端末B）の PostgreSQL へ dual-write し、
+Notion への格納と同時に、別端末（端末B）の PostgreSQL へ dual-write し、
 FastAPI(REST + APIキー)で逐次アクセスできる。`LOCAL_DB_HOST` を設定すると有効化
 （未設定なら Notion のみ＝従来動作）。接続情報は全て `.env`（[.env.example](.env.example) 参照）。
+
+接続プロファイルは 2 系統で、収集ジョブの `--db-target` で選ぶ（**既定 cloud**）:
+- **cloud（既定）**: `LOCAL_DB_HOST` + `sslmode=require`。**クラウド(GitHub Actions 等)から端末B へ格納**。`require` は経路を暗号化するが**サーバ認証はしない**ため直公開は能動的 MITM に弱い → **VPN(Tailscale 等)経由を強く推奨**（VPN を使わないなら `sslmode=verify-full` + ルートCA を設定）。GitHub Actions は同名 Secrets を設定すれば cron 実行で自動 dual-write。
+- **lan**: `LOCAL_DB_LAN_HOST`(既定 localhost) + `sslmode=prefer`。同一 LAN で手動実行するとき `--db-target lan`。
 
 - **正本は Notion**。ローカルミラー失敗はジョブを止めず degrade（warning 記録）。
 - `②株価` はローカルでは `(code, data_date)` を主キーに**時系列を蓄積**（Notion は最新スナップショット）。
@@ -48,8 +52,9 @@ FastAPI(REST + APIキー)で逐次アクセスできる。`LOCAL_DB_HOST` を設
 # 端末B: PostgreSQL に DB/ユーザーを用意（テーブルは初回ジョブ実行時に自動作成）
 createuser jp_stock --pwprompt && createdb -O jp_stock jp_stock
 
-# 端末A: .env に LOCAL_DB_* を設定して通常どおりジョブを実行（Notion と同時にミラー）
-nix develop -c uv run python -m jp_stock_pipeline.jobs.prices_daily
+# 端末A: クラウド(GitHub Secrets)or .env に LOCAL_DB_* を設定してジョブ実行（Notion と同時ミラー）
+nix develop -c uv run python -m jp_stock_pipeline.jobs.prices_daily                  # cloud（既定）
+nix develop -c uv run python -m jp_stock_pipeline.jobs.prices_daily --db-target lan  # 同一LAN
 
 # 端末B: API を起動（X-API-Key 認証は LOCAL_API_KEY）
 nix develop -c uv run uvicorn jp_stock_pipeline.local_store.api:app --host 0.0.0.0 --port 8000

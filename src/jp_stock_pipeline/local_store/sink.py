@@ -35,11 +35,11 @@ class LocalStore:
         self._conn = conn
 
     @classmethod
-    def connect(cls, settings: LocalStoreSettings) -> LocalStore:
+    def connect(cls, settings: LocalStoreSettings, target: str = "cloud") -> LocalStore:
         import psycopg
 
         conn = psycopg.connect(
-            **settings.connect_kwargs(),
+            **settings.connect_kwargs(target),
             connect_timeout=_CONNECT_TIMEOUT_SECS,
             autocommit=True,
         )
@@ -113,15 +113,19 @@ class LocalStore:
             logger.debug("LocalStore close 失敗（無視）", exc_info=True)
 
 
-def connect_local_store(settings: LocalStoreSettings) -> LocalStore | None:
+def connect_local_store(
+    settings: LocalStoreSettings, target: str = "cloud"
+) -> LocalStore | None:
     """接続情報があれば LocalStore を返す。未設定/接続失敗なら None。
 
-    接続失敗でジョブを落とさない（Notion が正本。ローカルは可用性ベストエフォート）。
+    target=cloud(既定) はクラウド経由（LOCAL_DB_HOST + TLS require）、
+    target=lan は同一LAN（LOCAL_DB_LAN_HOST + prefer）。接続失敗でジョブを落とさない
+    （Notion が正本。ローカルは可用性ベストエフォート）。
     """
-    if not settings.enabled:
+    if not settings.enabled(target):
         return None
     try:
-        return LocalStore.connect(settings)
+        return LocalStore.connect(settings, target)
     except Exception as exc:  # noqa: BLE001 - 到達不能でも Notion 収集は継続する
         logger.error("ローカル PostgreSQL 接続失敗（Notion のみで継続）: %s", exc)
         return None

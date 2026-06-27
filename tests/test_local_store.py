@@ -345,3 +345,68 @@ class TestJobContextMirror:
         ctx = _ctx(_Bad())
         ctx.mirror(_raw())  # Notion 正本は別。ミラー失敗で例外を投げない
         assert ctx.mirror_failed == 1
+
+
+# --- 接続プロファイル cloud/lan と --db-target -------------------------------
+
+
+class TestConnectionProfiles:
+    def _settings(self, **kw):
+        from jp_stock_pipeline.config import LocalStoreSettings
+
+        base = dict(
+            host="cloud.example", port=5432, dbname="jp_stock", user="u",
+            password="p w0rd", api_key=None, lan_host="192.168.1.50",
+            sslmode="require", lan_sslmode="prefer",
+        )
+        base.update(kw)
+        return LocalStoreSettings(**base)
+
+    def test_cloud_profile_uses_host_and_require(self):
+        kw = self._settings().connect_kwargs("cloud")
+        assert kw["host"] == "cloud.example"
+        assert kw["sslmode"] == "require"
+        # 空白入りパスワードも keyword 引数なので安全に渡る
+        assert kw["password"] == "p w0rd"
+
+    def test_lan_profile_uses_lan_host_and_prefer(self):
+        kw = self._settings().connect_kwargs("lan")
+        assert kw["host"] == "192.168.1.50"
+        assert kw["sslmode"] == "prefer"
+
+    def test_default_target_is_cloud(self):
+        assert self._settings().connect_kwargs()["host"] == "cloud.example"
+
+    def test_enabled_per_target(self):
+        s = self._settings(host=None)  # cloud host 無し / lan_host 明示あり
+        assert s.enabled("cloud") is False
+        assert s.enabled("lan") is True
+        # lan_host 未設定なら lan も無効（localhost への誤ミラーを防ぐ）
+        assert self._settings(host=None, lan_host=None).enabled("lan") is False
+
+    def test_load_settings_reads_both_profiles(self):
+        from jp_stock_pipeline.config import load_settings
+
+        env = {
+            "LOCAL_DB_HOST": "cloud.h", "LOCAL_DB_LAN_HOST": "10.0.0.5",
+            "LOCAL_DB_SSLMODE": "disable", "LOCAL_DB_PASSWORD": "pw",
+        }
+        s = load_settings(env=env).local_store
+        assert s.host == "cloud.h"
+        assert s.lan_host == "10.0.0.5"
+        assert s.sslmode == "disable"  # VPN 経由などで TLS 不要時に上書き可
+
+    def test_lan_unset_is_none_but_api_falls_back_localhost(self):
+        from jp_stock_pipeline.config import load_settings
+
+        s = load_settings(env={"LOCAL_DB_HOST": "x"}).local_store
+        assert s.lan_host is None              # 未設定なら None（dual-write lan は無効）
+        assert s.enabled("lan") is False
+        # API(端末B 内)の自DB接続のみ localhost に補完される
+        assert s.connect_kwargs("lan")["host"] == "localhost"
+
+    def test_build_parser_db_target(self):
+        from jp_stock_pipeline.jobs.runner import build_parser
+
+        assert build_parser("x").parse_args([]).db_target == "cloud"
+        assert build_parser("x").parse_args(["--db-target", "lan"]).db_target == "lan"
