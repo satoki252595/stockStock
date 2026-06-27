@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 JOB_NAME = "master_sync"
 
+# 上場廃止検知の安全弁: 既存①に対しコードリストが極端に縮んだ取得は異常とみなし、
+# 一括上場廃止を防ぐ (§ Phase3 blast-radius)。取得コード数が既存の50%未満なら中止。
+MIN_CODELIST_COVERAGE = 0.5
+
 
 def execute(ctx: JobContext) -> None:
     # 1-3. Fetch / Save raw / Convert
@@ -26,20 +30,59 @@ def execute(ctx: JobContext) -> None:
     #    ジョブ失敗となる（構造化書き込みはこの後なので一切行われない §8.1-4）
     raw_page_id = file_upload.upload_raw_artifact(ctx.client, ctx.settings, artifact)
 
-    # 5. Transform
+    # 5. Transform（全件。上場廃止検知のため limit 前の全コードを保持）
     records = edinet_codelist.parse_codelist(
         artifact.local_path.read_bytes(), raw_page_id=raw_page_id
     )
-    records = apply_limit(records, ctx.args.limit)
-    logger.info("コードリスト: %d 銘柄を ① へ upsert", len(records))
+    fetched_codes = {r.code for r in records}
+    upsert_records = apply_limit(records, ctx.args.limit)
+    logger.info("コードリスト: %d 銘柄を ① へ upsert", len(upsert_records))
 
-    # 6. Upsert (冪等キー=銘柄コード)
-    for record in records:
+    # 6. Upsert (冪等キー=銘柄コード)。状態/上場日/上場廃止日 は開示・消失が所有する
+    #    ため codelist 同期では書かない (include_lifecycle=False § Phase3 二重所有回避)。
+    for record in upsert_records:
         try:
-            upsert.upsert_stock_master(ctx.client, ctx.settings, record)
+            upsert.upsert_stock_master(
+                ctx.client, ctx.settings, record, include_lifecycle=False
+            )
             ctx.add_success()
         except Exception as exc:
             ctx.add_failure(record.code, f"①upsert失敗: {exc}")
+
+    # 7. 上場廃止検知 (§ Phase3): コードリストから消えた銘柄を listed=False/上場廃止 へ。
+    #    --limit 指定時は部分取得のため誤判定回避でスキップする。
+    if ctx.args.limit:
+        logger.info("--limit 指定のため上場廃止検知はスキップ (部分取得 § Phase3)")
+        return
+    _detect_delistings(ctx, fetched_codes)
+
+
+def _detect_delistings(ctx: JobContext, fetched_codes: set[str]) -> None:
+    """① にあってコードリストから消えた銘柄を上場廃止扱いにする (§ Phase3)。
+
+    EDINET 上場区分が非上場へ変わった信号。日付は推定せず listed/状態 のみ更新。
+    再上場時は次回 upsert が自己修復する。dry-run は ① クエリが空のため no-op。
+    """
+    existing = upsert.load_stock_master_map(ctx.client, ctx.settings)  # {code: page_id}
+    # 安全弁: 取得コードが既存に対し極端に少ない＝異常取得とみなし一括廃止を防ぐ。
+    # 1件でも誤って全銘柄を listed=False にすると prices_daily が全停止するため (§3-2)。
+    if existing and len(fetched_codes) < MIN_CODELIST_COVERAGE * len(existing):
+        ctx.add_failure(
+            "codelist",
+            f"取得 {len(fetched_codes)} 件が既存 {len(existing)} 件の "
+            f"{MIN_CODELIST_COVERAGE:.0%} 未満。異常取得とみなし上場廃止検知を中止 (§ Phase3)",
+        )
+        return
+    absent = [(code, pid) for code, pid in existing.items() if code not in fetched_codes]
+    if not absent:
+        return
+    logger.warning("コードリストから消えた %d 銘柄を上場廃止扱いにする (§ Phase3)", len(absent))
+    for code, page_id in absent:
+        try:
+            upsert.mark_master_absent_from_codelist(ctx.client, ctx.settings, page_id)
+            ctx.add_success()
+        except Exception as exc:
+            ctx.add_failure(code, f"上場廃止マーク失敗: {exc}")
 
 
 def main(argv: list[str] | None = None, *, env: dict[str, str] | None = None) -> int:

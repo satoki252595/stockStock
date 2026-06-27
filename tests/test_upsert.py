@@ -127,6 +127,23 @@ class TestStockMasterPayload:
         assert props[S.PROP_SOURCE]["select"]["name"] == "EDINET"
         assert props[S.PROP_RAW_RELATION]["relation"] == [{"id": "raw-page-id-123"}]
 
+    def test_lifecycle_fields(self):
+        """状態/上場日/上場廃止日 (§ Phase3)。未設定は明示クリア (§3-1)。"""
+        rec = StockMasterRecord(code="7203", name="トヨタ自動車", provenance=prov())
+        props = upsert.stock_master_properties(rec)
+        assert props[S.MASTER_PROP_STATUS] == {"select": None}
+        assert props[S.MASTER_PROP_LISTING_DATE] == {"date": None}
+        assert props[S.MASTER_PROP_DELISTING_DATE] == {"date": None}
+
+        rec2 = StockMasterRecord(
+            code="9999", name="廃止予定", provenance=prov(),
+            listed=False, status="上場廃止", delisting_date=date(2026, 7, 1),
+        )
+        props2 = upsert.stock_master_properties(rec2)
+        assert props2[S.MASTER_PROP_LISTED]["checkbox"] is False
+        assert props2[S.MASTER_PROP_STATUS]["select"]["name"] == "上場廃止"
+        assert props2[S.MASTER_PROP_DELISTING_DATE]["date"]["start"] == "2026-07-01"
+
 
 class TestPriceTechnicalPayload:
     def test_missing_indicators_explicit_clear(self):
@@ -184,7 +201,7 @@ class TestFinancialSummaryPayload:
         assert props[S.FIN_PROP_DISCLOSURE_TYPE]["select"]["name"] == "本決算"
 
     def test_none_numbers_explicit_clear(self):
-        """§2.2 汚染防止: 別ソース更新時に前ソースの値 (例 J-Quants の予想値) が
+        """§2.2 汚染防止: 別ソース更新時に前ソースの値 (例 別ソースの予想値) が
         commercial-ok 行に残存しないことの基盤 = 全マップ対象列の明示クリア。"""
         props = upsert.financial_summary_properties(self.make_record(net_sales=1000.0))
         assert props[S.FIN_PROP_NET_SALES] == {"number": 1000.0}
@@ -253,6 +270,107 @@ class TestDisclosurePayload:
         props = upsert.disclosure_properties(rec)
         assert props[S.DISC_PROP_CODE] == {"rich_text": []}
         assert props[S.DISC_PROP_URL] == {"url": None}
+        # コーポレートアクション属性は無ければ明示クリア (§3-1)
+        assert props[S.DISC_PROP_SPLIT_RATIO] == {"rich_text": []}
+        assert props[S.DISC_PROP_SPLIT_FACTOR] == {"number": None}
+        assert props[S.DISC_PROP_EFFECTIVE_DATE] == {"date": None}
+
+    def test_split_attributes(self):
+        """分割開示は比率/係数/効力発生日を構造化保持する (§ Phase2/4)。"""
+        rec = DisclosureRecord(
+            doc_id="d1",
+            title="株式分割（1株を3株に分割）に関するお知らせ",
+            disclosed_at=datetime(2026, 5, 8, tzinfo=JST),
+            provenance=prov(source=Source.TDNET, license_tag=LicenseTag.FACTUAL_CITE),
+            code="7203",
+            doc_type="株式分割",
+            split_ratio="1:3",
+            split_factor=3.0,
+            effective_date=date(2026, 7, 1),
+        )
+        props = upsert.disclosure_properties(rec)
+        assert props[S.DISC_PROP_SPLIT_RATIO]["rich_text"][0]["text"]["content"] == "1:3"
+        assert props[S.DISC_PROP_SPLIT_FACTOR] == {"number": 3.0}
+        assert props[S.DISC_PROP_EFFECTIVE_DATE]["date"]["start"] == "2026-07-01"
+
+
+class TestLifecycleUpdates:
+    """① ライフサイクル更新 (§ Phase3): 上場廃止検知 / 開示由来の状態反映。"""
+
+    def _updates(self, dry_client):
+        return [o for o in dry_client.ops if o.op == "update_page"]
+
+    def test_mark_absent_from_codelist(self, dry_client):
+        upsert.mark_master_absent_from_codelist(dry_client, make_settings(), "master-7203")
+        (op,) = self._updates(dry_client)
+        assert op.payload["page_id"] == "master-7203"
+        props = op.payload["properties"]
+        assert props[S.MASTER_PROP_LISTED]["checkbox"] is False
+        assert props[S.MASTER_PROP_STATUS]["select"]["name"] == "上場廃止"
+
+    def test_apply_lifecycle_delisting(self, dry_client, monkeypatch):
+        monkeypatch.setattr(dry_client, "query_database", lambda *a, **k: [{"id": "m-7203"}])
+        rec = DisclosureRecord(
+            doc_id="d1", title="上場廃止に関するお知らせ",
+            disclosed_at=datetime(2026, 5, 8, tzinfo=JST),
+            provenance=prov(source=Source.TDNET, license_tag=LicenseTag.FACTUAL_CITE),
+            code="7203", doc_type="上場廃止", effective_date=date(2026, 8, 31),
+        )
+        page_id = upsert.apply_disclosure_lifecycle(dry_client, make_settings(), rec)
+        assert page_id == "m-7203"
+        props = self._updates(dry_client)[-1].payload["properties"]
+        assert props[S.MASTER_PROP_STATUS]["select"]["name"] == "上場廃止"
+        assert props[S.MASTER_PROP_DELISTING_DATE]["date"]["start"] == "2026-08-31"
+        # 発表時点では listed は触らない（効力発生まで取得継続。停止は消失検知が担う §3-1）
+        assert S.MASTER_PROP_LISTED not in props
+
+    def test_apply_lifecycle_new_listing(self, dry_client, monkeypatch):
+        monkeypatch.setattr(dry_client, "query_database", lambda *a, **k: [{"id": "m-300A"}])
+        rec = DisclosureRecord(
+            doc_id="d2", title="新規上場に関するお知らせ",
+            disclosed_at=datetime(2026, 5, 8, tzinfo=JST),
+            provenance=prov(source=Source.TDNET, license_tag=LicenseTag.FACTUAL_CITE),
+            code="300A", doc_type="新規上場",
+        )
+        upsert.apply_disclosure_lifecycle(dry_client, make_settings(), rec)
+        props = self._updates(dry_client)[-1].payload["properties"]
+        assert props[S.MASTER_PROP_STATUS]["select"]["name"] == "上場"
+        # 効力発生日不明なら上場日は明示クリア (§3-1。発表日を流用しない)
+        assert props[S.MASTER_PROP_LISTING_DATE] == {"date": None}
+        assert S.MASTER_PROP_LISTED not in props  # listed は codelist 所有
+
+    def test_codelist_sync_does_not_clobber_lifecycle(self):
+        """master_sync は include_lifecycle=False で 状態/日付 を payload に含めない
+        （開示・消失が設定した値を月次同期が消さない §Phase3 二重所有回避）。"""
+        rec = StockMasterRecord(code="7203", name="トヨタ自動車", provenance=prov())
+        props = upsert.stock_master_properties(rec, include_lifecycle=False)
+        assert S.MASTER_PROP_STATUS not in props
+        assert S.MASTER_PROP_LISTING_DATE not in props
+        assert S.MASTER_PROP_DELISTING_DATE not in props
+        # codelist 所有フィールドは常に書く
+        assert S.MASTER_PROP_LISTED in props
+        assert S.MASTER_PROP_NAME in props
+
+    def test_apply_lifecycle_master_not_found_noop(self, dry_client, monkeypatch):
+        monkeypatch.setattr(dry_client, "query_database", lambda *a, **k: [])
+        rec = DisclosureRecord(
+            doc_id="d3", title="上場廃止のお知らせ",
+            disclosed_at=datetime(2026, 5, 8, tzinfo=JST),
+            provenance=prov(source=Source.TDNET, license_tag=LicenseTag.FACTUAL_CITE),
+            code="7203", doc_type="上場廃止",
+        )
+        assert upsert.apply_disclosure_lifecycle(dry_client, make_settings(), rec) is None
+        assert self._updates(dry_client) == []
+
+    def test_apply_lifecycle_ignores_non_lifecycle_types(self, dry_client):
+        rec = DisclosureRecord(
+            doc_id="d4", title="決算短信",
+            disclosed_at=datetime(2026, 5, 8, tzinfo=JST),
+            provenance=prov(source=Source.TDNET, license_tag=LicenseTag.FACTUAL_CITE),
+            code="7203", doc_type="短信",
+        )
+        assert upsert.apply_disclosure_lifecycle(dry_client, make_settings(), rec) is None
+        assert self._updates(dry_client) == []
 
 
 class TestUpsertDryRunCreatePath:

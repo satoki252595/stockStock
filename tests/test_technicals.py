@@ -10,7 +10,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from jp_stock_pipeline.transform.technicals import compute_technicals
+from jp_stock_pipeline.transform.technicals import compute_technicals, has_probable_split
 
 from conftest import fixture_path
 
@@ -130,3 +130,29 @@ class TestOrderIndependence:
         out = compute_technicals(shuffled)
         assert out["sma25"] == pytest.approx(result["sma25"])
         assert out["close"] == pytest.approx(result["close"])
+
+
+class TestHasProbableSplit:
+    """分割/併合の不連続検出 (§ コーポレートアクション Phase1)。"""
+
+    def test_no_jump_is_false(self):
+        close = pd.Series([100.0 + i * 0.5 for i in range(300)])  # なだらか
+        assert has_probable_split(close) is False
+
+    def test_split_jump_detected(self):
+        # 直近で 3000 → 1000 (1→3分割相当, -67%)
+        close = pd.Series([3000.0] * 50 + [1000.0] * 50)
+        assert has_probable_split(close) is True
+
+    def test_reverse_split_jump_detected(self):
+        # 1000 → 3000 (3→1併合相当, +200%)
+        close = pd.Series([1000.0] * 50 + [3000.0] * 50)
+        assert has_probable_split(close) is True
+
+    def test_old_jump_outside_lookback_ignored(self):
+        # 先頭で分割、その後 300本平穏 → lookback(260)外なので現スナップショットに無影響
+        close = pd.Series([3000.0] * 10 + [1000.0] * 300)
+        assert has_probable_split(close, lookback=260) is False
+
+    def test_too_short_is_false(self):
+        assert has_probable_split(pd.Series([100.0])) is False

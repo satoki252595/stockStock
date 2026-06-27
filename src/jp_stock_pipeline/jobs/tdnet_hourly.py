@@ -128,6 +128,13 @@ def execute(ctx: JobContext) -> None:
                 ctx.add_failure(record.doc_id, f"④upsert失敗: {exc}")
                 continue
 
+            # 上場廃止/新規上場 開示は ① のライフサイクル状態へ反映 (§ Phase3)
+            if record.doc_type in upsert.LIFECYCLE_DOC_TYPES:
+                try:
+                    upsert.apply_disclosure_lifecycle(ctx.client, ctx.settings, record)
+                except Exception as exc:
+                    ctx.add_failure(record.doc_id, f"①ライフサイクル更新失敗: {exc}")
+
             if record.doc_type == "短信" and record.has_xbrl and record.doc_id in xbrl_urls:
                 try:
                     _process_financial_xbrl(ctx, record, xbrl_urls[record.doc_id])

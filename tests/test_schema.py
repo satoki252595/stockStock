@@ -155,6 +155,11 @@ class TestSpecificProperties:
         ):
             assert "select" in props[name]
         assert "checkbox" in props[schema.MASTER_PROP_LISTED]
+        # ライフサイクル (§ Phase3): 状態 select(選択肢一致) + 上場日/上場廃止日 date
+        status_opts = [o["name"] for o in props[schema.MASTER_PROP_STATUS]["select"]["options"]]
+        assert status_opts == list(schema.LISTING_STATUS_OPTIONS)
+        assert "date" in props[schema.MASTER_PROP_LISTING_DATE]
+        assert "date" in props[schema.MASTER_PROP_DELISTING_DATE]
 
     def test_prices_specific(self, ensured):
         client, _settings, _db_ids = ensured
@@ -186,6 +191,11 @@ class TestSpecificProperties:
         assert "checkbox" in props[schema.DISC_PROP_HAS_XBRL]
         opts = [o["name"] for o in props[schema.DISC_PROP_DOC_TYPE]["select"]["options"]]
         assert opts == list(schema.DOC_TYPES)
+        assert "株式分割" in opts and "上場廃止" in opts  # コーポレートアクション (§ Phase2)
+        # 分割比率(text)/分割係数(number)/効力発生日(date) (§ Phase2/4)
+        assert "rich_text" in props[schema.DISC_PROP_SPLIT_RATIO]
+        assert "number" in props[schema.DISC_PROP_SPLIT_FACTOR]
+        assert "date" in props[schema.DISC_PROP_EFFECTIVE_DATE]
 
     def test_raw_files_specific(self, ensured):
         client, _settings, _db_ids = ensured

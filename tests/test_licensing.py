@@ -44,7 +44,7 @@ class TestSourceLicense:
         assert source_license(Source.TDNET) is LicenseTag.FACTUAL_CITE
 
     @pytest.mark.parametrize(
-        "source", [Source.JQUANTS, Source.YFINANCE, Source.STOOQ, Source.JPX]
+        "source", [Source.YFINANCE, Source.STOOQ, Source.JPX]
     )
     def test_personal_only_sources(self, source):
         assert source_license(source) is LicenseTag.PERSONAL_ONLY

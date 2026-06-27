@@ -30,7 +30,7 @@
 |---|---|
 | 対象銘柄 | 全上場銘柄（約3,900社）、段階的取り込み |
 | 実行環境 | GitHub Actions（cron） |
-| API登録 | EDINET APIキー・J-Quants無料プラン等、登録系も利用 |
+| API登録 | EDINET APIキー（登録系）。株価は登録不要の yfinance/stooq |
 | 原本保存 | Notion File Upload API（**有料プラン**: 単純UL 20MB、マルチパート最大5GB） |
 | 商用利用 | 可能性あり → ライセンスタグで商用可データと私的利用限定データを厳格分離 |
 
@@ -45,7 +45,7 @@
 | **EDINET API v2** | ✅ **可** | ✅ **可** | 公共データ利用規約(PDL1.0)/政府標準利用規約準拠。営利目的含む二次利用が明文で可。**条件: 出典記載（「EDINET（金融庁）」等）+ 編集・加工した場合はその旨を明記** |
 | **TDnet開示資料（PDF/XBRL本体）** | ⚠️ 条件付き | ⚠️ 注意 | 開示資料の著作権は各上場会社。公衆縦覧目的の法定/適時開示文書であり、**事実データの抽出・出典明記のうえの利用は一般に可**だが、PDF原文の大量転載は避け**原文はTDnet/EDINETへのリンク+内部保管に留めるのが安全**。網羅的・商用の開示配信はJPXが有料「TDnet API」を販売しており、本格商用時はJPX契約を検討 |
 | **やのしんTDnet WEB-API** | ⚠️ 自己責任 | — | 個人運営の非公式API。明確な商用規約なし。**インデックス（一覧メタデータ）取得の手段**として利用し、依存しない設計（公式TDnetページパースのフォールバック必須）。商用本格運用時は公式有料APIへの移行パスを確保 |
-| **J-Quants API（無料/個人版）** | ❌ **不可** | ❌ **不可** | 規約上**登録者本人の私的利用に限定。商用利用・第三者提供・SaaS組込・再配布は禁止**（商用はJ-Quants Pro法人契約が必要）。→ **本基盤では「個人検証用トラック」に隔離。公開ページ・商用デリバラブルには一切含めない**。商用化確定時はPro契約 or 除外 |
+| **J-Quants API（無料/個人版）** | ❌ **不可** | ❌ **不可** | 規約上**登録者本人の私的利用に限定。商用利用・第三者提供・SaaS組込・再配布は禁止**（商用はJ-Quants Pro法人契約が必要）。→ **2026-06 に本実装から完全に除外（採用せず）**。担っていた①③財務はEDINET/TDnet（commercial-ok/factual-cite）が上位互換で代替、②終値の突合検証はstooqへ移管（§3-5, §8.2 `reconcile_weekly`）。商用化時はPro契約で再導入も可 |
 | **Yahoo Finance（yfinance）** | ❌ **不可** | ❌ **不可** | ToSが自動アクセス・商用利用・収益化を禁止（非公式ライブラリは内部APIを叩いている）。→ **同上、個人検証用トラックに隔離**。商用の直近株価は有料ベンダー（J-Quants Pro等）への移行パスを設計 |
 | **JPXサイト（data_j.xls、空売り・信用残統計）** | ❌ 原則不可 | ❌ 原則不可 | サイト利用規約で「**契約または許可なき商用目的のデータ収集・二次利用は不可**」。→ 商用トラックでは銘柄マスタを**EDINETコードリスト（金融庁公開・商用可）で代替**。JPX統計は個人検証用トラック扱い |
 | **stooq.com** | ⚠️ 不明確 | ❌ 避ける | ポーランドの無料サイトで明確な商用許諾なし。個人検証用フォールバックに限定 |
@@ -58,7 +58,7 @@
 |---|---|---|---|
 | `commercial-ok` | 商用・再配布可（出典記載条件） | EDINET、自前計算指標（commercial-okデータのみから算出したもの） | ✅ 公開可 |
 | `factual-cite` | 事実データの抽出利用可・原文は内部保管 | TDnet開示メタデータ+抽出事実 | ⚠️ メタデータ+リンクのみ公開 |
-| `personal-only` | 私的利用限定。公開・商用組込禁止 | J-Quants無料版、yfinance、stooq、JPXサイト統計 | ❌ 非公開ビューに隔離 |
+| `personal-only` | 私的利用限定。公開・商用組込禁止 | yfinance、stooq、JPXサイト統計 | ❌ 非公開ビューに隔離 |
 
 - **計算指標の汚染防止**: `personal-only`データを入力に含む計算結果も`personal-only`を継承する（最も厳しいタグを継承）
 - 公開ページ・エクスポートAPIは`commercial-ok`（+`factual-cite`のメタデータ）のみをフィルタして提供する実装とする
@@ -76,8 +76,17 @@
 2. **フォールバックは「実在する別ソースの実データ」のみ**。例: yfinance失敗→stooqの実データ。全ソース失敗→欠損として記録し、ジョブログに失敗を明記。決して前日値コピーや平均値埋めをしない
 3. **来歴（プロベナンス）の必須記録**: 全行に「ソース」「データ基準日」「取得日時」「原本ファイルへのリレーション」を持たせ、どの値も原本まで遡れる状態を保証する
 4. **加工の明示**: テクニカル指標等の自前計算値は「計算値（算式名・パラメータ）」であることをプロパティ名とデータカタログで明示（例: RSI14、SMA25乖離率%）。EDINET由来の編集・加工も明記（規約条件でもある）
-5. **整合性検証ジョブ**: J-Quants確定値（12週遅延）が届いた時点で直近ソースの値と突合し、乖離閾値（例: 終値±1%超）を超えた行に「要確認」フラグを自動付与。値の自動書き換えはせず、より信頼できるソース（調整済確定値）で更新する場合はソース名を更新する
+5. **整合性検証ジョブ**: 独立した第2ソース（stooq の実データ。J-Quants 廃止後の指定フォールバック §11）の同一基準日終値と②を突合し、乖離閾値（例: 終値±1%超）を超えた行に「要確認」フラグを自動付与。値の自動書き換えはせず、より信頼できるソースで更新する場合のみソース名を更新する。第2ソースが取得できない銘柄は「突合対象外」として正直に記録し、欠損を埋めない（§3-1）
 6. テスト用フィクスチャは実APIレスポンスの保存物のみ使用し、本番DBにはテストデータを書き込まない（dry-runモードで分離）
+
+### 3-7 コーポレートアクション（分割・併合・上場廃止・新規上場）
+
+株価・財務の連続性を壊すイベントを、**一次開示（TDnet/EDINET）から捕捉し人間判断に委ねる**方針で扱う（黙って価格を調整しない）。実装は段階的:
+
+- **Phase 1（正直化・実装済）**: yfinance は未調整終値のため、テクニカル窓（直近260営業日）に株式分割/併合とみられる単日不連続（既定 ±35%超）があれば ② を `要確認` にする（自動調整はしない §3-5。`transform/technicals.has_probable_split`）。新規上場等で履歴不足（SMA25 すら出ない）の行は `欠損あり` とし「正常」と偽らない。
+- **Phase 2（イベント台帳・実装済）**: TDnet タイトルから `株式分割 / 株式併合 / 上場廃止 / 新規上場` を分類し ④ へ。分割/併合は**比率（例 "1:3"）・係数（新株数/旧株数）・効力発生日**をタイトルから最善努力で抽出（取れなければ None、原文リンクに委ねる §3-1）。④ は一次開示由来で commercial-ok/factual-cite。
+- **Phase 3（ライフサイクル・実装済）**: ① に `状態(上場/監理/整理/上場廃止) / 上場日 / 上場廃止日`。フィールドの**所有を分離**して二重書き込みの衝突を防ぐ — 名称/業種/`listed(在リスト=True)` は codelist(`master_sync`) 所有、`状態/上場日/上場廃止日` は開示イベントと「コードリスト消失」が所有（`master_sync` は `include_lifecycle=False` でこれらを上書きしない）。`上場廃止` 開示は発表時点では `状態=上場廃止 + 上場廃止日(判明時)` のみ設定し **listed は触らない**（効力発生まで売買継続＝取得継続 §3-1）。確定的な `listed=False`（取得停止）は EDINET コードリストからの消失検知だけが行う（`prices_daily` は listed=True のみ取得）。消失検知には安全弁（取得コードが既存の50%未満なら一括廃止せず中止）を設け、日付は開示で判明した場合のみ設定（発表日≠効力発生日を流用しない §3-1）。
+- **Phase 4（厳密調整・未実装）**: ④ に蓄積した `split_factor` と効力発生日を一次情報として、② テクニカルおよび ③ の EPS/BPS 等を分割調整した連続系列を別途生成する（PER=価格/EPS の基準ズレ解消）。yfinance の `Adj Close`（取得済・未使用）は補助確認に用いる。調整値は必ず開示までトレース可能にし、生の未調整値も保持する。
 
 ---
 
@@ -97,8 +106,7 @@
 | ソース | 取得データ | 備考 |
 |---|---|---|
 | yfinance | 直近株価OHLCV、時価総額、PER/PBR、配当利回り | `7203.T`形式。スリープ+リトライ+バージョン追従 |
-| stooq | 日足CSV（`https://stooq.com/q/d/l/?s=7203.jp&i=d`） | yfinance障害時の実データフォールバック |
-| J-Quants無料版 | 調整済株価（12週遅延）、財務サマリ、決算発表予定 | 5コール/分。確定値突合・バックフィル用 |
+| stooq | 日足CSV（`https://stooq.com/q/d/l/?s=7203.jp&i=d`） | yfinance障害時の実データフォールバック＋②終値の突合検証（`reconcile_weekly` §3-5） |
 | JPXサイト統計 | 空売り比率・信用残（週次） | Phase 4 |
 
 > 株価・テクニカルはトラックBでしか成立しないため、**当面は非公開（自分用）**。公開・商用化する場合はJ-Quants Pro等の正規契約で置換する（コレクターを差し替えるだけで済むようソース抽象化インターフェースを切る）。
@@ -108,7 +116,7 @@
 | カテゴリ | 項目 | ソース | タグ | フェーズ |
 |---|---|---|---|---|
 | 銘柄属性 | コード、名称、業種、EDINETコード | EDINETコードリスト | commercial-ok | P1 |
-| 株価 | 日足OHLCV、52週高安、出来高、売買代金 | yfinance/stooq/J-Quants | personal-only | P2 |
+| 株価 | 日足OHLCV、52週高安、出来高、売買代金 | yfinance/stooq | personal-only | P2 |
 | テクニカル | SMA(5/25/75/200)、RSI14、MACD(12,26,9)、BB(20,2σ)、ATR14、乖離率、出来高25日平均比 | 計算（株価由来） | personal-only(継承) | P2 |
 | バリュエーション | 時価総額、PER、PBR、配当利回り | yfinance+計算 | personal-only | P2 |
 | 財務実績 | 売上・各利益、EPS、BPS、ROE、ROA、自己資本比率、CF、配当 | EDINET XBRL/CSV、短信XBRL | commercial-ok / factual-cite | P3 |
@@ -169,7 +177,7 @@ APIコール1回 or ダウンロード1回で得たレスポンス/ファイル 
 
 | プロパティ | 型 | 内容 |
 |---|---|---|
-| ソース | select | EDINET/TDnet/J-Quants/yfinance/stooq/計算 |
+| ソース | select | EDINET/TDnet/yfinance/stooq/計算 |
 | ライセンスタグ | select | commercial-ok / factual-cite / personal-only |
 | データ基準日 | date | その値が指す時点 |
 | 取得日時 | date | パイプラインが取得した時刻 |
@@ -227,13 +235,13 @@ GitHub Actions (cron)
 | `prices_daily` | 毎営業日19:30 | yfinance一括→テクニカル計算→②upsert。stooqフォールバック。原本=一括取得単位のCSV/JSON+Parquet変換版 | B |
 | `tdnet_hourly` | 平日9-19時毎時 | やのしん当日分→④+原本。短信XBRL検出時は③へ反映 | A |
 | `edinet_daily` | 毎営業日21:00 | 当日書類一覧→XBRL/CSV/PDF取得→③④⑤ | A |
-| `jquants_weekly` | 週1土曜 | 確定株価・財務バックフィル+②③との突合検証（§3-5） | B |
+| `reconcile_weekly` | 週1土曜 | 第2ソース(stooq)による②終値の突合検証（§3-5）。③財務はEDINET/TDnetが担う | B |
 | `export_weekly` | 週1日曜 | 全履歴Parquet/CSVを⑥へ更新 | A/B別ファイル |
 
 ### 8.3 レート試算（検証済み）
 
 - Notion: 全銘柄日次更新(②upsert=銘柄ごと検索+更新2req)≒7,800req → 2.5req/sで約52分/日。原本は一括取得単位のため数十req
-- J-Quants: daily_quotesは日付指定で全銘柄1コール。5コール/分でも問題なし
+- stooq(reconcile_weekly): 銘柄ごとに1コール（=1取得単位）。件数が多い場合は `--limit` で段階実行（週1・低頻度）
 - yfinance: `yf.download`一括+100銘柄ごと2〜5秒スリープ、429時60秒待機
 - GitHub Actions: fetchはmatrix並列可、Notion書き込みは直列キュー（レート制限はトークン単位）
 
@@ -245,11 +253,11 @@ GitHub Actions (cron)
 jp-stock-data-pipeline/
 ├── flake.nix              # nix開発環境(Python3.12+uv) ※必須
 ├── pyproject.toml         # requests, pandas, pyarrow, yfinance, notion-client, lxml, openpyxl, pypdfium2, tenacity
-├── .github/workflows/     # prices_daily / tdnet_hourly / edinet_daily / jquants_weekly / master_sync / export_weekly
+├── .github/workflows/     # prices_daily / tdnet_hourly / edinet_daily / reconcile_weekly / master_sync / export_weekly
 ├── src/jp_stock_pipeline/
-│   ├── config.py          # NOTION_TOKEN, EDINET_API_KEY, JQUANTS_*, DB IDs
+│   ├── config.py          # NOTION_TOKEN, EDINET_API_KEY, DB IDs
 │   ├── licensing.py       # ライセンスタグ定義・継承ルール(§2.2)・公開フィルタ
-│   ├── collectors/        # edinet / tdnet_yanoshin(+tdnet_official_fallback) / jquants / yfinance_prices / stooq_prices / edinet_codelist
+│   ├── collectors/        # edinet / tdnet_yanoshin(+tdnet_official_fallback) / yfinance_prices / stooq_prices / edinet_codelist
 │   ├── convert/           # xbrl_to_csv / json_to_parquet / pdf_to_text / xls_to_csv(値不変・§5.2)
 │   ├── transform/         # technicals.py / normalize.py / reconcile.py(突合検証§3-5)
 │   ├── notion/            # client.py(2.5req/sスロットル) / schema.py(7DB+ビュー冪等セットアップ) / upsert.py / file_upload.py(20MB/マルチパート)
@@ -258,7 +266,7 @@ jp-stock-data-pipeline/
 ```
 
 - nix: `flake.nix`でPython3.12+uvのdevShell（aarch64-darwin / x86_64-linux）。CIは`DeterminateSystems/nix-installer-action`+`nix develop -c uv run ...`
-- GitHub Secrets: `NOTION_TOKEN` / `EDINET_API_KEY` / `JQUANTS_MAIL_ADDRESS` / `JQUANTS_PASSWORD` / 各DB ID
+- GitHub Secrets: `NOTION_TOKEN` / `EDINET_API_KEY` / 各DB ID
 
 ---
 
@@ -269,7 +277,7 @@ jp-stock-data-pipeline/
 | **P0** | 雛形+flake.nix+Notion 7DB・ビュー・データカタログ自動作成（冪等、DB ID出力）+licensing.py | 「株式情報」配下に全DB生成 |
 | **P1** | 銘柄マスタ同期（EDINETコードリスト→①、原本+CSV変換版→⑤） | 全上場銘柄が①に存在 |
 | **P2** | 株価+テクニカル（yfinance→②、stooqフォールバック、原本+Parquet→⑤、週次エクスポート→⑥） | 営業日翌朝に②が全銘柄最新化 |
-| **P3** | 開示+財務（TDnet毎時→④、公式ページパースフォールバック、EDINET日次→③④、短信XBRL→③、J-Quants突合） | 開示当日中に④、決算が③へ反映 |
+| **P3** | 開示+財務（TDnet毎時→④、公式ページパースフォールバック、EDINET日次→③④、短信XBRL→③、stooq突合） | 開示当日中に④、決算が③へ反映 |
 | **P4** | 需給・指数・為替、エラー通知、公開準備（commercial-okフィルタビュー検証） | 週次需給反映+通知動作 |
 
 各フェーズで必須: ユニットテスト（実レスポンスフィクスチャ）、dry-runモード、⑦への記録。
@@ -280,7 +288,7 @@ jp-stock-data-pipeline/
 
 | リスク | 対応 |
 |---|---|
-| yfinance仕様変更・BAN | stooq実データフォールバック+J-Quants確定値。**ダミー埋めは絶対にしない**（§3） |
+| yfinance仕様変更・BAN | stooq実データフォールバック（突合検証の第2ソースも兼ねる §3-5）。**ダミー埋めは絶対にしない**（§3）。恒久対策は商用株価ベンダー導入 |
 | やのしんAPI停止（個人運営） | 公式TDnetページ直接パースのフォールバック実装（P3で同時実装、後回しにしない） |
 | 商用化時のライセンス違反 | ライセンスタグ+公開フィルタで構造的に防止（§2.2）。商用ローンチ前チェックリスト実行 |
 | 開示DB行数肥大（年数万件） | 年次アーカイブDBへの移動ジョブ |
@@ -309,8 +317,7 @@ jp-stock-data-pipeline/
 - EDINET: `GET https://api.edinet-fsa.go.jp/api/v2/documents.json?date=YYYY-MM-DD&type=2&Subscription-Key=KEY` / `GET .../documents/{docID}?type={1|2|5}`（1=XBRL,2=PDF,5=CSV）
 - EDINETコードリスト: EDINETサイトの`EdinetcodeDlInfo.zip`（CSV同梱）
 - TDnet: `GET https://webapi.yanoshin.jp/webapi/tdnet/list/{YYYYmmdd|recent|code}.json?limit=N`（レスポンスは`items[].Tdnet`配下に`company_code`(5桁)/`pubdate`/`title`/`document_url`等。動作確認済み）+ 公式`www.release.tdnet.info`日付ページパースのフォールバック
-- J-Quants: `https://api.jquants.com/v1/`（refresh→idToken、5コール/分、12週遅延、**personal-only厳守**）
-- yfinance: `7203.T`形式（**personal-only厳守**）/ stooq: `https://stooq.com/q/d/l/?s={code}.jp&i=d`
+- yfinance: `7203.T`形式（**personal-only厳守**）/ stooq: `https://stooq.com/q/d/l/?s={code}.jp&i=d`（②終値の突合にも使用 §3-5）
 - Notion File Upload: `POST /v1/file_uploads`→send→attach（20MB超はマルチパート）
 
 ---

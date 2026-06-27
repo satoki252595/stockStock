@@ -35,6 +35,34 @@ REQUIRED_COLUMNS = ("date", "open", "high", "low", "close", "volume")
 _WEEK52_CALENDAR_DAYS = 364
 _WEEK52_TRADING_DAYS = 260
 
+# 単日でこの比率を超える終値変動は、未調整株価における株式分割/併合の不連続を
+# 疑う閾値 (§ コーポレートアクション Phase1)。実急騰急落でも発火しうるが、
+# 用途は「要確認」フラグ（=人間に確認依頼）なので過検出は許容する。
+SPLIT_JUMP_THRESHOLD = 0.35
+
+
+def has_probable_split(
+    close: pd.Series,
+    threshold: float = SPLIT_JUMP_THRESHOLD,
+    lookback: int = _WEEK52_TRADING_DAYS,
+) -> bool:
+    """終値系列の直近 lookback 本に、分割/併合由来とみられる不連続があるか。
+
+    yfinance は未調整終値のため、分割日に終値が比率分だけ不連続に跳ぶ
+    （例: 1→3分割で約-67%、5→1併合で約+400%）。直近の長期指標(SMA200/52週)が
+    覆う範囲（既定260営業日）で閾値超の単日変動を検出する。検出時は呼び出し側が
+    ② を「要確認」にし、分割をまたぐ可能性を人間判断に委ねる
+    （自動調整はしない §3-5。厳密な比率調整は Phase4）。
+    入力 close は日付昇順であることを前提とする（呼び出し側 _ohlcv が昇順化する）。
+    """
+    c = close.astype(float).dropna()
+    if len(c) < 2:
+        return False
+    window = c.iloc[-(lookback + 1):]  # +1: 窓先頭の単日リターンも範囲内に含める
+    returns = window.pct_change().abs()
+    returns = returns[np.isfinite(returns)]  # 先頭NaN・0除算のinf(終値0)を除外
+    return bool((returns > threshold).any())
+
 
 def _none_if_nan(value) -> float | None:
     """NaN/None を None に正規化 (§3-1 欠損は欠損のまま)。"""

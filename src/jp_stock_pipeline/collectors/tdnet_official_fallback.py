@@ -42,7 +42,7 @@ from ..http import FetchError, fetch
 from ..licensing import source_license
 from ..models import JST, DisclosureRecord, Provenance, RawArtifact, Source
 from ..rawstore import save_raw
-from .tdnet_yanoshin import classify_title, normalize_company_code
+from .tdnet_yanoshin import classify_title, corporate_action_attrs, normalize_company_code
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +112,8 @@ def parse_official_page(
             int(m.group(1)), int(m.group(2)), tzinfo=JST,
         )
 
+        doc_type = classify_title(title)
+        split_ratio, split_factor, effective_date = corporate_action_attrs(title, doc_type)
         records.append(
             DisclosureRecord(
                 doc_id=doc_id,
@@ -125,9 +127,12 @@ def parse_official_page(
                     raw_page_id=raw_page_id,
                 ),
                 code=normalize_company_code(_cell_text(row, "kjCode")),
-                doc_type=classify_title(title),
+                doc_type=doc_type,
                 source_url=urljoin(BASE_URL, href),
                 has_xbrl=bool(row.xpath('.//td[contains(@class,"kjXbrl")]//a')),
+                split_ratio=split_ratio,
+                split_factor=split_factor,
+                effective_date=effective_date,
             )
         )
     return records

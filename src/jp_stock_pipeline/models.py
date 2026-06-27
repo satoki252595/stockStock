@@ -28,7 +28,6 @@ class Source(StrEnum):
 
     EDINET = "EDINET"
     TDNET = "TDnet"
-    JQUANTS = "J-Quants"
     YFINANCE = "yfinance"
     STOOQ = "stooq"
     JPX = "JPX"
@@ -104,7 +103,12 @@ class StockMasterRecord:
     sector33: str | None = None  # 33業種
     sector17: str | None = None  # 17業種
     edinet_code: str | None = None
-    listed: bool = True  # 上場状態
+    listed: bool = True  # 上場状態 (checkbox: 現在上場しているか)
+    # ライフサイクル (§: コーポレートアクション対応)。日付は一次開示で判明した場合のみ
+    # 設定し、不明なら None のまま (§3-1 推定禁止)。
+    status: str | None = None  # 状態: 上場/監理/整理/上場廃止
+    listing_date: date | None = None  # 上場日 (新規上場開示で判明した場合)
+    delisting_date: date | None = None  # 上場廃止日 (上場廃止開示で判明した場合)
 
 
 @dataclass
@@ -182,6 +186,13 @@ class DisclosureRecord:
     disclosed_at: datetime
     provenance: Provenance
     code: str | None = None  # 銘柄コード (4桁基準。全市場一括等は None)
-    doc_type: str = "その他"  # 短信/有報/四半期報告/業績修正/配当修正/大量保有/自社株買い/その他
+    doc_type: str = "その他"  # 短信/有報/四半期報告/業績修正/配当修正/大量保有/自社株買い/
+    # 株式分割/株式併合/上場廃止/新規上場/その他
     source_url: str | None = None
     has_xbrl: bool = False
+    # コーポレートアクションの構造化属性 (§: 分割/併合のみ設定。タイトルから抽出
+    # できた場合のみ。不明なら None で原文リンクに委ねる §3-1)。Phase4 の価格調整は
+    # split_factor を一次情報として用いる。
+    split_ratio: str | None = None  # 例 "1:3" (1株→3株)。表示用の人間可読比率
+    split_factor: float | None = None  # 例 3.0 (分割) / 0.2 (5株→1株併合)。新株数/旧株数
+    effective_date: date | None = None  # 効力発生日 (権利タイミング。タイトル記載時のみ)

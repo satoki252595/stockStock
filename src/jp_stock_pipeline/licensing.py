@@ -32,7 +32,6 @@ _STRICTNESS: dict[LicenseTag, int] = {
 SOURCE_LICENSE: dict[Source, LicenseTag] = {
     Source.EDINET: LicenseTag.COMMERCIAL_OK,
     Source.TDNET: LicenseTag.FACTUAL_CITE,
-    Source.JQUANTS: LicenseTag.PERSONAL_ONLY,
     Source.YFINANCE: LicenseTag.PERSONAL_ONLY,
     Source.STOOQ: LicenseTag.PERSONAL_ONLY,
     Source.JPX: LicenseTag.PERSONAL_ONLY,
@@ -74,9 +73,8 @@ ATTRIBUTION: dict[Source, str] = {
 
 # 商用化判断時のチェックリスト (§2.2。公開・商用ローンチ前に必ず実行)
 COMMERCIALIZATION_CHECKLIST: tuple[str, ...] = (
-    "J-Quants Pro（法人契約）の契約可否を確認し、無料版データを置換または除外する",
     "JPX TDnet API（有料）の契約可否を確認する",
-    "商用利用可能な株価データベンダーを選定する（yfinance/stooq を置換）",
+    "商用利用可能な株価データベンダーを選定する（yfinance/stooq を置換。例: J-Quants Pro 等の商用契約。廃止した無料APIとは別物）",
     "公開対象が commercial-ok / factual-cite(メタデータのみ) でフィルタされていることを検証する",
     "各ソースの規約原文を再確認する（必要に応じて専門家確認）",
     "出典表記（EDINET 等）と編集・加工の明記が全公開面に存在することを確認する",

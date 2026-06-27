@@ -38,8 +38,6 @@ class Settings:
     notion_token: str | None
     notion_parent_page_id: str
     edinet_api_key: str | None
-    jquants_mail_address: str | None
-    jquants_password: str | None
     notion_rps: float
     raw_data_dir: Path
     dry_run: bool
@@ -85,8 +83,6 @@ def load_settings(*, dry_run: bool | None = None, env: dict[str, str] | None = N
         notion_token=env.get("NOTION_TOKEN") or None,
         notion_parent_page_id=env.get("NOTION_PARENT_PAGE_ID", DEFAULT_PARENT_PAGE_ID),
         edinet_api_key=env.get("EDINET_API_KEY") or None,
-        jquants_mail_address=env.get("JQUANTS_MAIL_ADDRESS") or None,
-        jquants_password=env.get("JQUANTS_PASSWORD") or None,
         notion_rps=float(env.get("NOTION_RPS", DEFAULT_NOTION_RPS)),
         raw_data_dir=Path(env.get("RAW_DATA_DIR", "data/raw")),
         dry_run=resolved_dry_run,

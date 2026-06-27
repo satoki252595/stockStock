@@ -143,6 +143,7 @@ def parse_codelist(
                 edinet_code=row[idx[_COL_EDINET_CODE]].strip() or None,
                 sector33=row[idx[_COL_SECTOR]].strip() or None,  # 提出者業種（33業種相当）
                 listed=True,
+                status="上場",  # コードリストは上場区分=上場 のみ通すため (§ Phase3)
                 provenance=Provenance(
                     source=Source.EDINET,
                     license_tag=LicenseTag.COMMERCIAL_OK,

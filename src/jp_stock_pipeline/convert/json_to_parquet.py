@@ -126,7 +126,7 @@ def convert_artifact(artifact: RawArtifact, kind: str) -> RawArtifact:
 
     Args:
         artifact: rawstore.save_raw が返した原本アーティファクト（保存済みであること）
-        kind: "json" / "jsonl"（改行区切りJSON。J-Quants原本等）/ "pdf" /
+        kind: "json" / "jsonl"（改行区切りJSON = JSON Lines）/ "pdf" /
             "xls"（.xls/.xlsx 共通。"xlsx" も受理）
 
     挙動:
@@ -152,7 +152,7 @@ def convert_artifact(artifact: RawArtifact, kind: str) -> RawArtifact:
             new_paths.extend([csv_path, parquet_path])
 
         elif kind == "jsonl":
-            # 1行=1JSON (J-Quants のページ毎レスポンス等)。各行を正規化して連結
+            # 1行=1JSON (ページ毎レスポンス等)。各行を正規化して連結
             frames = [
                 json_records(line)
                 for line in raw.splitlines()
