@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 
 import pytest
 
@@ -25,6 +26,10 @@ ALL_DOC_TYPES = {
     ty.DOC_TYPE_LARGE_HOLDING,
     ty.DOC_TYPE_ANNUAL_REPORT,
     ty.DOC_TYPE_QUARTERLY_REPORT,
+    ty.DOC_TYPE_SPLIT,
+    ty.DOC_TYPE_CONSOLIDATION,
+    ty.DOC_TYPE_DELISTING,
+    ty.DOC_TYPE_NEW_LISTING,
     ty.DOC_TYPE_OTHER,
 }
 
@@ -54,6 +59,18 @@ ALL_DOC_TYPES = {
         ("大量保有報告書の提出に関するお知らせ", ty.DOC_TYPE_LARGE_HOLDING),
         ("有価証券報告書の提出に関するお知らせ", ty.DOC_TYPE_ANNUAL_REPORT),
         ("四半期報告書の提出に関するお知らせ", ty.DOC_TYPE_QUARTERLY_REPORT),
+        # --- コーポレートアクション (§ Phase2) ---
+        ("株式分割に関するお知らせ", ty.DOC_TYPE_SPLIT),
+        ("株式分割及び定款の一部変更に関するお知らせ", ty.DOC_TYPE_SPLIT),
+        ("株式併合及び単元株式数の変更に関するお知らせ", ty.DOC_TYPE_CONSOLIDATION),
+        # 比率を伴う本物の分割は、配当修正を併記しても分割扱い
+        ("株式分割（1株を3株に分割）及び配当予想の修正に関するお知らせ", ty.DOC_TYPE_SPLIT),
+        # 分割を“言及”するだけで本体は修正（比率なし）→ 修正へ回す (§ Phase2)
+        ("株式分割に伴う配当予想の修正に関するお知らせ", ty.DOC_TYPE_DIVIDEND_REVISION),
+        ("株式併合に伴う業績予想の修正に関するお知らせ", ty.DOC_TYPE_FORECAST_REVISION),
+        # フィクスチャ実例の上場廃止タイトル
+        ("上場廃止後の当社株式の取り扱いに関するお知らせ", ty.DOC_TYPE_DELISTING),
+        ("東京証券取引所グロース市場への新規上場に関するお知らせ", ty.DOC_TYPE_NEW_LISTING),
         # --- その他（フィクスチャ実例。誤検知しやすいタイトルを含む） ---
         ("事業譲受に関するお知らせ", ty.DOC_TYPE_OTHER),
         ("ＥＴＦの収益分配のお知らせ", ty.DOC_TYPE_OTHER),
@@ -88,3 +105,55 @@ def test_classify_フィクスチャ内の決算短信は全て短信():
     assert len(tanshin) > 0
     for title in tanshin:
         assert classify_title(title) == ty.DOC_TYPE_TANSHIN
+
+
+# ---------------------------------------------------------------------------
+# コーポレートアクション属性の抽出 (§ Phase2/4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("title", "ratio", "factor"),
+    [
+        ("株式分割（1株を3株に分割）に関するお知らせ", "1:3", 3.0),
+        ("普通株式1株につき2株の割合をもって分割いたします", "1:2", 2.0),
+        ("株式分割（1：5）に関するお知らせ", "1:5", 5.0),  # 全角コロン
+        ("株式併合（5株を1株に併合）に関するお知らせ", "5:1", 0.2),
+        # 比率がタイトルに無ければ推定しない (§3-1)
+        ("株式分割に関するお知らせ", None, None),
+    ],
+)
+def test_parse_split_terms(title, ratio, factor):
+    r, f = ty.parse_split_terms(title)
+    assert r == ratio
+    if factor is None:
+        assert f is None
+    else:
+        assert f == pytest.approx(factor)
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("株式分割（効力発生日 2026年4月1日）に関するお知らせ", date(2026, 4, 1)),
+        ("株式分割（効力発生日を2026年10月1日とする）", date(2026, 10, 1)),
+        ("株式分割に関するお知らせ", None),  # 効力発生日がタイトルに無い
+        # 後続の別日付(基準日)を誤って掴まない＝誤った権威的日付より欠損が正しい (§3-1)
+        ("効力発生日に先立つ基準日を2026年3月31日とする株式分割", None),
+    ],
+)
+def test_parse_effective_date(title, expected):
+    assert ty.parse_effective_date(title) == expected
+
+
+def test_corporate_action_attrs_only_for_relevant_types():
+    """比率抽出は分割/併合のみ。上場廃止/新規上場では比率は付かない。"""
+    ratio, factor, _eff = ty.corporate_action_attrs(
+        "株式分割（1株を2株に分割）", ty.DOC_TYPE_SPLIT
+    )
+    assert (ratio, factor) == ("1:2", 2.0)
+    # 上場廃止に「1株を2株」と書いてあっても分割比率としては拾わない
+    ratio2, factor2, _ = ty.corporate_action_attrs(
+        "上場廃止後の取り扱い", ty.DOC_TYPE_DELISTING
+    )
+    assert ratio2 is None and factor2 is None

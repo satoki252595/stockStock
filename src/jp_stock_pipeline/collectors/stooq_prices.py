@@ -81,12 +81,18 @@ def _fetch_csv_bytes(code: str, *, session: requests.Session | None = None) -> t
         if solved is not None:
             c, n = solved
             logger.info("stooq: ブラウザ検証チャレンジを解決 (n=%d)", n)
-            sess.post(
-                STOOQ_VERIFY_URL,
-                data={"c": c, "n": str(n)},
-                headers={"User-Agent": http.USER_AGENT},
-                timeout=http.DEFAULT_TIMEOUT,
-            )
+            # 検証POSTのネットワーク失敗も取得失敗 = FetchError に統一する。
+            # （生 requests 例外を漏らさない。呼び出し側は FetchError のみ握れば
+            #  銘柄単位で欠損として degrade できる §3-2）
+            try:
+                sess.post(
+                    STOOQ_VERIFY_URL,
+                    data={"c": c, "n": str(n)},
+                    headers={"User-Agent": http.USER_AGENT},
+                    timeout=http.DEFAULT_TIMEOUT,
+                )
+            except requests.RequestException as exc:
+                raise http.FetchError(f"stooq: ブラウザ検証POST失敗: {exc}") from exc
             content = http.fetch(url, session=sess).content
     return content, url
 

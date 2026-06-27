@@ -17,3 +17,6 @@ db_ids.local.json
 # nix
 .direnv/
 result
+
+# codegraph ツール生成物
+.codegraph/

@@ -145,8 +145,17 @@ def provenance_properties(
 # ---------------------------------------------------------------------------
 
 
-def stock_master_properties(record: StockMasterRecord) -> dict:
-    """① 銘柄マスタ。None 項目は除外 (§3-1)。"""
+def stock_master_properties(
+    record: StockMasterRecord, *, include_lifecycle: bool = True
+) -> dict:
+    """① 銘柄マスタ。None 項目は明示的な空値で送信し前回値をクリア (§3-1 完全置換)。
+
+    include_lifecycle=False のとき 状態/上場日/上場廃止日 を payload に含めない。
+    これらは「開示イベント (apply_disclosure_lifecycle) とコードリスト消失
+    (mark_master_absent_from_codelist) が所有する」フィールドであり、月次の
+    codelist 同期 (master_sync) が上書き・消去してはならない (§ Phase3 二重所有の回避)。
+    名称/市場/業種/EDINETコード/listed は codelist 所有なので常に完全置換する。
+    """
     props = {
         S.MASTER_PROP_NAME: title_prop(record.name),
         S.MASTER_PROP_CODE: text_prop(record.code),
@@ -158,6 +167,10 @@ def stock_master_properties(record: StockMasterRecord) -> dict:
     _set(props, S.MASTER_PROP_SECTOR33, select_prop, record.sector33)
     _set(props, S.MASTER_PROP_SECTOR17, select_prop, record.sector17)
     _set(props, S.MASTER_PROP_EDINET_CODE, text_prop, record.edinet_code)
+    if include_lifecycle:
+        _set(props, S.MASTER_PROP_STATUS, select_prop, record.status)
+        _set(props, S.MASTER_PROP_LISTING_DATE, date_prop, record.listing_date)
+        _set(props, S.MASTER_PROP_DELISTING_DATE, date_prop, record.delisting_date)
     return props
 
 
@@ -251,7 +264,7 @@ def financial_summary_title(record: FinancialSummaryRecord) -> str:
 def financial_summary_properties(
     record: FinancialSummaryRecord, master_page_id: str | None = None
 ) -> dict:
-    """③ 財務サマリ。None 項目は除外 (§3-1)。"""
+    """③ 財務サマリ。None 項目は明示的な空値で送信し前回値をクリア (§3-1 完全置換)。"""
     props = {
         S.FIN_PROP_TITLE: title_prop(financial_summary_title(record)),
         S.FIN_PROP_CODE: text_prop(record.code),
@@ -273,7 +286,7 @@ def financial_summary_properties(
 def disclosure_properties(
     record: DisclosureRecord, master_page_id: str | None = None
 ) -> dict:
-    """④ 開示書類。None 項目は除外 (§3-1)。"""
+    """④ 開示書類。None 項目は明示的な空値で送信し前回値をクリア (§3-1 完全置換)。"""
     props = {
         S.DISC_PROP_TITLE: title_prop(record.title),
         S.DISC_PROP_DISCLOSED_AT: date_prop(record.disclosed_at),
@@ -284,6 +297,9 @@ def disclosure_properties(
     }
     _set(props, S.DISC_PROP_CODE, text_prop, record.code)
     _set(props, S.DISC_PROP_URL, url_prop, record.source_url)
+    _set(props, S.DISC_PROP_SPLIT_RATIO, text_prop, record.split_ratio)
+    _set(props, S.DISC_PROP_SPLIT_FACTOR, number_prop, record.split_factor)
+    _set(props, S.DISC_PROP_EFFECTIVE_DATE, date_prop, record.effective_date)
     master_id = real_page_id(master_page_id)
     if master_id:
         props[S.PROP_MASTER_RELATION] = relation_prop([master_id])
@@ -369,15 +385,82 @@ def load_stock_master_map(client: NotionClient, settings: Settings) -> dict[str,
 
 
 def upsert_stock_master(
-    client: NotionClient, settings: Settings, record: StockMasterRecord
+    client: NotionClient,
+    settings: Settings,
+    record: StockMasterRecord,
+    *,
+    include_lifecycle: bool = True,
 ) -> str:
-    """① 銘柄マスタへ冪等 upsert (キー=銘柄コード)。page_id を返す。"""
+    """① 銘柄マスタへ冪等 upsert (キー=銘柄コード)。page_id を返す。
+
+    master_sync(codelist 同期) は include_lifecycle=False で呼び、開示・消失が
+    所有する 状態/上場日/上場廃止日 を上書きしない (§ Phase3 二重所有の回避)。
+    """
     return _upsert(
         client,
         settings.db_id("stock_master"),
         stock_master_filter(record.code),
-        stock_master_properties(record),
+        stock_master_properties(record, include_lifecycle=include_lifecycle),
     )
+
+
+# ① の状態 select 値 (schema.LISTING_STATUS_OPTIONS と一致)
+STATUS_LISTED = "上場"
+STATUS_DELISTED = "上場廃止"
+# 一次開示で ① ライフサイクルを更新する「書類種別」(DOC_TYPES の値。状態名前空間
+# とは独立。文字列の一致に依存せず doc_type として明示する § namespace 分離)
+LIFECYCLE_DOC_TYPES: frozenset[str] = frozenset({"上場廃止", "新規上場"})
+
+
+def mark_master_absent_from_codelist(
+    client: NotionClient, settings: Settings, page_id: str
+) -> None:
+    """① 行を「EDINET上場リストから消えた」= listed=False / 状態=上場廃止 にする。
+
+    コードリストからの消失は EDINET の 上場区分 が非上場へ変わった = 実際に
+    市場から外れた信号であり、listed=False（取得停止）の唯一の確定トリガ (§ Phase3)。
+    上場廃止日は開示で判明した場合のみ別途設定し、ここでは推定しない (§3-1)。
+    部分更新（listed/状態 のみ。他フィールドは直前 master_sync の値を保持）。
+    再上場時は次回 master_sync の upsert が listed=True へ自己修復する。
+    """
+    client.update_page(
+        page_id,
+        {
+            S.MASTER_PROP_LISTED: checkbox_prop(False),
+            S.MASTER_PROP_STATUS: select_prop(STATUS_DELISTED),
+        },
+    )
+
+
+def apply_disclosure_lifecycle(
+    client: NotionClient, settings: Settings, record: DisclosureRecord
+) -> str | None:
+    """上場廃止/新規上場 開示を ① のライフサイクル状態へ反映する (§ Phase3)。
+
+    - 上場廃止(発表): 状態=上場廃止 / 上場廃止日=effective_date(判明時のみ)。
+      **listed は触らない**: 効力発生まで売買は継続するため取得も継続する
+      (§3-1 取得可能なデータを自動で止めない)。確定的な listed=False は
+      コードリスト消失 (mark_master_absent_from_codelist) が担う。
+    - 新規上場: 状態=上場 / 上場日=effective_date(判明時のみ)。
+      listed は codelist 同期が所有するため触らない。
+
+    開示日(発表日) ≠ 効力発生日のため、日付は effective_date が取れた場合のみ設定し、
+    不明なら None のまま（推定しない §3-1。原文リンクに委ねる）。
+    ① に該当銘柄が無ければ何もしない (None を返す)。部分更新。
+    """
+    if record.doc_type not in LIFECYCLE_DOC_TYPES or not record.code:
+        return None
+    page_id = find_stock_master_page(client, settings, record.code)
+    if not page_id:
+        return None
+    if record.doc_type == STATUS_DELISTED:
+        props = {S.MASTER_PROP_STATUS: select_prop(STATUS_DELISTED)}
+        _set(props, S.MASTER_PROP_DELISTING_DATE, date_prop, record.effective_date)
+    else:  # 新規上場
+        props = {S.MASTER_PROP_STATUS: select_prop(STATUS_LISTED)}
+        _set(props, S.MASTER_PROP_LISTING_DATE, date_prop, record.effective_date)
+    client.update_page(page_id, props)
+    return page_id
 
 
 def upsert_price_technical(

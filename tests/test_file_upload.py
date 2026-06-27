@@ -197,6 +197,24 @@ class TestRawUploadError:
             file_upload.upload_raw_artifact(dry_client, settings, artifact)
         assert artifact.notion_page_id is None
 
+    def test_dedup_query_failure_raises_raw_upload_error(self, dry_client, tmp_path, monkeypatch):
+        """SHA256 重複クエリの失敗も契約例外 RawUploadError に揃える (§8.1-4)。
+
+        find_raw_page_by_sha256 → query_database が NotionRequestError を投げても
+        生例外を漏らさず、呼び出し側 (ジョブ) は取得単位を degrade できること。
+        """
+        settings = make_settings()
+        artifact = make_artifact(tmp_path)
+
+        def boom(*args, **kwargs):
+            raise NotionRequestError("Notion クエリ リトライ枯渇")
+
+        monkeypatch.setattr(dry_client, "query_database", boom)
+        with pytest.raises(file_upload.RawUploadError):
+            file_upload.upload_raw_artifact(dry_client, settings, artifact)
+        assert artifact.notion_page_id is None
+        assert dry_client.ops == []  # 重複判定前に倒れるので書き込みは一切ない
+
     def test_missing_upload_id_raises(self, dry_client, tmp_path, monkeypatch):
         settings = make_settings()
         artifact = make_artifact(tmp_path)

@@ -138,3 +138,25 @@ def test_fetch_daily_No_dataは原本を保存しない(tmp_path, monkeypatch):
     with pytest.raises(FetchError):
         sp.fetch_daily(settings, "0000")
     assert list(tmp_path.iterdir()) == []  # 何も保存されない
+
+
+def test_検証POSTのネットワーク失敗はFetchError(monkeypatch):
+    """ブラウザ検証POSTの生 requests 例外も FetchError に統一する。
+
+    呼び出し側 (reconcile_weekly / prices_daily) は FetchError のみ握れば
+    銘柄単位で欠損として degrade でき、ジョブ全体は落ちない (§3-2)。
+    """
+    import requests
+
+    from jp_stock_pipeline import http
+
+    # __verify を含み、_solve_challenge が解ける最小チャレンジを合成
+    challenge = b'<html>__verify <script>const c="abc",d=1</script></html>'
+    monkeypatch.setattr(http, "fetch", lambda url, session=None, **kw: type("R", (), {"content": challenge})())
+
+    class _Session:
+        def post(self, *args, **kwargs):
+            raise requests.ConnectionError("テスト: 検証POSTのネットワーク断")
+
+    with pytest.raises(FetchError, match="検証POST失敗"):
+        sp._fetch_csv_bytes("7203", session=_Session())

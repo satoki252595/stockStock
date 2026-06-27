@@ -166,13 +166,15 @@ def upload_raw_artifact(
     - 失敗時は RawUploadError (呼び出し側は構造化書き込みを中止すること)
     - 成功時は artifact.notion_page_id を設定する
     """
-    existing = find_raw_page_by_sha256(client, settings, artifact.sha256)
-    if existing:
-        logger.info("⑤ 重複スキップ (SHA256=%s): %s", artifact.sha256[:12], existing)
-        artifact.notion_page_id = existing
-        return existing
-
     try:
+        # SHA256 重複クエリの失敗も契約例外に揃える (§8.1-4。NotionRequestError 等を
+        # 漏らさず、呼び出し側は RawUploadError のみ握れば取得単位を degrade できる)
+        existing = find_raw_page_by_sha256(client, settings, artifact.sha256)
+        if existing:
+            logger.info("⑤ 重複スキップ (SHA256=%s): %s", artifact.sha256[:12], existing)
+            artifact.notion_page_id = existing
+            return existing
+
         uploads: list[tuple[str, str]] = []
         for path in [artifact.local_path, *artifact.converted_paths]:
             uploads.append((upload_file(client, path), path.name))
@@ -185,7 +187,7 @@ def upload_raw_artifact(
             raise RawUploadError(f"⑤ 行作成応答に id が無い: {artifact.filename}: {page}")
     except RawUploadError:
         raise
-    except Exception as exc:  # アップロード/行作成のあらゆる失敗を契約例外に揃える
+    except Exception as exc:  # 重複クエリ/アップロード/行作成のあらゆる失敗を契約例外に揃える
         raise RawUploadError(f"⑤ への原本アップロード失敗: {artifact.filename}: {exc}") from exc
 
     artifact.notion_page_id = page_id

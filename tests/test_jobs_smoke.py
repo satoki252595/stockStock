@@ -21,7 +21,7 @@ import pytest
 from conftest import fixture_path
 
 from jp_stock_pipeline.collectors import edinet_codelist, tdnet_yanoshin, yfinance_prices
-from jp_stock_pipeline.jobs import jquants_weekly, master_sync, prices_daily, runner, tdnet_hourly
+from jp_stock_pipeline.jobs import master_sync, prices_daily, reconcile_weekly, runner, tdnet_hourly
 from jp_stock_pipeline.licensing import LicenseTag, source_license
 from jp_stock_pipeline.models import Source
 from jp_stock_pipeline.notion import file_upload
@@ -121,6 +121,82 @@ class TestMasterSync:
         assert len(logs) == 1
         assert logs[0].payload["properties"][S.JOB_PROP_STATUS]["select"]["name"] == "失敗"
 
+    def test_delisting_detection_marks_absent(self, monkeypatch, tmp_path, captured_clients):
+        """コードリストから消えた銘柄を listed=False/状態=上場廃止 にする (§ Phase3)。"""
+        from jp_stock_pipeline.licensing import LicenseTag
+        from jp_stock_pipeline.models import Provenance, StockMasterRecord, now_jst
+        from jp_stock_pipeline.notion.client import NotionClient
+
+        self._patch_fetch(monkeypatch, tmp_path)
+        # コードリストの現役は 7203 のみ
+        rec = StockMasterRecord(
+            code="7203", name="トヨタ自動車", listed=True, status="上場",
+            provenance=Provenance(
+                source=Source.EDINET, license_tag=LicenseTag.COMMERCIAL_OK,
+                data_date=date(2026, 6, 10), fetched_at=now_jst(),
+            ),
+        )
+        monkeypatch.setattr(edinet_codelist, "parse_codelist", lambda *a, **k: [rec])
+        # ① には 7203 と 9999(コードリストから消えた) が既存
+        def fake_query(self, db_id, **kwargs):
+            return [
+                {"id": "p-7203",
+                 "properties": {S.MASTER_PROP_CODE: {"rich_text": [{"plain_text": "7203"}]}}},
+                {"id": "p-9999",
+                 "properties": {S.MASTER_PROP_CODE: {"rich_text": [{"plain_text": "9999"}]}}},
+            ]
+        monkeypatch.setattr(NotionClient, "query_database", fake_query)
+
+        code = master_sync.main(["--dry-run"], env=_env(tmp_path))  # --limit 無し=全件
+        assert code == 0
+        client = captured_clients[0]
+        delisted = [
+            o for o in client.ops
+            if o.op == "update_page" and o.payload["page_id"] == "p-9999"
+        ]
+        assert len(delisted) == 1
+        props = delisted[0].payload["properties"]
+        assert props[S.MASTER_PROP_LISTED]["checkbox"] is False
+        assert props[S.MASTER_PROP_STATUS]["select"]["name"] == "上場廃止"
+
+    def test_blast_radius_guard_blocks_mass_delisting(self, monkeypatch, tmp_path, captured_clients):
+        """コードリストが既存の50%未満なら一括上場廃止せず中止する (§ Phase3 安全弁)。"""
+        from jp_stock_pipeline.licensing import LicenseTag
+        from jp_stock_pipeline.models import Provenance, StockMasterRecord, now_jst
+        from jp_stock_pipeline.notion.client import NotionClient
+
+        self._patch_fetch(monkeypatch, tmp_path)
+        # 取得は 1 銘柄のみ（異常取得を模す）
+        rec = StockMasterRecord(
+            code="7203", name="トヨタ自動車", listed=True,
+            provenance=Provenance(
+                source=Source.EDINET, license_tag=LicenseTag.COMMERCIAL_OK,
+                data_date=date(2026, 6, 10), fetched_at=now_jst(),
+            ),
+        )
+        monkeypatch.setattr(edinet_codelist, "parse_codelist", lambda *a, **k: [rec])
+        # ① には 4 銘柄が既存 → 取得1件は 50%(=2)未満なので安全弁が作動
+        def fake_query(self, db_id, **kwargs):
+            return [
+                {"id": f"p-{c}",
+                 "properties": {S.MASTER_PROP_CODE: {"rich_text": [{"plain_text": c}]}}}
+                for c in ("7203", "9001", "9002", "9003")
+            ]
+        monkeypatch.setattr(NotionClient, "query_database", fake_query)
+
+        master_sync.main(["--dry-run"], env=_env(tmp_path))
+        client = captured_clients[0]
+        # 上場廃止マーク (listed=False) が一切発行されない
+        mass_delist = [
+            o for o in client.ops
+            if o.op == "update_page"
+            and o.payload["properties"].get(S.MASTER_PROP_LISTED) == {"checkbox": False}
+        ]
+        assert mass_delist == []
+        # ⑦ に失敗が記録される（黙って中止せず可視化 §3-2）
+        logs = _ops_with_prop(client, S.JOB_PROP_NAME)
+        assert logs[0].payload["properties"][S.JOB_PROP_FAILED]["number"] >= 1
+
 
 class TestPricesDaily:
     def test_dry_run_with_fixture_frames(self, monkeypatch, tmp_path, captured_clients):
@@ -201,6 +277,36 @@ class TestPricesDaily:
         assert props[S.JOB_PROP_FAILED]["number"] == 1
         assert "7203" in props[S.JOB_PROP_FAILED_CODES]["rich_text"][0]["text"]["content"]
 
+    def test_split_jump_flags_needs_review(self, monkeypatch, tmp_path, captured_clients):
+        """直近に分割/併合の不連続がある銘柄は ② データ品質=要確認 (§ Phase1)。"""
+        dates = pd.date_range("2025-01-01", periods=60, freq="D")
+        series = [3000.0] * 30 + [1000.0] * 30  # 1→3分割相当の不連続
+        df = pd.DataFrame(
+            {"Date": dates, "Open": series, "High": series, "Low": series,
+             "Close": series, "Volume": [1_000_000.0] * 60}
+        )
+        csv_bytes = df.to_csv(index=False).encode()
+
+        def fake_batch(settings, codes, period="2y", **kwargs):
+            artifact = save_raw(
+                csv_bytes, source=Source.YFINANCE, datatype="daily_prices_batch",
+                scope="ALL", data_date=date(2025, 3, 1), url="fixture://split",
+                ext="csv", license_tag=source_license(Source.YFINANCE),
+                base_dir=settings.raw_data_dir,
+            )
+            return artifact, {"7203": df}, []
+
+        monkeypatch.setattr(yfinance_prices, "fetch_daily_batch", fake_batch)
+        code = prices_daily.main(
+            ["--dry-run", "--codes", "7203", "--skip-valuation"], env=_env(tmp_path)
+        )
+        assert code == 0
+        client = captured_clients[0]
+        price_ops = _ops_with_prop(client, S.PRICE_PROP_CLOSE)
+        assert len(price_ops) == 1
+        quality = price_ops[0].payload["properties"][S.PROP_QUALITY]["select"]["name"]
+        assert quality == "要確認"  # 自動調整はせず人間判断に委ねる (§3-5)
+
 
 class TestTdnetHourly:
     def test_dry_run_with_fixture(self, monkeypatch, tmp_path, captured_clients):
@@ -245,36 +351,57 @@ class TestTdnetHourly:
             assert tag == LicenseTag.FACTUAL_CITE.value
 
 
-class TestJquantsWeekly:
-    def test_default_target_date_is_weekday(self):
-        target = jquants_weekly.default_target_date(date(2026, 6, 10))
-        assert target.weekday() < 5
-        assert (date(2026, 6, 10) - target).days >= 84  # 12週遅延 (§4)
+class TestReconcileWeekly:
+    """第2ソース(stooq)による②終値突合の純粋ロジック検証 (§3-5)。"""
 
-    def test_statement_to_record_real_columns(self):
-        """J-Quants statements の列名契約で ③ レコードが組めること (構造検証)。"""
-        row = {
-            "LocalCode": "72030",
-            "DisclosedDate": "2026-05-08",
-            "TypeOfDocument": "FYFinancialStatements_Consolidated_IFRS",
-            "TypeOfCurrentPeriod": "FY",
-            "CurrentPeriodEndDate": "2026-03-31",
-            "NetSales": "48036704000000",
-            "OperatingProfit": "4795586000000",
-            "Profit": "4765086000000",
-            "EarningsPerShare": "365.94",
+    def test_stooq_close_on_matches_date(self):
+        df = pd.DataFrame(
+            {"Date": [date(2026, 3, 10), date(2026, 3, 11)], "Close": [3000.0, 3100.0]}
+        )
+        assert reconcile_weekly.stooq_close_on(df, date(2026, 3, 11)) == 3100.0
+
+    def test_stooq_close_on_absent_date_returns_none(self):
+        df = pd.DataFrame({"Date": [date(2026, 3, 10)], "Close": [3000.0]})
+        assert reconcile_weekly.stooq_close_on(df, date(2026, 3, 11)) is None
+        # 空フレーム・基準日 None も None（捏造しない §3-1）
+        assert reconcile_weekly.stooq_close_on(pd.DataFrame(), date(2026, 3, 11)) is None
+
+    def test_build_reconcile_inputs_flags_only_deviation(self):
+        from jp_stock_pipeline.transform import reconcile
+
+        # ② スナップショット: (page_id, code, close, data_date)
+        snapshot = [
+            ("p1", "7203", 3000.0, date(2026, 3, 11)),  # stooq 3100 → 乖離
+            ("p2", "6758", 2000.0, date(2026, 3, 11)),  # stooq 2001 → 閾内
+            ("p3", "9999", 100.0, date(2026, 3, 11)),   # stooq 無し → 対象外
+        ]
+        stooq_by_code = {
+            "7203": pd.DataFrame({"Date": [date(2026, 3, 11)], "Close": [3100.0]}),
+            "6758": pd.DataFrame({"Date": [date(2026, 3, 11)], "Close": [2001.0]}),
         }
-        rec = jquants_weekly.statement_to_record(row, raw_page_id=None)
-        assert rec is not None
-        assert rec.code == "7203"
-        assert rec.disclosure_type == "本決算"
-        assert rec.consolidated == "連結"
-        assert rec.net_sales == 48036704000000.0
-        assert rec.provenance.license_tag is LicenseTag.PERSONAL_ONLY  # §2.1 厳守
-        assert rec.bps is None  # 無い列は None のまま (§3-1)
+        ours, theirs_df, skipped = reconcile_weekly.build_reconcile_inputs(
+            snapshot, stooq_by_code
+        )
+        assert skipped == ["9999"]  # stooq 未取得は突合対象外 (§3-1)
+        discrepancies = reconcile.reconcile_prices(theirs_df, ours, close_col="Close")
+        assert [d.code for d in discrepancies] == ["7203"]
 
-    def test_statement_missing_key_fields_returns_none(self):
-        assert jquants_weekly.statement_to_record({}, raw_page_id=None) is None
+    def test_build_reconcile_inputs_date_mismatch_skipped(self):
+        """② 基準日と同一日の stooq 行が無ければ突合しない (§3-3 実在しない対を作らない)。"""
+        snapshot = [("p1", "7203", 3000.0, date(2026, 3, 11))]
+        stooq_by_code = {
+            "7203": pd.DataFrame({"Date": [date(2026, 3, 10)], "Close": [3100.0]})
+        }
+        ours, theirs_df, skipped = reconcile_weekly.build_reconcile_inputs(
+            snapshot, stooq_by_code
+        )
+        assert skipped == ["7203"]
+        assert ours == []
+
+    def test_dry_run_completes_with_empty_snapshot(self, tmp_path):
+        """dry-run の合成DB IDでは②クエリが空 → 突合対象0で正常完走 (§10・ネットワーク非依存)。"""
+        code = reconcile_weekly.main(["--dry-run"], env=_env(tmp_path))
+        assert code == 0
 
 
 class TestWorkflowCrons:
@@ -285,7 +412,7 @@ class TestWorkflowCrons:
         "prices_daily": "30 10 * * 1-5",
         "tdnet_hourly": "0 0-10 * * 1-5",
         "edinet_daily": "0 12 * * 1-5",
-        "jquants_weekly": "0 0 * * 6",
+        "reconcile_weekly": "0 0 * * 6",
         "export_weekly": "0 0 * * 0",
     }
 

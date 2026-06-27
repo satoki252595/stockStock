@@ -34,7 +34,7 @@ DB論理キー（`Settings.db_id()` / schema.py / upsert.py で共通）:
 | A: Notion層 | `notion/schema.py`, `notion/upsert.py`, `notion/file_upload.py`, `tests/test_schema.py`, `tests/test_upsert.py`, `tests/test_file_upload.py` |
 | B: EDINET | `collectors/edinet.py`, `collectors/edinet_codelist.py`, `convert/xbrl_to_csv.py`, `scripts/capture_edinet.py`, `tests/test_edinet*.py`, `tests/test_xbrl_to_csv.py`, `tests/fixtures/edinet/` |
 | C: TDnet | `collectors/tdnet_yanoshin.py`, `collectors/tdnet_official_fallback.py`, `scripts/capture_tdnet.py`, `tests/test_tdnet*.py`, `tests/fixtures/tdnet/` |
-| D: 株価系 | `collectors/yfinance_prices.py`, `collectors/stooq_prices.py`, `collectors/jquants.py`, `scripts/capture_prices.py`, `tests/test_yfinance*.py`, `tests/test_stooq*.py`, `tests/test_jquants*.py`, `tests/fixtures/prices/` |
+| D: 株価系 | `collectors/yfinance_prices.py`, `collectors/stooq_prices.py`, `scripts/capture_prices.py`, `tests/test_yfinance*.py`, `tests/test_stooq*.py`, `tests/fixtures/prices/` |
 | E: 変換(非XBRL) | `convert/json_to_parquet.py`, `convert/pdf_to_text.py`, `convert/xls_to_csv.py`, `scripts/capture_convert_fixtures.py`, `tests/test_convert*.py`, `tests/fixtures/convert/` |
 | F: transform | `transform/technicals.py`, `transform/normalize.py`, `transform/reconcile.py`, `scripts/capture_transform_fixtures.py`, `tests/test_technicals.py`, `tests/test_normalize.py`, `tests/test_reconcile.py`, `tests/fixtures/transform/` |
 | G: ジョブ+CI | `jobs/*.py`, `.github/workflows/*.yml`, `tests/test_jobs*.py`（A〜F完了後に実装） |

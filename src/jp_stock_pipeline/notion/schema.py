@@ -73,7 +73,10 @@ MASTER_PROP_MARKET = "市場区分"
 MASTER_PROP_SECTOR33 = "33業種"
 MASTER_PROP_SECTOR17 = "17業種"
 MASTER_PROP_EDINET_CODE = "EDINETコード"
-MASTER_PROP_LISTED = "上場状態"
+MASTER_PROP_LISTED = "上場状態"  # checkbox: 現在上場しているか
+MASTER_PROP_STATUS = "状態"  # select: 上場/監理/整理/上場廃止
+MASTER_PROP_LISTING_DATE = "上場日"
+MASTER_PROP_DELISTING_DATE = "上場廃止日"
 MASTER_PROP_LAST_UPDATED = "最終データ更新日"
 
 # ② 株価テクニカル (§6.4)
@@ -141,6 +144,10 @@ DISC_PROP_DOC_ID = "書類管理番号"
 DISC_PROP_CODE = "銘柄コード"
 DISC_PROP_URL = "取得元URL"
 DISC_PROP_HAS_XBRL = "XBRL有無"
+# コーポレートアクション属性 (分割/併合の開示で設定。§ Phase2/4)
+DISC_PROP_SPLIT_RATIO = "分割比率"  # 例 "1:3"
+DISC_PROP_SPLIT_FACTOR = "分割係数"  # 例 3.0 / 0.2 (新株数/旧株数。Phase4 価格調整用)
+DISC_PROP_EFFECTIVE_DATE = "効力発生日"
 
 # ⑤ 原本ファイル (§6.4)
 RAW_PROP_FILENAME = "ファイル名"  # title (命名規則名 §5.2)
@@ -177,8 +184,11 @@ DISCLOSURE_TYPES: tuple[str, ...] = ("本決算", "1Q", "2Q", "3Q", "修正", "�
 CONSOLIDATED_TYPES: tuple[str, ...] = ("連結", "単体")
 ACCOUNTING_STANDARDS: tuple[str, ...] = ("日本基準", "IFRS", "US-GAAP", "その他")
 DOC_TYPES: tuple[str, ...] = (
-    "短信", "有報", "四半期報告", "業績修正", "配当修正", "大量保有", "自社株買い", "その他",
+    "短信", "有報", "四半期報告", "業績修正", "配当修正", "大量保有", "自社株買い",
+    "株式分割", "株式併合", "上場廃止", "新規上場", "その他",
 )
+# ① 状態 select。上場=通常 / 監理・整理=上場廃止前段階 / 上場廃止=廃止済み
+LISTING_STATUS_OPTIONS: tuple[str, ...] = ("上場", "監理", "整理", "上場廃止")
 JOB_STATUSES: tuple[str, ...] = ("成功", "一部失敗", "失敗")
 
 CATALOG_TITLE = "📖 データカタログ"
@@ -285,6 +295,9 @@ def stock_master_schema(raw_db_id: str) -> dict:
         MASTER_PROP_SECTOR17: _select_schema(),
         MASTER_PROP_EDINET_CODE: _RICH_TEXT,
         MASTER_PROP_LISTED: _CHECKBOX,
+        MASTER_PROP_STATUS: _select_schema(LISTING_STATUS_OPTIONS),
+        MASTER_PROP_LISTING_DATE: _DATE,
+        MASTER_PROP_DELISTING_DATE: _DATE,
         MASTER_PROP_LAST_UPDATED: _DATE,
         **common_properties_schema(raw_db_id),
     }
@@ -344,6 +357,9 @@ def disclosures_schema(master_db_id: str, raw_db_id: str) -> dict:
         DISC_PROP_CODE: _RICH_TEXT,
         DISC_PROP_URL: _URL,
         DISC_PROP_HAS_XBRL: _CHECKBOX,
+        DISC_PROP_SPLIT_RATIO: _RICH_TEXT,
+        DISC_PROP_SPLIT_FACTOR: _NUMBER,
+        DISC_PROP_EFFECTIVE_DATE: _DATE,
         PROP_MASTER_RELATION: _relation_schema(master_db_id),
         **common_properties_schema(raw_db_id),
     }
@@ -541,7 +557,7 @@ _CATALOG_DICTIONARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ),
     (
         "prices",
-        "ソース: yfinance/stooq/J-Quants+計算 (personal-only) / 更新頻度: 毎営業日19:30 (prices_daily)。"
+        "ソース: yfinance/stooq+計算 (personal-only) / 更新頻度: 毎営業日19:30 (prices_daily)。"
         "最新スナップショットのみ。全履歴は⑥のParquet/CSVを利用",
         (
             "銘柄コード (title)",
@@ -638,7 +654,7 @@ def catalog_blocks(db_ids: dict[str, str]) -> list[dict]:
         _para("全データ行・全原本ファイルにライセンスタグが付与されています。"),
         _bullet("commercial-ok: 商用・再配布可 (出典記載条件)。EDINET由来および commercial-ok のみから算出した計算値"),
         _bullet("factual-cite: 事実データの抽出利用可。原文は内部保管とし、メタデータ+原文リンクのみ公開可"),
-        _bullet("personal-only: 私的利用限定 (J-Quants無料版/yfinance/stooq/JPXサイト統計)。公開・商用組込は禁止"),
+        _bullet("personal-only: 私的利用限定 (yfinance/stooq/JPXサイト統計)。公開・商用組込は禁止"),
         _para(
             "注意: 公開ページ・エクスポートに全量を流せるのは commercial-ok のみです。"
             "factual-cite はメタデータ+リンクに限り、personal-only は非公開ビューに隔離してください。"
@@ -668,7 +684,7 @@ def catalog_blocks(db_ids: dict[str, str]) -> list[dict]:
             for view in RECOMMENDED_VIEWS
         ],
         _heading(2, "共通プロパティ (§6.3 真実性・コンプラ担保)"),
-        _bullet("ソース (select): EDINET/TDnet/J-Quants/yfinance/stooq/JPX/計算"),
+        _bullet("ソース (select): EDINET/TDnet/yfinance/stooq/JPX/計算"),
         _bullet("ライセンスタグ (select): commercial-ok/factual-cite/personal-only"),
         _bullet("データ基準日 (date): その値が指す時点 / 取得日時 (date): パイプラインが取得した時刻"),
         _bullet("原本 (relation→⑤): 由来する原本ファイル行。どの値も原本まで遡れます (§3-3)"),

@@ -66,13 +66,18 @@ def resolve_codes(ctx: JobContext) -> list[str]:
 
 
 def _ohlcv(df: pd.DataFrame) -> pd.DataFrame:
-    """コレクター毎の列名差を compute_technicals の要求形式へ正規化（値不変）。"""
+    """コレクター毎の列名差を compute_technicals の要求形式へ正規化（値不変）。
+
+    日付昇順へ整える（並べ替えのみ・値不変）。compute_technicals と
+    has_probable_split が同一の「直近」解釈を共有するため (§ 分割検出の順序一貫性)。
+    """
     out = df.copy()
     out.columns = [str(c).lower() for c in out.columns]
     if "date" not in out.columns:
         out = out.reset_index()
         out.columns = [str(c).lower() for c in out.columns]
-    return out[["date", "open", "high", "low", "close", "volume"]]
+    out = out[["date", "open", "high", "low", "close", "volume"]]
+    return out.sort_values("date").reset_index(drop=True)
 
 
 def _build_record(
@@ -84,7 +89,20 @@ def _build_record(
 ) -> PriceTechnicalRecord:
     ohlcv = _ohlcv(df)
     tech = technicals.compute_technicals(ohlcv)
-    quality = DataQuality.OK if tech["close"] is not None else DataQuality.MISSING
+    # 品質判定 (§ コーポレートアクション Phase1。正直化):
+    # - 終値なし → 欠損あり
+    # - SMA25 すら出ない＝履歴不足（新規上場等）→ 欠損あり（指標が出揃わない §3-1）。
+    #   履歴不足の単日急変を「分割」と断定しないよう、分割判定より先に評価する。
+    # - 直近窓に大幅な単日変動（分割/併合の可能性）→ 要確認（自動調整しない §3-5）
+    if tech["close"] is None:
+        quality = DataQuality.MISSING
+    elif tech["sma25"] is None:
+        quality = DataQuality.MISSING
+    elif technicals.has_probable_split(ohlcv["close"]):
+        quality = DataQuality.NEEDS_REVIEW
+        logger.info("要確認(%s): 直近に大幅な単日変動（分割/併合の可能性）。テクニカルが分割をまたぐ恐れ", code)
+    else:
+        quality = DataQuality.OK
     prov = Provenance(
         source=src,
         # テクニカルは計算値: 入力価格ソースのタグを継承 (§2.2) = personal-only

@@ -57,7 +57,18 @@ DOC_TYPE_BUYBACK = "自社株買い"
 DOC_TYPE_LARGE_HOLDING = "大量保有"
 DOC_TYPE_ANNUAL_REPORT = "有報"
 DOC_TYPE_QUARTERLY_REPORT = "四半期報告"
+# コーポレートアクション (§ Phase2 イベント台帳)
+DOC_TYPE_SPLIT = "株式分割"
+DOC_TYPE_CONSOLIDATION = "株式併合"
+DOC_TYPE_DELISTING = "上場廃止"
+DOC_TYPE_NEW_LISTING = "新規上場"
 DOC_TYPE_OTHER = "その他"
+
+# 比率を構造化抽出する書類種別 / 効力発生日を抽出する書類種別
+RATIO_DOC_TYPES: frozenset[str] = frozenset({DOC_TYPE_SPLIT, DOC_TYPE_CONSOLIDATION})
+CORPORATE_ACTION_TYPES: frozenset[str] = frozenset(
+    {DOC_TYPE_SPLIT, DOC_TYPE_CONSOLIDATION, DOC_TYPE_DELISTING, DOC_TYPE_NEW_LISTING}
+)
 
 KW_TANSHIN = "決算短信"
 KW_FORECAST = "業績予想"
@@ -68,17 +79,35 @@ KW_ACQUIRE = "取得"
 KW_LARGE_HOLDING = "大量保有"
 KW_ANNUAL_REPORT = "有価証券報告書"
 KW_QUARTERLY_REPORT = "四半期報告書"
+KW_SPLIT = "株式分割"
+KW_CONSOLIDATION = "株式併合"
+KW_DELISTING = "上場廃止"
+KW_NEW_LISTING = "新規上場"
 
 
 def classify_title(title: str) -> str:
     """開示タイトルから書類種別を判定する (§6.4 書類種別 select)。
 
     判定は上から順の優先度付き（例: 「第１四半期決算短信」は短信扱い、
-    「業績予想及び配当予想の修正」は業績修正扱い）。
+    「業績予想及び配当予想の修正」は業績修正扱い）。コーポレートアクション
+    （分割/併合/上場廃止/新規上場）は短信の次に判定する（§ Phase2）。
     どれにも該当しなければ「その他」。推定はせずキーワード一致のみ。
     """
     if KW_TANSHIN in title:
         return DOC_TYPE_TANSHIN
+    if KW_SPLIT in title or KW_CONSOLIDATION in title:
+        # 「株式分割に伴う配当予想の修正」のように分割を“言及”するだけで本体は修正、
+        # という開示は、比率がタイトルに無く修正パターンに合致するなら修正へ回す
+        # （本物の分割告知は比率を明記する。§ Phase2 偽陽性の抑制）。
+        is_revision = (KW_FORECAST in title and KW_REVISION in title) or (
+            KW_DIVIDEND in title and KW_REVISION in title
+        )
+        if parse_split_terms(title)[1] is not None or not is_revision:
+            return DOC_TYPE_SPLIT if KW_SPLIT in title else DOC_TYPE_CONSOLIDATION
+    if KW_DELISTING in title:  # 「上場廃止」を「新規上場」より先に判定
+        return DOC_TYPE_DELISTING
+    if KW_NEW_LISTING in title:
+        return DOC_TYPE_NEW_LISTING
     if KW_FORECAST in title and KW_REVISION in title:
         return DOC_TYPE_FORECAST_REVISION
     if KW_DIVIDEND in title and KW_REVISION in title:
@@ -92,6 +121,67 @@ def classify_title(title: str) -> str:
     if KW_QUARTERLY_REPORT in title:
         return DOC_TYPE_QUARTERLY_REPORT
     return DOC_TYPE_OTHER
+
+
+# 全角→半角（数字・コロン）正規化。値の改変ではなく形式変換のみ (§5.2)
+_FW_TRANSLATE = str.maketrans("０１２３４５６７８９：", "0123456789:")
+
+# "1株を3株に分割" / "1株につき3株" / "1株を3株とする" / "1対3株"（末尾に株）
+_SPLIT_PAIR_RE = re.compile(r"(\d+)\s*株?\s*(?:を|につき|対|:)\s*(\d+)\s*株")
+# "1:3" / "1対3"（株を伴わない比率表記）
+_RATIO_RE = re.compile(r"(\d+)\s*[:対]\s*(\d+)")
+# "効力発生日 2026年4月1日" 等（効力発生の語に日付が直近する場合のみ拾う）。
+# 連結子を限定し「効力発生日に先立つ基準日を YYYY年…」のような後続の別日付
+# (基準日) を誤って掴まない (§ Phase2。誤った権威的日付は欠損より悪い §3-1)。
+_EFFECTIVE_DATE_RE = re.compile(
+    r"効力発生日?[\s（(:：・,，。．をはがと/／]{0,6}(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日"
+)
+
+
+def parse_split_terms(title: str) -> tuple[str | None, float | None]:
+    """分割/併合タイトルから (比率テキスト, 係数) を最善努力で抽出する (§ Phase2/4)。
+
+    例: 「1株を3株に分割」→ ("1:3", 3.0)、「5株を1株に併合」→ ("5:1", 0.2)。
+    係数 = 新株数 / 旧株数（分割>1, 併合<1。Phase4 の価格調整に使える一次属性）。
+    タイトルから明確に取れない場合は (None, None)（推定しない §3-1。原文に委ねる）。
+    """
+    t = title.translate(_FW_TRANSLATE)
+    m = _SPLIT_PAIR_RE.search(t) or _RATIO_RE.search(t)
+    if not m:
+        return None, None
+    old, new = int(m.group(1)), int(m.group(2))
+    if old <= 0 or new <= 0:
+        return None, None
+    return f"{old}:{new}", new / old
+
+
+def parse_effective_date(title: str) -> date | None:
+    """タイトルに「効力発生日 YYYY年M月D日」があれば date を返す (§ Phase2)。
+
+    タイトルに効力発生日が無い場合（多くはこちら）は None。発表日(開示日)を
+    効力発生日に流用しない（§3-1。権利タイミングは原文リンクで確認する）。
+    """
+    m = _EFFECTIVE_DATE_RE.search(title.translate(_FW_TRANSLATE))
+    if not m:
+        return None
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+
+
+def corporate_action_attrs(
+    title: str, doc_type: str
+) -> tuple[str | None, float | None, date | None]:
+    """書類種別に応じてコーポレートアクション属性 (比率, 係数, 効力発生日) を抽出。"""
+    split_ratio: str | None = None
+    split_factor: float | None = None
+    effective_date: date | None = None
+    if doc_type in RATIO_DOC_TYPES:
+        split_ratio, split_factor = parse_split_terms(title)
+    if doc_type in CORPORATE_ACTION_TYPES:
+        effective_date = parse_effective_date(title)
+    return split_ratio, split_factor, effective_date
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +289,8 @@ def parse_list_payload(
                 logger.warning("doc_id を導出できずスキップ: title=%s", title[:40])
                 continue
             doc_id = f"yanoshin-{yanoshin_id}"
+        doc_type = classify_title(title)
+        split_ratio, split_factor, effective_date = corporate_action_attrs(title, doc_type)
         records.append(
             DisclosureRecord(
                 doc_id=doc_id,
@@ -212,9 +304,12 @@ def parse_list_payload(
                     raw_page_id=raw_page_id,
                 ),
                 code=normalize_company_code(t.get("company_code")),
-                doc_type=classify_title(title),
+                doc_type=doc_type,
                 source_url=source_url,
                 has_xbrl=bool(t.get("url_xbrl")),
+                split_ratio=split_ratio,
+                split_factor=split_factor,
+                effective_date=effective_date,
             )
         )
     return records

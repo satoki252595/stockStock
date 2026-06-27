@@ -1,5 +1,5 @@
 # 土曜 9:00 JST (DESIGN.md §8.2)。cron は UTC 表記
-name: jquants_weekly
+name: reconcile_weekly
 
 on:
   schedule:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: jquants_weekly
+  group: reconcile_weekly
   cancel-in-progress: false
 
 permissions:
@@ -23,12 +23,10 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Sync dependencies
         run: nix develop -c uv sync
-      - name: Run jquants_weekly
+      - name: Run reconcile_weekly
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
-          JQUANTS_MAIL_ADDRESS: ${{ secrets.JQUANTS_MAIL_ADDRESS }}
-          JQUANTS_PASSWORD: ${{ secrets.JQUANTS_PASSWORD }}
           NOTION_DB_STOCK_MASTER: ${{ secrets.NOTION_DB_STOCK_MASTER }}
           NOTION_DB_PRICES: ${{ secrets.NOTION_DB_PRICES }}
           NOTION_DB_FINANCIALS: ${{ secrets.NOTION_DB_FINANCIALS }}
@@ -36,4 +34,4 @@ jobs:
           NOTION_DB_RAW_FILES: ${{ secrets.NOTION_DB_RAW_FILES }}
           NOTION_DB_EXPORTS: ${{ secrets.NOTION_DB_EXPORTS }}
           NOTION_DB_JOB_LOG: ${{ secrets.NOTION_DB_JOB_LOG }}
-        run: nix develop -c uv run python -m jp_stock_pipeline.jobs.jquants_weekly
+        run: nix develop -c uv run python -m jp_stock_pipeline.jobs.reconcile_weekly

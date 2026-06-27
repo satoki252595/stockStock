@@ -19,7 +19,7 @@ uv run pytest        # テスト
    NOTION_TOKEN=secret_xxx uv run python -m jp_stock_pipeline.notion.schema
    ```
 
-3. GitHub Secrets を設定: `NOTION_TOKEN` / `EDINET_API_KEY` / `JQUANTS_MAIL_ADDRESS` / `JQUANTS_PASSWORD` / 各DB ID（`NOTION_DB_*`、`db_ids.json` の出力値）
+3. GitHub Secrets を設定: `NOTION_TOKEN` / `EDINET_API_KEY` / 各DB ID（`NOTION_DB_*`、`db_ids.json` の出力値）
 
 ## ジョブ（GitHub Actions cron / 手動実行可）
 
@@ -29,7 +29,7 @@ uv run pytest        # テスト
 | 株価+テクニカル | `uv run python -m jp_stock_pipeline.jobs.prices_daily` |
 | TDnet開示 | `uv run python -m jp_stock_pipeline.jobs.tdnet_hourly` |
 | EDINET書類 | `uv run python -m jp_stock_pipeline.jobs.edinet_daily` |
-| J-Quants突合 | `uv run python -m jp_stock_pipeline.jobs.jquants_weekly` |
+| 株価突合(stooq) | `uv run python -m jp_stock_pipeline.jobs.reconcile_weekly` |
 | エクスポート | `uv run python -m jp_stock_pipeline.jobs.export_weekly` |
 
 全ジョブ `--dry-run` 対応（Notion に書き込まない）。
@@ -39,7 +39,7 @@ uv run pytest        # テスト
 - 取得単位ごとに原本を ⑤原本ファイルDB へ必ず保存（失敗時は構造化データを書かない）
 - ダミー・推定・補間データの生成禁止。欠損は欠損のまま
 - 全行にソース・ライセンスタグ（`commercial-ok`/`factual-cite`/`personal-only`）・来歴を付与
-- J-Quants 無料版・yfinance・stooq・JPX統計は **personal-only**（公開・商用利用禁止）
+- yfinance・stooq・JPX統計は **personal-only**（公開・商用利用禁止）
 
 ## テストフィクスチャ
 
