@@ -141,7 +141,7 @@ def _process_document(ctx: JobContext, doc: dict, list_page_id: str) -> None:
 def execute(ctx: JobContext) -> None:
     target_date = ctx.args.date or now_jst().date()
 
-    # 1-4. 書類一覧の取得・原本⑤UL (失敗時 RawUploadError → 構造化書き込みなし §8.1-4)
+    # 1-4. 書類一覧取得・原本⑤UL（Notion⑤/ローカル⑤ 独立。両系統とも失敗時のみ中止 §7.1/§3-3）
     list_artifact, docs = edinet.list_documents(ctx.settings, target_date)
     json_to_parquet.convert_artifact(list_artifact, "json")
     list_page_id = ctx.upload_raw(list_artifact)

@@ -301,12 +301,15 @@ def run_job(
         except Exception as exc:  # noqa: BLE001
             logger.warning("⑦ ローカルジョブログ記録失敗: %s", exc)
         ctx.local.close()
-        if ctx.mirror_failed or ctx.notion_failed:
-            logger.warning(
-                "dual-write degrade: Notion書き込み失敗 %d 件 / ローカルミラー失敗 %d 件"
-                "（双方向フェールセーフで継続。両系統とも失敗した分のみ ⑦ failed に計上）",
-                ctx.notion_failed, ctx.mirror_failed,
-            )
+
+    # 書き込み degrade サマリ（local 接続の有無に依らず出力。両カウンタ 0 なら無出力）。
+    # Notion 単独運用でも notion_failed を俯瞰できるよう dual-write 前提の文言は避ける。
+    if ctx.mirror_failed or ctx.notion_failed:
+        logger.warning(
+            "書き込み degrade サマリ: Notion失敗 %d 件 / ローカルミラー失敗 %d 件"
+            "（片系統失敗は継続し、両系統とも失敗した分のみ ⑦ failed に計上 §3-2）",
+            ctx.notion_failed, ctx.mirror_failed,
+        )
 
     logger.info(
         "%s: %s (processed=%d failed=%d %.1fs)",
