@@ -217,6 +217,7 @@ Notion を正本としつつ、収集ジョブが LAN 内の別端末（端末B�
 - **②の時系列化**: ローカルは `(code, data_date)` を主キーに時系列を蓄積（Notion は最新スナップショット）。API の `/prices/{code}?from=&to=` で期間取得できる。
 - **テーブル**: ①〜⑤⑦ に対応。`②`（personal-only）はローカル自己利用に限定し、公開 API として外部提供する場合は `commercial-ok`/`factual-cite`（①③④）のみをフィルタする。
 - **起動**: `uvicorn jp_stock_pipeline.local_store.api:app`（`/docs` に OpenAPI。`/health` のみ認証不要）。
+- **本番サーバ運用（トポロジ B）**: サーバで PostgreSQL + FastAPI を常駐させ、収集は GitHub Actions（cloud 経路）から **Tailscale 経由**で dual-write する。PG は tailnet 内のみに listen させ（直公開せず MITM を構造的に回避）、tailnet 上では `sslmode=disable` で足りる。runner は `tailscale/github-action` で tailnet に参加（OAuth Secrets 未設定なら参加失敗するが収集は Notion へ継続＝dual-write degrade）。systemd ユニット・PG 初期化・日次 `pg_dump` バックアップ・接続手順は [`deploy/`](../deploy/README.md) に同梱。②の時系列は Notion に無くサーバ DB が唯一の保持先なのでバックアップ必須。
 
 ---
 

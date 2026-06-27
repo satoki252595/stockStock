@@ -74,6 +74,13 @@ nix develop -c uv run uvicorn jp_stock_pipeline.local_store.api:app --host 0.0.0
 curl -H "X-API-Key: $LOCAL_API_KEY" "http://192.168.1.50:8000/prices/7203?from=2026-01-01"
 ```
 
+### 本番サーバ運用（収集=GitHub Actions / サーバ=DB+API）
+
+サーバ上で PostgreSQL + FastAPI を常駐させ、収集は GitHub Actions（cloud 経路）から
+**Tailscale 経由**で dual-write する構成。systemd ユニット・PostgreSQL 初期化・日次
+バックアップ・Tailscale 接続・GitHub Secrets 配線の手順は
+**[deploy/README.md](deploy/README.md)** にまとめてある。
+
 ## 不変条件
 
 - 取得単位ごとに原本を ⑤原本ファイルDB へ必ず保存（失敗時は構造化データを書かない）

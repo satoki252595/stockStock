@@ -1,0 +1,26 @@
+# FastAPI（ローカル PostgreSQL を tailnet 上で X-API-Key 公開）を常駐させる。
+# 実行は CI と同じ nix develop 経由（CLAUDE.md の nix 統一方針）。
+# 配置: /etc/systemd/system/jp-stock-api.service
+#   User= / WorkingDirectory= は環境に合わせて編集すること。
+[Unit]
+Description=jp-stock-pipeline local FastAPI (read-only mirror API)
+After=network-online.target postgresql.service tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jpstock
+WorkingDirectory=/opt/jp-stock-pipeline
+EnvironmentFile=/opt/jp-stock-pipeline/.env
+# LOCAL_API_HOST/PORT は .env で指定（既定 0.0.0.0:8000）。tailnet IP を推奨。
+# api.main() が LOCAL_API_HOST/LOCAL_API_PORT を読んで uvicorn を起動する。
+ExecStart=/usr/bin/env nix develop -c uv run python -m jp_stock_pipeline.local_store.api
+Restart=on-failure
+RestartSec=5
+# 簡易ハードニング（読み取り専用 API）。nix/uv が $HOME/.cache や /nix を使うため
+# ProtectHome/ProtectSystem=strict は付けない（付けると nix develop が壊れる）。
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
