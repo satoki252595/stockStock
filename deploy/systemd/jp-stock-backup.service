@@ -1,0 +1,12 @@
+# jp_stock DB の日次 pg_dump（jp-stock-backup.timer から起動）。
+# 配置: /etc/systemd/system/jp-stock-backup.service
+[Unit]
+Description=jp-stock-pipeline PostgreSQL daily backup
+After=postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=oneshot
+User=jpstock
+EnvironmentFile=-/opt/jp-stock-pipeline/.env
+ExecStart=/opt/jp-stock-pipeline/deploy/backup.sh

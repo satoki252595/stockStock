@@ -15,6 +15,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from ..models import (
         DisclosureRecord,
         FinancialSummaryRecord,
@@ -202,6 +204,71 @@ def raw_file_upsert(artifact: RawArtifact) -> tuple[str, dict]:
         "notion_page_id": artifact.notion_page_id,
     }
     return _build_upsert("raw_files", params, ["sha256"])
+
+
+_XBRL_FACT_COLUMNS: tuple[str, ...] = (
+    "doc_id", "element", "context_ref", "code", "period_start", "period_end",
+    "instant_date", "consolidated", "unit", "value", "is_text_block",
+    "source", "license_tag", "fetched_at",
+)
+_XBRL_FACT_PK: tuple[str, ...] = ("doc_id", "element", "context_ref")
+
+
+def xbrl_facts_insert(
+    rows: "Iterable[dict]", artifact: RawArtifact
+) -> tuple[str, list[dict]]:
+    """⑧ XBRL 全ファクト（ローカル専用）。doc 単位の tidy 行を bulk upsert する。
+
+    - rows は convert.xbrl_to_csv の tidy レコード（dict）。value が空（nil/欠損 §3-1）
+      の行は格納しない（欠損は格納せず＝非存在で表現）。
+    - PK=(doc_id, element, context_ref)。同一バッチ内の PK 重複は最後の値で de-dup する
+      （決定的な last-wins と冗長 upsert の削減。複数 .xbrl を同一 doc_id でパースする
+      EDINET 等で同一 PK が異なる値で現れた場合は後勝ちになる点に注意）。
+    - 来歴 source/license_tag/fetched_at は原本 artifact から付与（行ごとにライセンスを
+      持たせ、公開面で commercial-ok のみフィルタできるようにする §2.2）。
+    - 返り値: (executemany 用 SQL, パラメータ dict のリスト)。リストが空なら呼び出し側は
+      実行しない。
+    """
+    source = artifact.source.value
+    license_tag = artifact.license_tag.value
+    fetched_at = artifact.fetched_at
+    deduped: dict[tuple[str, str, str], dict] = {}
+    for row in rows:
+        raw_value = row.get("value")
+        value = raw_value.strip() if isinstance(raw_value, str) else raw_value
+        if not value:
+            continue  # nil/欠損は格納しない（§3-1）
+        doc_id = row.get("doc_id") or ""
+        element = row.get("element") or ""
+        context_ref = row.get("context_ref") or ""
+        if not (doc_id and element and context_ref):
+            continue  # PK を構成できない行はスキップ
+        deduped[(doc_id, element, context_ref)] = {
+            "doc_id": doc_id,
+            "element": element,
+            "context_ref": context_ref,
+            "code": row.get("code") or None,
+            "period_start": row.get("period_start") or None,
+            "period_end": row.get("period_end") or None,
+            "instant_date": row.get("instant_date") or None,
+            "consolidated": row.get("consolidated") or None,
+            "unit": row.get("unit") or None,
+            "value": value,
+            "is_text_block": element.endswith("TextBlock"),
+            "source": source,
+            "license_tag": license_tag,
+            "fetched_at": fetched_at,
+        }
+    col_list = ", ".join(_XBRL_FACT_COLUMNS)
+    placeholders = ", ".join(f"%({c})s" for c in _XBRL_FACT_COLUMNS)
+    update_cols = [c for c in _XBRL_FACT_COLUMNS if c not in _XBRL_FACT_PK]
+    set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
+    pk_clause = ", ".join(_XBRL_FACT_PK)
+    sql = (
+        f"INSERT INTO xbrl_facts ({col_list}) VALUES ({placeholders}) "
+        f"ON CONFLICT ({pk_clause}) DO UPDATE SET {set_clause}, updated_at = now()"
+    )
+    return sql, list(deduped.values())
 
 
 def job_log_insert(

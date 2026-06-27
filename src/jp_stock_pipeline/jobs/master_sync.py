@@ -1,7 +1,8 @@
 """master_sync: EDINETコードリスト → ① 銘柄マスタ同期 (DESIGN.md §8.2, P1)。
 
 フロー (§8.1): fetch → save raw → convert → ⑤UL(必須) → parse → ① upsert → ⑦記録。
-原本アップロード失敗時は構造化データを一切書き込まず異常終了する (§8.1-4)。
+原本(⑤)を Notion・ローカルの両系統に保存できなかった取得単位のみ構造化を書かず中止する
+（片系統に原本が残れば構造化は書く。① upsert 自体も Notion/ローカル独立 §7.1/§3-3）。
 """
 
 from __future__ import annotations
@@ -26,8 +27,8 @@ def execute(ctx: JobContext) -> None:
     artifact = edinet_codelist.fetch_codelist(ctx.settings)
     artifact = edinet_codelist.convert_codelist(artifact)
 
-    # 4. ⑤へ原本+変換版を必ずアップロード。RawUploadError はそのまま伝播し
-    #    ジョブ失敗となる（構造化書き込みはこの後なので一切行われない §8.1-4）
+    # 4. ⑤へ原本+変換版を UL（Notion⑤/ローカル⑤ 独立）。両系統とも保存に失敗した
+    #    ときのみ RawUploadError を伝播し中止（片系統に残れば構造化は続行 §7.1/§3-3）
     raw_page_id = ctx.upload_raw(artifact)
 
     # 5. Transform（全件。上場廃止検知のため limit 前の全コードを保持）

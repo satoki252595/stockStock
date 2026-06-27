@@ -153,6 +153,34 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
     )
     """,
+    # ⑧ XBRL 全ファクト（ローカル専用・Notion 非ミラー） ---------------------
+    # 有報/短信 XBRL の全ファクト（数値＋定性 textBlock）を保持する。Notion ③ は
+    # 厳選した財務サマリのみで、定性情報（事業等のリスク等の TextBlock）や③に
+    # 載らない数値は⑤のCSVに埋もれていた。これを横断クエリ＋日本語全文検索できる
+    # 形で保持する（§7.1）。来歴: doc_id→④開示 / license_tag を各行に持ち、公開面では
+    # commercial-ok のみをフィルタできる（factual-cite=短信原文は内部利用限定 §2.2）。
+    # value は変換版そのまま（数値は ix 復号済み文字列・定性は原文テキスト §5.2）。
+    """
+    CREATE TABLE IF NOT EXISTS xbrl_facts (
+        doc_id        TEXT NOT NULL,
+        element       TEXT NOT NULL,
+        context_ref   TEXT NOT NULL,
+        code          TEXT,
+        period_start  TEXT,
+        period_end    TEXT,
+        instant_date  TEXT,
+        consolidated  TEXT,
+        unit          TEXT,
+        value         TEXT NOT NULL,
+        is_text_block BOOLEAN NOT NULL DEFAULT FALSE,
+        source        TEXT NOT NULL,
+        license_tag   TEXT NOT NULL,
+        fetched_at    TIMESTAMPTZ NOT NULL,
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (doc_id, element, context_ref)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS xbrl_facts_code_idx ON xbrl_facts (code)",
     # ⑦ 収集ジョブログ（1行=1ジョブ実行） ----------------------------------
     """
     CREATE TABLE IF NOT EXISTS job_log (
@@ -168,4 +196,14 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS job_log_name_idx ON job_log (job_name, finished_at)",
+)
+
+# PGroonga による日本語全文検索インデックス（ベストエフォート）。
+# PGroonga 拡張が入っていない端末では CREATE EXTENSION が失敗するため、
+# SCHEMA_STATEMENTS とは分離し sink 側で失敗を握って LIKE 検索へフォールバックする。
+# 定性 textBlock のみを対象にして索引を小さく保つ。
+FTS_STATEMENTS: tuple[str, ...] = (
+    "CREATE EXTENSION IF NOT EXISTS pgroonga",
+    "CREATE INDEX IF NOT EXISTS xbrl_facts_value_fts "
+    "ON xbrl_facts USING pgroonga (value) WHERE is_text_block",
 )

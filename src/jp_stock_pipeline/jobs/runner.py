@@ -122,6 +122,20 @@ class JobContext:
         """上場廃止/新規上場の状態反映をローカルへ。"""
         return self._mirror(lambda s: s.apply_disclosure_lifecycle(record), "lifecycle")
 
+    def mirror_xbrl_facts(self, tidy, artifact) -> bool | None:
+        """XBRL 全ファクト（定性 textBlock 含む）をローカル専用テーブル⑧へミラーする。
+
+        Notion には対応オブジェクトが無い（③は財務サマリの要約のみ）ためローカル限定の
+        派生ストア。dual-write ではなくベストエフォート（失敗は mirror_failed に計上し
+        収集は止めない §3-2）。tidy は pandas DataFrame か dict 反復可能。None/空は no-op。
+        """
+        if self.local is None or tidy is None:
+            return None
+        rows = tidy.to_dict("records") if hasattr(tidy, "to_dict") else list(tidy)
+        if not rows:
+            return None
+        return self._mirror(lambda s: s.upsert_xbrl_facts(rows, artifact), "xbrl_facts")
+
     def _persist(self, notion_write, local_write, label: str) -> bool:
         """Notion とローカルへ独立に書き、少なくとも一方に残せたかを返す。
 
@@ -301,12 +315,15 @@ def run_job(
         except Exception as exc:  # noqa: BLE001
             logger.warning("⑦ ローカルジョブログ記録失敗: %s", exc)
         ctx.local.close()
-        if ctx.mirror_failed or ctx.notion_failed:
-            logger.warning(
-                "dual-write degrade: Notion書き込み失敗 %d 件 / ローカルミラー失敗 %d 件"
-                "（双方向フェールセーフで継続。両系統とも失敗した分のみ ⑦ failed に計上）",
-                ctx.notion_failed, ctx.mirror_failed,
-            )
+
+    # 書き込み degrade サマリ（local 接続の有無に依らず出力。両カウンタ 0 なら無出力）。
+    # Notion 単独運用でも notion_failed を俯瞰できるよう dual-write 前提の文言は避ける。
+    if ctx.mirror_failed or ctx.notion_failed:
+        logger.warning(
+            "書き込み degrade サマリ: Notion失敗 %d 件 / ローカルミラー失敗 %d 件"
+            "（片系統失敗は継続し、両系統とも失敗した分のみ ⑦ failed に計上 §3-2）",
+            ctx.notion_failed, ctx.mirror_failed,
+        )
 
     logger.info(
         "%s: %s (processed=%d failed=%d %.1fs)",

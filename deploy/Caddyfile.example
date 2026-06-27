@@ -1,0 +1,14 @@
+# 任意: API を公開インターネットに HTTPS で出したい場合のみ使う。
+# tailnet 内からの閲覧で足りるなら不要（その場合 API は tailscale IP で listen させ、
+# 公開ポートは開けない）。Caddy は Let's Encrypt 証明書を自動取得する。
+#
+# 使い方:
+#   sudo apt-get install -y caddy
+#   sudo cp deploy/Caddyfile.example /etc/caddy/Caddyfile  # ドメインと API ポートを編集
+#   sudo systemctl restart caddy
+# このとき API(.env) は LOCAL_API_HOST=127.0.0.1 にして localhost のみで listen させ、
+# 外部公開は Caddy(443) だけにする。認証は引き続き X-API-Key で行う。
+
+stock-api.example.com {
+    reverse_proxy 127.0.0.1:8000
+}
