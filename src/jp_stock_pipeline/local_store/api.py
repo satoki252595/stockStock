@@ -21,7 +21,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 
-from ..config import LocalStoreSettings, load_settings
+from ..config import DB_TARGET_LAN, LocalStoreSettings, load_settings
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +49,9 @@ def _query(settings: LocalStoreSettings, sql: str, params: dict | None = None) -
     from psycopg.rows import dict_row
 
     try:
+        # API は端末B 内で動くため lan プロファイル(既定 localhost)で自DBに接続する
         with psycopg.connect(
-            **settings.connect_kwargs(), connect_timeout=5, row_factory=dict_row
+            **settings.connect_kwargs(DB_TARGET_LAN), connect_timeout=5, row_factory=dict_row
         ) as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params or {})

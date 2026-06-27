@@ -36,35 +36,70 @@ class ConfigError(RuntimeError):
 # 端末B(ローカル PostgreSQL)既定値。IP/ユーザー等の機微情報は .env で上書きする。
 DEFAULT_LOCAL_DB_PORT = 5432
 DEFAULT_LOCAL_DB_NAME = "jp_stock"
+DEFAULT_LOCAL_DB_LAN_HOST = "localhost"
+# cloud: 経路を暗号化(require)。ただし require はサーバ認証をしない — 能動的 MITM
+# 対策には VPN 経由か sslmode=verify-full + ルートCA が必要 (§7.1)。
+DEFAULT_LOCAL_DB_SSLMODE = "require"
+DEFAULT_LOCAL_DB_LAN_SSLMODE = "prefer"     # lan: 同一 LAN なので TLS 任意
+
+# dual-write の接続プロファイル。--db-target で選択（既定 cloud）。
+DB_TARGET_CLOUD = "cloud"
+DB_TARGET_LAN = "lan"
+DB_TARGETS = (DB_TARGET_CLOUD, DB_TARGET_LAN)
 
 
 @dataclass
 class LocalStoreSettings:
     """端末B(PostgreSQL)への dual-write / FastAPI 配信の接続情報 (.env 管理)。
 
-    host が未設定なら dual-write は無効（Notion のみ書き込む）。資格情報は
-    コードに埋め込まず LOCAL_DB_* 環境変数 (.env) からのみ読む (§9)。
+    接続プロファイルは2系統で、収集ジョブの --db-target で選ぶ:
+    - cloud(既定): host=LOCAL_DB_HOST(端末B のグローバル/VPN アドレス) + sslmode=require。
+      クラウド(GitHub Actions 等)から端末B へ格納する既定経路。
+    - lan: lan_host=LOCAL_DB_LAN_HOST(既定 localhost) + sslmode=prefer。同一 LAN で
+      手動実行するとき --db-target lan で選ぶ。FastAPI(端末B 内)も lan で localhost 接続。
+
+    対象プロファイルの host が未設定なら dual-write は無効（Notion のみ書き込む）。
+    資格情報はコードに埋め込まず LOCAL_DB_* 環境変数 (.env) からのみ読む (§9)。
     """
 
-    host: str | None
+    host: str | None            # cloud 接続先 (LOCAL_DB_HOST)
     port: int
     dbname: str
     user: str | None
     password: str | None
     api_key: str | None  # FastAPI の X-API-Key 認証用 (API 側のみ参照)
+    lan_host: str | None = None                        # lan 接続先 (LOCAL_DB_LAN_HOST。未設定=無効)
+    sslmode: str = DEFAULT_LOCAL_DB_SSLMODE            # cloud の TLS モード
+    lan_sslmode: str = DEFAULT_LOCAL_DB_LAN_SSLMODE    # lan の TLS モード
 
-    @property
-    def enabled(self) -> bool:
-        """host が設定されていれば dual-write / API を有効化する。"""
-        return bool(self.host)
+    def _host_for(self, target: str) -> str | None:
+        """dual-write 有効判定用の host（明示設定値。lan も未設定なら None）。"""
+        return self.lan_host if target == DB_TARGET_LAN else self.host
 
-    def connect_kwargs(self) -> dict:
+    def enabled(self, target: str = DB_TARGET_CLOUD) -> bool:
+        """その接続プロファイルの host が明示設定されていれば dual-write を有効化する。
+
+        cloud は LOCAL_DB_HOST、lan は LOCAL_DB_LAN_HOST が必要。lan を localhost へ
+        暗黙フォールバックして意図しない自端末への誤ミラーを起こさないよう、lan も
+        host の明示を要求する（API の自DB接続は connect_kwargs 側で localhost を補完）。
+        """
+        return bool(self._host_for(target))
+
+    def connect_kwargs(self, target: str = DB_TARGET_CLOUD) -> dict:
         """psycopg.connect(**kwargs) 用の接続引数。
 
         文字列連結ではなくキーワード引数で渡す（空白・特殊文字を含むパスワードでも
-        libpq のクォート不備で壊れない）。
+        libpq のクォート不備で壊れない）。target=lan で lan_host 未設定なら localhost に
+        補完する（端末B 内 FastAPI の自DB接続用）。sslmode=require は経路を暗号化するが
+        サーバ認証はしない（能動的 MITM 対策には VPN か verify-full + ルートCA が必要 §7.1）。
         """
-        kwargs: dict = {"host": self.host, "port": self.port, "dbname": self.dbname}
+        if target == DB_TARGET_LAN:
+            host = self.lan_host or DEFAULT_LOCAL_DB_LAN_HOST
+            sslmode = self.lan_sslmode
+        else:
+            host = self.host
+            sslmode = self.sslmode
+        kwargs: dict = {"host": host, "port": self.port, "dbname": self.dbname, "sslmode": sslmode}
         if self.user:
             kwargs["user"] = self.user
         if self.password:
@@ -85,6 +120,9 @@ def _load_local_store(env: dict[str, str]) -> LocalStoreSettings:
         user=env.get("LOCAL_DB_USER") or None,
         password=env.get("LOCAL_DB_PASSWORD") or None,
         api_key=env.get("LOCAL_API_KEY") or None,
+        lan_host=env.get("LOCAL_DB_LAN_HOST") or None,
+        sslmode=env.get("LOCAL_DB_SSLMODE") or DEFAULT_LOCAL_DB_SSLMODE,
+        lan_sslmode=env.get("LOCAL_DB_LAN_SSLMODE") or DEFAULT_LOCAL_DB_LAN_SSLMODE,
     )
 
 

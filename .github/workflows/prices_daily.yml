@@ -34,4 +34,12 @@ jobs:
           NOTION_DB_RAW_FILES: ${{ secrets.NOTION_DB_RAW_FILES }}
           NOTION_DB_EXPORTS: ${{ secrets.NOTION_DB_EXPORTS }}
           NOTION_DB_JOB_LOG: ${{ secrets.NOTION_DB_JOB_LOG }}
+          # クラウド → 端末B PostgreSQL への dual-write (未設定なら Notion のみ)。
+          # 直公開は危険なため VPN(Tailscale 等)経由を推奨。sslmode 既定は require。
+          LOCAL_DB_HOST: ${{ secrets.LOCAL_DB_HOST }}
+          LOCAL_DB_PORT: ${{ secrets.LOCAL_DB_PORT }}
+          LOCAL_DB_NAME: ${{ secrets.LOCAL_DB_NAME }}
+          LOCAL_DB_USER: ${{ secrets.LOCAL_DB_USER }}
+          LOCAL_DB_PASSWORD: ${{ secrets.LOCAL_DB_PASSWORD }}
+          LOCAL_DB_SSLMODE: ${{ secrets.LOCAL_DB_SSLMODE }}
         run: nix develop -c uv run python -m jp_stock_pipeline.jobs.prices_daily

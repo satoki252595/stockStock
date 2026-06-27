@@ -18,7 +18,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from ..config import DB_REGISTRY, ConfigError, Settings, load_settings
+from ..config import (
+    DB_REGISTRY,
+    DB_TARGET_CLOUD,
+    DB_TARGETS,
+    ConfigError,
+    Settings,
+    load_settings,
+)
 from ..local_store import connect_local_store
 from ..notion.client import NotionClient
 from ..notion.upsert import write_job_log
@@ -123,6 +130,10 @@ def build_parser(description: str) -> argparse.ArgumentParser:
     )
     parser.add_argument("--limit", type=int, default=None, help="処理件数上限 (段階的取り込み §1)")
     parser.add_argument("--codes", default=None, help="対象銘柄コードのカンマ区切り (テスト用)")
+    parser.add_argument(
+        "--db-target", choices=DB_TARGETS, default=DB_TARGET_CLOUD,
+        help="ローカルDB接続プロファイル (cloud=既定/クラウド経由, lan=同一LAN)",
+    )
     return parser
 
 
@@ -175,8 +186,10 @@ def run_job(
     )
     ctx = JobContext(settings=settings, client=client, args=args)
     # dual-write: 接続情報があればローカル PostgreSQL へミラー。dry-run は書き込まない。
+    # --db-target で cloud(既定/クラウド経由) か lan(同一LAN) を選ぶ。
     if not settings.dry_run:
-        ctx.local = connect_local_store(settings.local_store)
+        target = getattr(args, "db_target", DB_TARGET_CLOUD)
+        ctx.local = connect_local_store(settings.local_store, target)
     started = time.monotonic()
     crashed = False
     try:
