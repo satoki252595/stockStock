@@ -247,6 +247,27 @@ class TestCatalogPage:
         assert "投資助言ではありません" in text
         assert "EDINET（金融庁）" in text  # licensing.ATTRIBUTION の出典表記
 
+    def test_catalog_lists_all_schema_select_options(self, ensured):
+        """ドリフト検知: カタログ説明文に各 select の全選択肢が載っているか。
+
+        _CATALOG_DICTIONARY (説明文) は schema 実定数 (DOC_TYPES /
+        LISTING_STATUS_OPTIONS / SOURCE_OPTIONS) と二重管理になるため、定数へ
+        選択肢を足して説明を更新し忘れると本テストが落ちる (§7 ドリフト防止)。
+        """
+        _client, _settings, db_ids = ensured
+        blocks = schema.catalog_blocks(db_ids)
+        text = " ".join(
+            rt["text"]["content"]
+            for b in blocks
+            for rt in b[b["type"]].get("rich_text", [])
+        )
+        for value in schema.DOC_TYPES:
+            assert value in text, f"④書類種別 '{value}' がカタログ説明に未記載"
+        for value in schema.LISTING_STATUS_OPTIONS:
+            assert value in text, f"①状態 '{value}' がカタログ説明に未記載"
+        for value in schema.SOURCE_OPTIONS:
+            assert value in text, f"ソース '{value}' がカタログ説明に未記載"
+
     def test_recommended_views_reference_known_dbs(self):
         """ビューはAPI未対応のため定数定義+カタログ記載 (§7)。"""
         for view in schema.RECOMMENDED_VIEWS:
