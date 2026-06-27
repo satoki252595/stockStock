@@ -84,6 +84,47 @@ KW_CONSOLIDATION = "株式併合"
 KW_DELISTING = "上場廃止"
 KW_NEW_LISTING = "新規上場"
 
+# 上場廃止/新規上場で ① の状態を倒すのは「確定的な本体告知」のみ。否定・回避・
+# リスク段階・解除・派生修正・第三者(子会社等)の言及を含むタイトルは状態を
+# 倒さず「その他」へ回し人間判断に委ねる (§3-1 誤った権威的値は欠損より悪い /
+# §3-7。分割/併合と対称な偽陽性抑制)。例で抑制されるもの:
+#   「上場廃止に係る猶予期間入り」(まだ監理/整理段階) /「…の解消」(上場維持) /
+#   「上場廃止基準への抵触回避」「…には該当しない旨」(健全) /「…のおそれ」/
+#   「連結子会社◯◯の上場廃止」(開示主体は上場継続) /「上場廃止に伴う配当予想の修正」
+_LIFECYCLE_NEGATION_KW: tuple[str, ...] = (
+    "該当しない", "抵触しない", "非該当", "回避", "おそれ", "可能性",
+    "猶予", "解除", "解消", "見送り", "中止", "撤回",
+)
+_LIFECYCLE_THIRD_PARTY_KW: tuple[str, ...] = (
+    "子会社", "孫会社", "対象者", "関連会社", "持分法",
+)
+# 普通株は継続したまま別証券クラスのみを廃止する開示は、普通株コードに紐づく ① の
+# 状態を倒してはならない（普通株は上場継続）。
+_LIFECYCLE_OTHER_SECURITY_KW: tuple[str, ...] = (
+    "優先株式", "優先出資", "種類株式", "新株予約権付社債", "優先証券",
+)
+
+
+def _is_genuine_lifecycle_event(title: str) -> bool:
+    """上場廃止/新規上場タイトルが ① の状態を倒してよい確定的告知かを判定する。
+
+    確信が持てない(否定/回避/段階/解除/派生修正/第三者主体/別証券クラス)場合は False
+    を返し、呼び出し側は「その他」へ分類する。取りこぼし(本物を False 判定)は ① の
+    状態を倒さない安全側であり、④ への記録自体は残るため人間が原文で判断できる (§3-1)。
+    """
+    if any(kw in title for kw in _LIFECYCLE_NEGATION_KW):
+        return False
+    # 「(株式交換/TOB等による)完全子会社化に伴う上場廃止」は開示主体自身の自己廃止
+    # (任意廃止の主流)。第三者語「子会社」を含むが本人の廃止なので第三者抑制から外す。
+    if "子会社化" not in title and any(kw in title for kw in _LIFECYCLE_THIRD_PARTY_KW):
+        return False
+    if any(kw in title for kw in _LIFECYCLE_OTHER_SECURITY_KW):
+        return False
+    # 「上場廃止に伴う配当予想の修正」のように本体が(配当/業績)修正の派生開示
+    if KW_REVISION in title and ("に伴う" in title or "に関連" in title):
+        return False
+    return True
+
 
 def classify_title(title: str) -> str:
     """開示タイトルから書類種別を判定する (§6.4 書類種別 select)。
@@ -104,9 +145,9 @@ def classify_title(title: str) -> str:
         )
         if parse_split_terms(title)[1] is not None or not is_revision:
             return DOC_TYPE_SPLIT if KW_SPLIT in title else DOC_TYPE_CONSOLIDATION
-    if KW_DELISTING in title:  # 「上場廃止」を「新規上場」より先に判定
-        return DOC_TYPE_DELISTING
-    if KW_NEW_LISTING in title:
+    if KW_DELISTING in title and _is_genuine_lifecycle_event(title):
+        return DOC_TYPE_DELISTING  # 「上場廃止」を「新規上場」より先に判定
+    if KW_NEW_LISTING in title and _is_genuine_lifecycle_event(title):
         return DOC_TYPE_NEW_LISTING
     if KW_FORECAST in title and KW_REVISION in title:
         return DOC_TYPE_FORECAST_REVISION
