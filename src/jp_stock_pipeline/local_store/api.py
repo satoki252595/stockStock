@@ -9,7 +9,8 @@ warning を出す（信頼できる LAN 内のみで運用すること）。
 
 接続はリクエスト毎に open/close するシンプル方式（個人用途で十分。将来は接続プール）。
 全クエリはプレースホルダ (%(name)s) を用い、文字列連結しない（SQL インジェクション対策）。
-公開対象はローカルにミラー済みの ①〜⑤⑦。値の改変はせず読み取り専用 (§3-3)。
+公開対象はローカルにミラー済みの ①〜⑤⑦ と、ローカル専用の ⑧ XBRLファクト。
+値の改変はせず読み取り専用 (§3-3)。
 """
 
 from __future__ import annotations
@@ -61,13 +62,56 @@ def _query(settings: LocalStoreSettings, sql: str, params: dict | None = None) -
         raise HTTPException(status_code=503, detail="local database unavailable") from exc
 
 
+def _search_text_blocks(
+    settings: LocalStoreSettings, q: str, code: str | None, limit: int
+) -> list[dict[str, Any]]:
+    """定性 textBlock の全文検索。PGroonga があれば &@~、無ければ ILIKE。
+
+    1接続内で PGroonga を試し、演算子未定義（拡張なし）なら rollback して ILIKE で
+    再実行する。接続不可は 503。
+    """
+    import psycopg
+    from psycopg.rows import dict_row
+
+    select = (
+        "SELECT doc_id, code, element, period_end, value, source, license_tag "
+        "FROM xbrl_facts WHERE is_text_block"
+    )
+    cond = ""
+    base_params: dict[str, Any] = {"limit": limit}
+    if code:
+        cond = " AND code = %(code)s"
+        base_params["code"] = code
+    pgroonga_sql = f"{select}{cond} AND value &@~ %(q)s ORDER BY doc_id LIMIT %(limit)s"
+    ilike_sql = f"{select}{cond} AND value ILIKE %(like)s ORDER BY doc_id LIMIT %(limit)s"
+    try:
+        with psycopg.connect(
+            **settings.connect_kwargs(DB_TARGET_LAN), connect_timeout=5, row_factory=dict_row
+        ) as conn:
+            with conn.cursor() as cur:
+                try:
+                    cur.execute(pgroonga_sql, {**base_params, "q": q})
+                    return cur.fetchall()
+                except psycopg.errors.UndefinedFunction:
+                    # PGroonga 拡張なし → 同接続を rollback して LIKE 検索へフォールバック
+                    conn.rollback()
+                    cur.execute(ilike_sql, {**base_params, "like": f"%{q}%"})
+                    return cur.fetchall()
+    except psycopg.OperationalError as exc:
+        logger.error("ローカル DB 接続不可: %s", exc)
+        raise HTTPException(status_code=503, detail="local database unavailable") from exc
+
+
 def create_app(settings: LocalStoreSettings | None = None) -> FastAPI:
     settings = settings or load_settings().local_store
     auth = _make_auth(settings)
     app = FastAPI(
         title="JP Stock ローカル API",
         version="0.1.0",
-        description="Notion ①〜⑦ をミラーしたローカル PostgreSQL の REST 配信（読み取り専用）",
+        description=(
+            "Notion ①〜⑦ をミラー＋ローカル専用⑧XBRLファクトのローカル PostgreSQL "
+            "REST 配信（読み取り専用）"
+        ),
     )
     secured = [Depends(auth)]
 
@@ -172,6 +216,49 @@ def create_app(settings: LocalStoreSettings | None = None) -> FastAPI:
         sql += " ORDER BY fetched_at DESC LIMIT %(limit)s"
         params["limit"] = limit
         return _query(settings, sql, params)
+
+    @app.get("/facts", dependencies=secured, tags=["⑧ XBRLファクト"])
+    def list_facts(
+        doc_id: str | None = None,
+        code: str | None = None,
+        element: str | None = None,
+        text_only: bool = False,
+        limit: int = Query(200, ge=1, le=_MAX_LIMIT),
+        offset: int = Query(0, ge=0),
+    ) -> list[dict[str, Any]]:
+        """XBRL 全ファクト（数値＋定性 textBlock）。doc_id/code/element で絞り込み。
+
+        text_only=true で定性 textBlock のみ（is_text_block）。element は前方一致。
+        """
+        sql = "SELECT * FROM xbrl_facts WHERE TRUE"
+        params: dict[str, Any] = {}
+        if doc_id:
+            sql += " AND doc_id = %(doc_id)s"
+            params["doc_id"] = doc_id
+        if code:
+            sql += " AND code = %(code)s"
+            params["code"] = code
+        if element:
+            sql += " AND element LIKE %(element)s"
+            params["element"] = f"{element}%"
+        if text_only:
+            sql += " AND is_text_block"
+        sql += " ORDER BY doc_id, element LIMIT %(limit)s OFFSET %(offset)s"
+        params.update(limit=limit, offset=offset)
+        return _query(settings, sql, params)
+
+    @app.get("/facts/search", dependencies=secured, tags=["⑧ XBRLファクト"])
+    def search_facts(
+        q: str = Query(..., min_length=1, description="検索語（定性 textBlock 全文検索）"),
+        code: str | None = None,
+        limit: int = Query(100, ge=1, le=_MAX_LIMIT),
+    ) -> list[dict[str, Any]]:
+        """定性 textBlock の日本語全文検索。
+
+        PGroonga 拡張があれば全文検索演算子 `&@~`、無ければ ILIKE へ自動フォールバック。
+        factual-cite（短信原文）も含むため、公開用途では license_tag で要フィルタ。
+        """
+        return _search_text_blocks(settings, q, code, limit)
 
     @app.get("/jobs", dependencies=secured, tags=["⑦ 収集ジョブログ"])
     def list_jobs(

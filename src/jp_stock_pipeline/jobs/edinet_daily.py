@@ -114,6 +114,11 @@ def _process_document(ctx: JobContext, doc: dict, list_page_id: str) -> None:
     ):
         raise RuntimeError(f"④ を Notion/ローカル両系統に書けず: {doc_id}")
 
+    # ⑧ XBRL 全ファクト（定性 textBlock 含む）をローカル専用ストアへミラー（§7.1）。
+    # Notion ③ は要約のみのため、有報の非構造化情報はここに保持する。ベストエフォート。
+    if tidy is not None and tidy_artifact is not None:
+        ctx.mirror_xbrl_facts(tidy, tidy_artifact)
+
     # ③ 財務サマリ (有報は既定で本決算、四半期は tidy の DEI から導出)
     if tidy is not None and tidy_artifact is not None and code:
         prov = Provenance(
