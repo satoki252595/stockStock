@@ -44,7 +44,7 @@ FastAPI(REST + APIキー)で逐次アクセスできる。`LOCAL_DB_HOST` を設
 - **cloud（既定）**: `LOCAL_DB_HOST` + `sslmode=require`。**クラウド(GitHub Actions 等)から端末B へ格納**。`require` は経路を暗号化するが**サーバ認証はしない**ため直公開は能動的 MITM に弱い → **VPN(Tailscale 等)経由を強く推奨**（VPN を使わないなら `sslmode=verify-full` + ルートCA を設定）。GitHub Actions は同名 Secrets を設定すれば cron 実行で自動 dual-write。
 - **lan**: `LOCAL_DB_LAN_HOST`(既定 localhost) + `sslmode=prefer`。同一 LAN で手動実行するとき `--db-target lan`。
 
-- **正本は Notion**。ローカルミラー失敗はジョブを止めず degrade（warning 記録）。
+- **双方向フェールセーフ**。Notion とローカルへ独立に書き、**片方の保存が失敗してももう片方は必ず試み、どちらか一方にでも残ればその取得単位は成功扱い**（可用性最大化）。設計上の正本は Notion だが、ローカル API の可用性のため対称化。失敗は隠さず `notion_failed`/`mirror_failed` に計上し warning 記録、**両系統とも失敗した分だけ** ⑦ の failed に数える（§3-2）。原本 ⑤ のみ両系統失敗でその取得単位を中止（原本ゼロ＝トレーサビリティ喪失 §3-3）。
 - `②株価` はローカルでは `(code, data_date)` を主キーに**時系列を蓄積**（Notion は最新スナップショット）。
 - `②` は personal-only（yfinance/stooq）。**ローカル自己利用に限り、公開しないこと**。
 

@@ -182,13 +182,21 @@ def execute(ctx: JobContext) -> None:
                 if valuation and valuation_artifact and valuation_artifact.notion_page_id
                 else None
             )
-            upsert.upsert_price_technical(
-                ctx.client, ctx.settings, record, master_map.get(code), extra_raw
-            )
-            ctx.mirror(record)  # ローカルは (code, data_date) で時系列蓄積
-            ctx.add_success()
         except Exception as exc:
-            ctx.add_failure(code, f"②upsert失敗: {exc}")
+            ctx.add_failure(code, f"②レコード生成失敗: {exc}")
+            continue
+        # Notion とローカルへ独立に書く（双方向フェールセーフ）。
+        # ローカルは (code, data_date) で時系列蓄積する。
+        if ctx.persist(
+            record,
+            lambda rec=record, mid=master_map.get(code), extra=extra_raw: (
+                upsert.upsert_price_technical(ctx.client, ctx.settings, rec, mid, extra)
+            ),
+            label=f"②{code}",
+        ):
+            ctx.add_success()
+        else:
+            ctx.add_failure(code, "②: Notion/ローカル両系統に書けず")
 
 
 def main(argv: list[str] | None = None, *, env: dict[str, str] | None = None) -> int:

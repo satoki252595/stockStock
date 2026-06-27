@@ -41,14 +41,19 @@ def execute(ctx: JobContext) -> None:
     # 6. Upsert (冪等キー=銘柄コード)。状態/上場日/上場廃止日 は開示・消失が所有する
     #    ため codelist 同期では書かない (include_lifecycle=False § Phase3 二重所有回避)。
     for record in upsert_records:
-        try:
-            upsert.upsert_stock_master(
-                ctx.client, ctx.settings, record, include_lifecycle=False
-            )
-            ctx.mirror(record, include_lifecycle=False)  # ローカルへも同条件でミラー
+        # Notion とローカルへ独立に書く（双方向フェールセーフ）。状態/上場日/廃止日は
+        # 開示・消失が所有するため include_lifecycle=False で両系統とも書かない。
+        if ctx.persist(
+            record,
+            lambda rec=record: upsert.upsert_stock_master(
+                ctx.client, ctx.settings, rec, include_lifecycle=False
+            ),
+            label=f"①{record.code}",
+            include_lifecycle=False,
+        ):
             ctx.add_success()
-        except Exception as exc:
-            ctx.add_failure(record.code, f"①upsert失敗: {exc}")
+        else:
+            ctx.add_failure(record.code, "①: Notion/ローカル両系統に書けず")
 
     # 7. 上場廃止検知 (§ Phase3): コードリストから消えた銘柄を listed=False にする
     #    (状態=上場廃止 の確定は一次開示が所有)。--limit 指定時は部分取得のため
@@ -85,12 +90,17 @@ def _detect_delistings(ctx: JobContext, fetched_codes: set[str]) -> None:
         "コードリストから消えた %d 銘柄を取得停止(listed=False)にする (§ Phase3)", len(absent)
     )
     for code, page_id in absent:
-        try:
-            upsert.mark_master_absent_from_codelist(ctx.client, ctx.settings, page_id)
-            ctx.mirror_mark_absent(code)
+        # listed=False を Notion とローカルへ独立に反映（双方向フェールセーフ）
+        if ctx.persist_mark_absent(
+            code,
+            lambda pid=page_id: upsert.mark_master_absent_from_codelist(
+                ctx.client, ctx.settings, pid
+            ),
+            label=f"①absent:{code}",
+        ):
             ctx.add_success()
-        except Exception as exc:
-            ctx.add_failure(code, f"listed=Falseマーク失敗: {exc}")
+        else:
+            ctx.add_failure(code, "listed=False: Notion/ローカル両系統に書けず")
 
 
 def main(argv: list[str] | None = None, *, env: dict[str, str] | None = None) -> int:

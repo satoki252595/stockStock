@@ -49,7 +49,8 @@ class JobContext:
     failed: int = 0
     failed_codes: list[str] = field(default_factory=list)
     local: LocalStore | None = None  # dual-write 先 (未設定/接続不可なら None)
-    mirror_failed: int = 0  # ローカルミラー失敗数 (ジョブ成否には影響させない)
+    mirror_failed: int = 0  # ローカルミラー失敗数 (片系統失敗はジョブ成否に影響させない)
+    notion_failed: int = 0  # Notion 書き込み失敗数 (双方向フェールセーフ用。同上)
 
     def add_success(self, n: int = 1) -> None:
         self.processed += n
@@ -60,21 +61,31 @@ class JobContext:
         self.failed_codes.append(code)
         logger.warning("失敗: %s %s", code, reason)
 
-    # --- ローカル PostgreSQL への dual-write ミラー -------------------------
-    # Notion を正本とし、ミラー失敗はジョブを止めない（可用性ベストエフォート）。
-    # 失敗は mirror_failed に数え warning に出すが ctx.failed には足さない。
+    # --- Notion ↔ ローカル PostgreSQL の双方向フェールセーフ dual-write --------
+    # 方針: Notion とローカルは独立に書き込み、片方の系統が失敗してももう片方は
+    # 必ず試みる。どちらか一方にでも残ればその取得単位は成功扱い（可用性最大化）。
+    # Notion を正本とする原則は維持しつつ、ローカル API の可用性のため対称化する。
+    # 失敗は隠さず notion_failed / mirror_failed に計上し warning に出す（§3-2）。
+    # 両系統とも失敗した取得単位のみ呼び出し側が ctx.failed に数える。
 
-    def _mirror(self, fn, label: str) -> None:
+    def _mirror(self, fn, label: str) -> bool | None:
+        """ローカルへ1件ミラーする。
+
+        返り値: 書けた=True / 失敗=False / ローカル系統なし(未設定・接続不可)=None。
+        ミラー失敗で収集は止めない（mirror_failed に計上し warning §3-2）。
+        """
         if self.local is None:
-            return
+            return None
         try:
             fn(self.local)
+            return True
         except Exception as exc:  # noqa: BLE001 - ミラー失敗で収集を止めない (§3-2)
             self.mirror_failed += 1
             logger.warning("ローカルミラー失敗 (%s): %s", label, exc)
+            return False
 
-    def mirror(self, record, *, include_lifecycle: bool = True) -> None:
-        """Notion へ upsert 済みの record を型に応じてローカルへもミラーする。"""
+    def _mirror_record(self, store: LocalStore, record, include_lifecycle: bool) -> None:
+        """record の型に応じて適切なローカル upsert を呼ぶ（純粋なディスパッチ）。"""
         from ..models import (
             DisclosureRecord,
             FinancialSummaryRecord,
@@ -83,41 +94,104 @@ class JobContext:
             StockMasterRecord,
         )
 
-        def _do(store: LocalStore) -> None:
-            if isinstance(record, StockMasterRecord):
-                store.upsert_stock_master(record, include_lifecycle=include_lifecycle)
-            elif isinstance(record, PriceTechnicalRecord):
-                store.upsert_price_technical(record)
-            elif isinstance(record, FinancialSummaryRecord):
-                store.upsert_financial_summary(record)
-            elif isinstance(record, DisclosureRecord):
-                store.upsert_disclosure(record)
-            elif isinstance(record, RawArtifact):
-                store.upsert_raw_artifact(record)
-            else:
-                raise TypeError(f"mirror 未対応の型: {type(record).__name__}")
+        if isinstance(record, StockMasterRecord):
+            store.upsert_stock_master(record, include_lifecycle=include_lifecycle)
+        elif isinstance(record, PriceTechnicalRecord):
+            store.upsert_price_technical(record)
+        elif isinstance(record, FinancialSummaryRecord):
+            store.upsert_financial_summary(record)
+        elif isinstance(record, DisclosureRecord):
+            store.upsert_disclosure(record)
+        elif isinstance(record, RawArtifact):
+            store.upsert_raw_artifact(record)
+        else:
+            raise TypeError(f"mirror 未対応の型: {type(record).__name__}")
 
-        self._mirror(_do, type(record).__name__)
+    def mirror(self, record, *, include_lifecycle: bool = True) -> bool | None:
+        """Notion へ upsert 済みの record を型に応じてローカルへもミラーする。"""
+        return self._mirror(
+            lambda store: self._mirror_record(store, record, include_lifecycle),
+            type(record).__name__,
+        )
 
-    def mirror_mark_absent(self, code: str) -> None:
+    def mirror_mark_absent(self, code: str) -> bool | None:
         """コードリスト消失 (listed=False) をローカルへ反映。"""
-        self._mirror(lambda s: s.mark_master_absent(code), "mark_absent")
+        return self._mirror(lambda s: s.mark_master_absent(code), "mark_absent")
 
-    def mirror_lifecycle(self, record) -> None:
+    def mirror_lifecycle(self, record) -> bool | None:
         """上場廃止/新規上場の状態反映をローカルへ。"""
-        self._mirror(lambda s: s.apply_disclosure_lifecycle(record), "lifecycle")
+        return self._mirror(lambda s: s.apply_disclosure_lifecycle(record), "lifecycle")
+
+    def _persist(self, notion_write, local_write, label: str) -> bool:
+        """Notion とローカルへ独立に書き、少なくとも一方に残せたかを返す。
+
+        - notion_write(): Notion 書き込み（例外で失敗）。失敗しても握って
+          notion_failed に計上し、ローカル書き込みは必ず試みる。
+        - local_write(store): ローカル書き込み（_mirror が握って bool|None を返す）。
+        返り値: True=少なくとも一方に永続化できた / False=両系統とも失敗。
+        ローカル系統が無い(None)場合は Notion の成否がそのまま結果になる
+        （＝従来の Notion 単独運用と同じ挙動を保つ）。
+        """
+        notion_ok = False
+        try:
+            notion_write()
+            notion_ok = True
+        except Exception as exc:  # noqa: BLE001 - 片系統失敗でも他系統へ書く
+            self.notion_failed += 1
+            logger.warning("Notion 書き込み失敗（%s。ローカルは試行）: %s", label, exc)
+        local_ok = self._mirror(local_write, label)
+        return notion_ok if local_ok is None else (notion_ok or local_ok)
+
+    def persist(
+        self, record, notion_write, *, label: str, include_lifecycle: bool = True
+    ) -> bool:
+        """record を Notion とローカルへ独立に永続化する（双方向フェールセーフ）。
+
+        返り値が False（両系統とも失敗）のとき、呼び出し側は add_failure すること。
+        """
+        return self._persist(
+            notion_write,
+            lambda store: self._mirror_record(store, record, include_lifecycle),
+            label,
+        )
+
+    def persist_mark_absent(self, code: str, notion_write, *, label: str) -> bool:
+        """listed=False を Notion とローカルへ独立に反映する。"""
+        return self._persist(notion_write, lambda s: s.mark_master_absent(code), label)
+
+    def persist_lifecycle(self, record, notion_write, *, label: str) -> bool:
+        """ライフサイクル状態 (上場廃止/新規上場) を Notion とローカルへ独立反映する。"""
+        return self._persist(
+            notion_write, lambda s: s.apply_disclosure_lifecycle(record), label
+        )
 
     def upload_raw(self, artifact) -> str | None:
-        """原本を Notion ⑤ へアップロードし、同じ artifact をローカル ⑤ へもミラーする。
+        """原本を Notion ⑤ とローカル ⑤ へ独立に保存する（双方向フェールセーフ）。
 
-        Notion ⑤ の raw_page_id を返す（呼び出し側が relation に使う）。ミラーは
-        notion_page_id がセットされた後に行うため raw_files.notion_page_id も埋まる
-        （ミラー失敗は degrade。Notion ⑤ への保存自体は従来どおり）。
+        Notion ⑤ の raw_page_id を返す（Notion 失敗時は None）。両系統とも原本を
+        保存できなかった場合のみ RawUploadError を送出し、呼び出し側はその取得単位の
+        構造化書き込みを中止する（原本ゼロ＝トレーサビリティ喪失 §3-3/§8.1-4）。
+        どちらか一方にでも原本が残れば構造化書き込みを許可する。
         """
         from ..notion import file_upload
 
-        raw_page_id = file_upload.upload_raw_artifact(self.client, self.settings, artifact)
-        self.mirror(artifact)
+        notion_err: Exception | None = None
+        raw_page_id: str | None = None
+        try:
+            raw_page_id = file_upload.upload_raw_artifact(
+                self.client, self.settings, artifact
+            )
+        except Exception as exc:  # noqa: BLE001 - ローカル ⑤ への保存を試みるため一旦握る
+            notion_err = exc
+            self.notion_failed += 1
+            logger.warning("Notion ⑤ 原本UL失敗（ローカル ⑤ を試行）: %s", exc)
+        local_ok = self._mirror(lambda s: s.upsert_raw_artifact(artifact), "RawArtifact")
+        if notion_err is not None and local_ok is not True:
+            # Notion ⑤・ローカル ⑤ のいずれにも原本が残らなかった → 取得単位を中止
+            raise file_upload.RawUploadError(
+                "原本を Notion ⑤・ローカル ⑤ のいずれにも保存できず取得単位を中止: "
+                f"{artifact.filename}"
+            ) from notion_err
         return raw_page_id
 
 
@@ -227,10 +301,11 @@ def run_job(
         except Exception as exc:  # noqa: BLE001
             logger.warning("⑦ ローカルジョブログ記録失敗: %s", exc)
         ctx.local.close()
-        if ctx.mirror_failed:
+        if ctx.mirror_failed or ctx.notion_failed:
             logger.warning(
-                "ローカルミラー失敗 %d 件（Notion は正本として正常。詳細は上記ログ）",
-                ctx.mirror_failed,
+                "dual-write degrade: Notion書き込み失敗 %d 件 / ローカルミラー失敗 %d 件"
+                "（双方向フェールセーフで継続。両系統とも失敗した分のみ ⑦ failed に計上）",
+                ctx.notion_failed, ctx.mirror_failed,
             )
 
     logger.info(

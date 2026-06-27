@@ -9,6 +9,8 @@ from __future__ import annotations
 from datetime import date, datetime
 from pathlib import Path
 
+import pytest
+
 from jp_stock_pipeline.licensing import LicenseTag
 from jp_stock_pipeline.local_store import mappers
 from jp_stock_pipeline.local_store.sink import LocalStore
@@ -292,6 +294,12 @@ class _RecordingLocal:
     def upsert_raw_artifact(self, a):
         self.calls.append(("raw",))
 
+    def mark_master_absent(self, code):
+        self.calls.append(("absent", code))
+
+    def apply_disclosure_lifecycle(self, r):
+        self.calls.append(("lifecycle",))
+
 
 def _ctx(local):
     from jp_stock_pipeline.jobs.runner import JobContext
@@ -345,6 +353,160 @@ class TestJobContextMirror:
         ctx = _ctx(_Bad())
         ctx.mirror(_raw())  # Notion 正本は別。ミラー失敗で例外を投げない
         assert ctx.mirror_failed == 1
+
+
+# --- 双方向フェールセーフ: persist / upload_raw -------------------------------
+# Notion とローカルを独立に書き、片系統が落ちても他系統へ書く（どちらか一方に
+# 残れば成功・両系統失敗のみ失敗）。ユーザー要望 (2026-06-28) の中核挙動。
+
+
+def _notion_writer(ok: bool):
+    """persist に渡す Notion 書き込み callable と呼び出し記録を返す。"""
+    calls: list[str] = []
+
+    def _w() -> None:
+        calls.append("notion")
+        if not ok:
+            raise RuntimeError("notion down")
+
+    return _w, calls
+
+
+def _ok_uploader(page_id: str = "raw-page-1"):
+    def _f(client, settings, artifact):
+        artifact.notion_page_id = page_id
+        return page_id
+
+    return _f
+
+
+def _fail_uploader(client, settings, artifact):
+    raise RuntimeError("notion ⑤ down")
+
+
+class _RaisingLocal:
+    """すべての upsert で例外を投げるローカル（ミラー失敗の再現）。"""
+
+    def upsert_price_technical(self, r):
+        raise RuntimeError("db down")
+
+    def upsert_raw_artifact(self, a):
+        raise RuntimeError("db down")
+
+    def mark_master_absent(self, code):
+        raise RuntimeError("db down")
+
+    def apply_disclosure_lifecycle(self, r):
+        raise RuntimeError("db down")
+
+
+class TestPersistFailover:
+    def _price(self) -> PriceTechnicalRecord:
+        return PriceTechnicalRecord(code="7203", provenance=_prov())
+
+    def test_both_succeed(self):
+        local = _RecordingLocal()
+        ctx = _ctx(local)
+        w, calls = _notion_writer(ok=True)
+        assert ctx.persist(self._price(), w, label="②") is True
+        assert calls == ["notion"] and local.calls == [("price",)]
+        assert ctx.notion_failed == 0 and ctx.mirror_failed == 0
+
+    def test_notion_fails_local_succeeds(self):
+        # Notion 失敗 → ローカルには書かれ、取得単位は成功扱い（フェールセーフ）
+        local = _RecordingLocal()
+        ctx = _ctx(local)
+        w, _ = _notion_writer(ok=False)
+        assert ctx.persist(self._price(), w, label="②") is True
+        assert ctx.notion_failed == 1 and local.calls == [("price",)]
+
+    def test_local_fails_notion_succeeds(self):
+        # ローカル失敗 → Notion には書かれ、取得単位は成功扱い（逆方向も対称）
+        ctx = _ctx(_RaisingLocal())
+        w, calls = _notion_writer(ok=True)
+        assert ctx.persist(self._price(), w, label="②") is True
+        assert calls == ["notion"] and ctx.mirror_failed == 1
+
+    def test_both_fail_returns_false(self):
+        # 両系統とも失敗した取得単位のみ「失敗」を呼び出し側へ返す
+        ctx = _ctx(_RaisingLocal())
+        w, _ = _notion_writer(ok=False)
+        assert ctx.persist(self._price(), w, label="②") is False
+        assert ctx.notion_failed == 1 and ctx.mirror_failed == 1
+
+    def test_local_none_follows_notion(self):
+        # ローカル系統なし（Notion 単独運用）は従来どおり Notion 成否で決まる
+        w_ok, _ = _notion_writer(ok=True)
+        assert _ctx(None).persist(self._price(), w_ok, label="②") is True
+        ctx = _ctx(None)
+        w_bad, _ = _notion_writer(ok=False)
+        assert ctx.persist(self._price(), w_bad, label="②") is False
+        assert ctx.notion_failed == 1
+
+    def test_mark_absent_failover(self):
+        local = _RecordingLocal()
+        ctx = _ctx(local)
+        w, _ = _notion_writer(ok=False)
+        assert ctx.persist_mark_absent("7203", w, label="absent") is True
+        assert ("absent", "7203") in local.calls and ctx.notion_failed == 1
+
+    def test_lifecycle_failover(self):
+        local = _RecordingLocal()
+        ctx = _ctx(local)
+        w, _ = _notion_writer(ok=False)
+        rec = DisclosureRecord(
+            doc_id="d", title="t", disclosed_at=datetime(2026, 6, 10, tzinfo=JST),
+            code="7203", doc_type="上場廃止", provenance=_prov(),
+        )
+        assert ctx.persist_lifecycle(rec, w, label="life") is True
+        assert ("lifecycle",) in local.calls and ctx.notion_failed == 1
+
+
+class TestUploadRawFailover:
+    def test_both_succeed_returns_page_id(self, monkeypatch):
+        from jp_stock_pipeline.notion import file_upload
+
+        monkeypatch.setattr(file_upload, "upload_raw_artifact", _ok_uploader("p1"))
+        local = _RecordingLocal()
+        ctx = _ctx(local)
+        assert ctx.upload_raw(_raw()) == "p1"
+        assert local.calls == [("raw",)]
+
+    def test_notion_fails_local_succeeds_returns_none(self, monkeypatch):
+        # Notion ⑤ 失敗でもローカル ⑤ に原本が残れば構造化続行可（page_id=None）
+        from jp_stock_pipeline.notion import file_upload
+
+        monkeypatch.setattr(file_upload, "upload_raw_artifact", _fail_uploader)
+        local = _RecordingLocal()
+        ctx = _ctx(local)
+        assert ctx.upload_raw(_raw()) is None
+        assert ctx.notion_failed == 1 and local.calls == [("raw",)]
+
+    def test_notion_ok_local_fails_degrades(self, monkeypatch):
+        from jp_stock_pipeline.notion import file_upload
+
+        monkeypatch.setattr(file_upload, "upload_raw_artifact", _ok_uploader("p1"))
+        ctx = _ctx(_RaisingLocal())
+        assert ctx.upload_raw(_raw()) == "p1"  # Notion ⑤ には残る
+        assert ctx.mirror_failed == 1
+
+    def test_both_fail_raises(self, monkeypatch):
+        # 原本ゼロ（両系統失敗）は §3-3 違反 → 取得単位中止
+        from jp_stock_pipeline.notion import file_upload
+
+        monkeypatch.setattr(file_upload, "upload_raw_artifact", _fail_uploader)
+        ctx = _ctx(_RaisingLocal())
+        with pytest.raises(file_upload.RawUploadError):
+            ctx.upload_raw(_raw())
+
+    def test_notion_fails_local_none_raises(self, monkeypatch):
+        # ローカル未接続 + Notion 失敗 = 原本ゼロ → 従来どおり RawUploadError
+        from jp_stock_pipeline.notion import file_upload
+
+        monkeypatch.setattr(file_upload, "upload_raw_artifact", _fail_uploader)
+        ctx = _ctx(None)
+        with pytest.raises(file_upload.RawUploadError):
+            ctx.upload_raw(_raw())
 
 
 # --- 接続プロファイル cloud/lan と --db-target -------------------------------

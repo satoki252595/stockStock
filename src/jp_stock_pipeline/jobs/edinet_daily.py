@@ -94,13 +94,25 @@ def _process_document(ctx: JobContext, doc: dict, list_page_id: str) -> None:
 
     # ④ 開示書類 upsert (キー=docID)。原本は書類自身 → 無ければ一覧原本
     record = edinet.to_disclosure_record(doc, raw_page_id=doc_raw_page or list_page_id)
-    master_id = (
-        upsert.find_stock_master_page(ctx.client, ctx.settings, record.code)
-        if record.code
-        else None
-    )
-    upsert.upsert_disclosure(ctx.client, ctx.settings, record, master_id)
-    ctx.mirror(record)
+    # ① relation 解決(Notionクエリ)。失敗しても relation 無しで本体は書く（degrade）
+    try:
+        master_id = (
+            upsert.find_stock_master_page(ctx.client, ctx.settings, record.code)
+            if record.code
+            else None
+        )
+    except Exception as exc:  # noqa: BLE001 - relation 解決失敗は本体を止めない
+        master_id = None
+        logger.warning(
+            "① relation 解決失敗 (master_id=None で続行 doc_id=%s): %s", doc_id, exc
+        )
+    # ④ を Notion とローカルへ独立に書く（双方向フェールセーフ）
+    if not ctx.persist(
+        record,
+        lambda: upsert.upsert_disclosure(ctx.client, ctx.settings, record, master_id),
+        label=f"④{doc_id}",
+    ):
+        raise RuntimeError(f"④ を Notion/ローカル両系統に書けず: {doc_id}")
 
     # ③ 財務サマリ (有報は既定で本決算、四半期は tidy の DEI から導出)
     if tidy is not None and tidy_artifact is not None and code:
@@ -116,9 +128,14 @@ def _process_document(ctx: JobContext, doc: dict, list_page_id: str) -> None:
             disclosure_type="本決算" if doc_type_code in ("120", "130") else None,
             disclosed_at=record.disclosed_at,
         )
-        if fin is not None:
-            upsert.upsert_financial_summary(ctx.client, ctx.settings, fin, master_id)
-            ctx.mirror(fin)
+        if fin is not None and not ctx.persist(
+            fin,
+            lambda: upsert.upsert_financial_summary(
+                ctx.client, ctx.settings, fin, master_id
+            ),
+            label=f"③{doc_id}",
+        ):
+            raise RuntimeError(f"③ を Notion/ローカル両系統に書けず: {doc_id}")
 
 
 def execute(ctx: JobContext) -> None:
