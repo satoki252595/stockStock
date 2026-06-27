@@ -85,6 +85,9 @@ def _process_financial_xbrl(
     xbrl_to_csv.write_tidy(tidy, artifact)
     raw_page_id = ctx.upload_raw(artifact)
 
+    # ⑧ 短信 XBRL の全ファクトをローカル専用ストアへミラー（§7.1, factual-cite=内部利用）。
+    ctx.mirror_xbrl_facts(tidy, artifact)
+
     prov = Provenance(
         source=Source.TDNET,
         license_tag=source_license(Source.TDNET),  # factual-cite (§2.1)
@@ -124,7 +127,7 @@ def execute(ctx: JobContext) -> None:
     batches = _collect(ctx, target_date)
 
     for artifact, records, xbrl_urls in batches:
-        # 原本必須: 失敗時はこの取得単位の構造化書き込みをしない (§8.1-4)
+        # 原本必須: Notion⑤/ローカル⑤ の両系統とも失敗時のみ構造化を書かない (§7.1/§3-3)
         raw_page_id = ctx.upload_raw(artifact)
 
         for record in apply_limit(records, ctx.args.limit):

@@ -215,8 +215,11 @@ Notion を正本としつつ、収集ジョブが LAN 内の別端末（端末B�
 - **トポロジ**: 接続プロファイルを収集ジョブの `--db-target` で選ぶ（既定 **cloud**）。cloud=クラウド(GitHub Actions 等)から端末B へ `LOCAL_DB_HOST`+`sslmode=require` で接続。`require` は暗号化のみでサーバ認証はしないため直公開は能動的 MITM に弱く **VPN(Tailscale 等)経由を推奨**（非VPNなら `verify-full`+ルートCA）。GitHub Actions は同名 Secrets で cron 時に自動 dual-write。lan=同一 LAN で `LOCAL_DB_LAN_HOST`+`sslmode=prefer`。両プロファイルとも host を明示しない限り dual-write は無効（lan を localhost へ暗黙フォールバックして誤ミラーしない。API の自DB接続のみ localhost を補完）。`connect_local_store` は対象 host 未設定/接続不可なら `None` を返し Notion のみで稼働。
 - **双方向フェールセーフ dual-write**: Notion とローカルへ**独立に**書き込み、片系統が失敗してももう片系統は必ず試みる。**どちらか一方にでも永続化できればその取得単位は成功扱い**（`JobContext.persist`/`persist_lifecycle`/`persist_mark_absent`/`upload_raw` がこのプロトコルを実装）。設計上の正本は Notion だが、ローカル API の可用性のため対称化した。失敗は隠さず `ctx.notion_failed`/`ctx.mirror_failed` に計上し warning 記録（§3-2）、**両系統とも失敗した取得単位のみ** 呼び出し側が `ctx.failed`（⑦ failed）に数える。①relation 解決（Notion クエリ）失敗は relation 無しで本体を書く degrade、原本 `⑤` のみ両系統失敗でその取得単位を中止（原本ゼロ＝トレーサビリティ喪失 §3-3/§8.1-4）。`①` の状態/上場日/上場廃止日は Notion と対称に二重所有を回避（codelist 同期は `listed` のみ、状態確定は一次開示）。完全置換（`ON CONFLICT DO UPDATE` で `EXCLUDED` 上書き）で前回値を残さない（§3-1）。値はプレースホルダ渡しで SQL インジェクションを避ける。
 - **②の時系列化**: ローカルは `(code, data_date)` を主キーに時系列を蓄積（Notion は最新スナップショット）。API の `/prices/{code}?from=&to=` で期間取得できる。
-- **テーブル**: ①〜⑤⑦ に対応。`②`（personal-only）はローカル自己利用に限定し、公開 API として外部提供する場合は `commercial-ok`/`factual-cite`（①③④）のみをフィルタする。
+- **テーブル**: ①〜⑤⑦ に対応＋ローカル専用の **⑧ `xbrl_facts`**。`②`（personal-only）はローカル自己利用に限定し、公開 API として外部提供する場合は `commercial-ok`/`factual-cite`（①③④）のみをフィルタする。
+- **⑧ XBRL 全ファクト（非構造化データの保持・ローカル専用）**: 有報/短信 XBRL の**全ファクト**（数値＋`...TextBlock` の定性情報＝事業等のリスク/MD&A 等）を `xbrl_facts(doc_id, element, context_ref, value, is_text_block, source, license_tag, …)` に保持する。Notion ③ は厳選した財務サマリのみで、定性情報や③に載らない数値は⑤の CSV に埋もれていたため、これを横断クエリ可能にする。**Notion に対応オブジェクトは無く**（③は要約のみ）、dual-write ではなく `JobContext.mirror_xbrl_facts` のベストエフォート・ローカルミラー（失敗は `mirror_failed` に計上し収集は止めない）。来歴は `doc_id`→④開示で遡れ、行ごとに `license_tag`（EDINET=commercial-ok / 短信=factual-cite）を持つため公開面では `commercial-ok` のみフィルタ可能（**factual-cite の短信原文テキストは内部利用限定 §2.2**）。`value` は変換版そのまま（数値は ix 復号済み・定性は原文 §5.2）、空（nil/欠損）は格納しない（§3-1）。PK=`(doc_id, element, context_ref)` の冪等 upsert。
+- **日本語全文検索（PGroonga・任意）**: `is_text_block` の定性テキストに **PGroonga** 拡張で日本語 FTS インデックスを張る。拡張は端末B で `CREATE EXTENSION pgroonga`（未導入でも本体は動作し、API は `ILIKE` 検索へ自動フォールバック＝`sink._init_fulltext_index` がベストエフォート作成、`api._search_text_blocks` が `&@~`→`ILIKE` フォールバック）。API: `GET /facts`（doc_id/code/element 絞り込み）・`GET /facts/search?q=`（定性 textBlock の全文検索）。
 - **起動**: `uvicorn jp_stock_pipeline.local_store.api:app`（`/docs` に OpenAPI。`/health` のみ認証不要）。
+- **本番サーバ運用（トポロジ B）**: サーバで PostgreSQL + FastAPI を常駐させ、収集は GitHub Actions（cloud 経路）から **Tailscale 経由**で dual-write する。PG は tailnet 内のみに listen させ（直公開せず MITM を構造的に回避）、tailnet 上では `sslmode=disable` で足りる。runner は `tailscale/github-action` で tailnet に参加（OAuth Secrets 未設定なら参加失敗するが収集は Notion へ継続＝dual-write degrade）。systemd ユニット・PG 初期化・日次 `pg_dump` バックアップ・接続手順は [`deploy/`](../deploy/README.md) に同梱。②の時系列は Notion に無くサーバ DB が唯一の保持先なのでバックアップ必須。
 
 ---
 
@@ -232,7 +235,7 @@ GitHub Actions (cron)
 1. **Fetch**: ソース取得（リトライ3回・指数バックオフ）
 2. **Save raw**: 無加工でローカル保存、SHA256計算（既存SHA256と一致なら重複スキップ）
 3. **Convert**: §5.2の規則で変換版生成（値の変更禁止。失敗しても続行し状態記録）
-4. **Upload**: ⑤へ原本+変換版をアップロード+メタ行作成。**失敗したら構造化データは書き込まず異常終了**（原本必須の保証）
+4. **Upload**: ⑤へ原本+変換版をアップロード+メタ行作成（Notion ⑤ とローカル ⑤ へ独立に保存）。**両系統とも保存に失敗した取得単位のみ構造化を書かず中止**（原本ゼロ＝§3-3 トレーサビリティ喪失。片系統にでも原本が残れば構造化は書く。詳細 §7.1）
 5. **Transform**: パース・指標計算・正規化（銘柄コードがキー）
 6. **Upsert**: キー検索→update/create（冪等。キー=銘柄コード/docID/SHA256）。ライセンスタグ・来歴を必ず設定
 7. **Log**: ⑦へ記録
@@ -314,9 +317,9 @@ jp-stock-data-pipeline/
 **前提**: 開発環境はnix（flake.nix+Python3.12+uv、必須）。実行はGitHub Actions。Notion親ページ=`205d74ff84cd809e92b4dd1adc5cf186`。Notionは有料プラン。
 
 **不変条件（絶対遵守）**:
-1. 取得単位ごとに原本（+可能なら変換版）を原本ファイルDBへ必ずアップロード。失敗時は構造化データを書き込まない
+1. 取得単位ごとに原本（+可能なら変換版）を原本ファイルDB（Notion ⑤/ローカル ⑤）へアップロード。全系統とも保存できなかった取得単位のみ構造化を書かない（片系統に残れば書く §7.1）
 2. **ダミー・推定・補間データの生成禁止**。フォールバックは実在ソースの実データのみ。欠損は欠損として記録（§3全項目）
-3. 全行にソース・ライセンスタグ・データ基準日・取得日時・原本リレーションを必ず設定。personal-onlyの継承ルール実装（§2.2）
+3. 全行にソース・ライセンスタグ・データ基準日・取得日時・原本リレーションを設定（Notion 単独 UL 失敗時は relation 空で degrade しうる §7.1）。personal-onlyの継承ルール実装（§2.2）
 4. Notion APIは2.5req/sスロットル、429は指数バックオフ
 5. 全upsertは冪等（キー=銘柄コード/docID/SHA256）。全ジョブはジョブログDBに記録
 6. 変換レイヤーは値を一切変更しない（§5.2）

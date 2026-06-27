@@ -234,6 +234,9 @@ class _FakeCursor:
     def execute(self, sql, params=None):
         self.executed.append((sql, params))
 
+    def executemany(self, sql, seq_params):
+        self.executed.append((sql, list(seq_params)))
+
 
 class _FakeConn:
     def __init__(self) -> None:
@@ -299,6 +302,11 @@ class _RecordingLocal:
 
     def apply_disclosure_lifecycle(self, r):
         self.calls.append(("lifecycle",))
+
+    def upsert_xbrl_facts(self, rows, artifact):
+        rows = list(rows)
+        self.calls.append(("facts", len(rows)))
+        return len(rows)
 
 
 def _ctx(local):
@@ -572,3 +580,103 @@ class TestConnectionProfiles:
 
         assert build_parser("x").parse_args([]).db_target == "cloud"
         assert build_parser("x").parse_args(["--db-target", "lan"]).db_target == "lan"
+
+
+# --- ⑧ XBRL 全ファクト（ローカル専用・非構造化保持 §7.1） --------------------
+
+
+def _fact_row(**kw) -> dict:
+    """convert.xbrl_to_csv の tidy 1 行（dict）を作る。"""
+    base = dict(
+        code="7203", doc_id="S100ABCD", element="jpcrp_cor:NetSales",
+        context_ref="CurrentYearDuration", period_start="2025-04-01",
+        period_end="2026-03-31", instant_date="", consolidated="連結",
+        unit="JPY", value="1000",
+    )
+    base.update(kw)
+    return base
+
+
+class TestXbrlFactsInsert:
+    def test_sql_shape_and_placeholders(self):
+        sql, params = mappers.xbrl_facts_insert([_fact_row()], _raw())
+        assert "INSERT INTO xbrl_facts" in sql
+        assert "ON CONFLICT (doc_id, element, context_ref) DO UPDATE" in sql
+        assert "%(value)s" in sql and "%(is_text_block)s" in sql  # %()s 形式（注入対策）
+        assert "updated_at = now()" in sql
+        assert len(params) == 1
+
+    def test_skips_empty_value(self):
+        rows = [_fact_row(value=""), _fact_row(element="X", value="   "), _fact_row()]
+        _sql, params = mappers.xbrl_facts_insert(rows, _raw())
+        # 空・空白のみは欠損として格納しない（§3-1）
+        assert len(params) == 1
+        assert params[0]["element"] == "jpcrp_cor:NetSales"
+
+    def test_dedup_by_pk_last_wins(self):
+        rows = [_fact_row(value="100"), _fact_row(value="200")]  # 同一 PK
+        _sql, params = mappers.xbrl_facts_insert(rows, _raw())
+        assert len(params) == 1  # executemany の二重更新を避ける de-dup
+        assert params[0]["value"] == "200"
+
+    def test_is_text_block_flag(self):
+        rows = [
+            _fact_row(element="jpcrp_cor:BusinessRisksTextBlock", value="リスク本文"),
+            _fact_row(element="jpcrp_cor:NetSales", context_ref="c2", value="1000"),
+        ]
+        _sql, params = mappers.xbrl_facts_insert(rows, _raw())
+        by_elem = {p["element"]: p for p in params}
+        assert by_elem["jpcrp_cor:BusinessRisksTextBlock"]["is_text_block"] is True
+        assert by_elem["jpcrp_cor:NetSales"]["is_text_block"] is False
+
+    def test_provenance_from_artifact(self):
+        art = _raw()
+        _sql, params = mappers.xbrl_facts_insert([_fact_row()], art)
+        p = params[0]
+        assert p["source"] == art.source.value
+        assert p["license_tag"] == art.license_tag.value
+        assert p["fetched_at"] == art.fetched_at
+
+    def test_skips_rows_without_pk(self):
+        rows = [_fact_row(context_ref=""), _fact_row(element="")]
+        _sql, params = mappers.xbrl_facts_insert(rows, _raw())
+        assert params == []
+
+
+class TestXbrlFactsSink:
+    def test_executemany_called_and_count_returned(self):
+        store = LocalStore(_FakeConn())
+        rows = [_fact_row(), _fact_row(context_ref="c2")]
+        n = store.upsert_xbrl_facts(rows, _raw())
+        assert n == 2
+        assert len(store._conn.cur.executed) == 1
+        sql, params = store._conn.cur.executed[0]
+        assert "INSERT INTO xbrl_facts" in sql and len(params) == 2
+
+    def test_empty_is_noop_returns_zero(self):
+        store = LocalStore(_FakeConn())
+        assert store.upsert_xbrl_facts([_fact_row(value="")], _raw()) == 0
+        assert store._conn.cur.executed == []  # 実行しない
+
+
+class TestMirrorXbrlFacts:
+    def test_dispatch_with_list_rows(self):
+        local = _RecordingLocal()
+        assert _ctx(local).mirror_xbrl_facts([_fact_row()], _raw()) is True
+        assert local.calls == [("facts", 1)]
+
+    def test_dataframe_converted_to_records(self):
+        import pandas as pd
+
+        local = _RecordingLocal()
+        df = pd.DataFrame([_fact_row(), _fact_row(context_ref="c2")])
+        _ctx(local).mirror_xbrl_facts(df, _raw())
+        assert local.calls == [("facts", 2)]
+
+    def test_noop_when_local_none(self):
+        assert _ctx(None).mirror_xbrl_facts([_fact_row()], _raw()) is None
+
+    def test_noop_when_empty(self):
+        local = _RecordingLocal()
+        assert _ctx(local).mirror_xbrl_facts([], _raw()) is None
+        assert local.calls == []

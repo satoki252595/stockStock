@@ -1,0 +1,11 @@
+# 毎日 03:30（サーバのローカルタイム）に pg_dump を実行。
+# 配置: /etc/systemd/system/jp-stock-backup.timer
+[Unit]
+Description=Run jp-stock-pipeline backup daily
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

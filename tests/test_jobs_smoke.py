@@ -309,6 +309,41 @@ class TestPricesDaily:
         quality = price_ops[0].payload["properties"][S.PROP_QUALITY]["select"]["name"]
         assert quality == "要確認"  # 自動調整はせず人間判断に委ねる (§3-5)
 
+    def test_notion_read_failure_degrades_without_crash(
+        self, monkeypatch, tmp_path, captured_clients
+    ):
+        """① relation read(load_stock_master_map)が Notion 障害で失敗しても、
+        ジョブは crash せず ② を書き切る（双方向フェールセーフの read 側 §3-2）。
+        Notion 断でもローカル PG へ ② を残せるようにするための degrade。"""
+        csv_bytes = fixture_path("transform/yfinance_7203T_daily.csv").read_bytes()
+        df = pd.read_csv(fixture_path("transform/yfinance_7203T_daily.csv"))
+
+        def fake_batch(settings, codes, period="2y", **kwargs):
+            artifact = save_raw(
+                csv_bytes, source=Source.YFINANCE, datatype="daily_prices_batch",
+                scope="ALL", data_date=date(2026, 6, 10), url="fixture://prices/7203",
+                ext="csv", license_tag=source_license(Source.YFINANCE),
+                base_dir=settings.raw_data_dir,
+            )
+            return artifact, {"7203": df}, []
+
+        def selective_query(self, db_id, *args, **kwargs):
+            # ① stock_master への relation read のみ Notion 障害を模す
+            # (⑤ SHA256 重複クエリ等は正常＝空リストで返す)
+            if "stock_master" in str(db_id):
+                raise RuntimeError("テスト: ① への Notion read 全断")
+            return []
+
+        monkeypatch.setattr(yfinance_prices, "fetch_daily_batch", fake_batch)
+        monkeypatch.setattr(NotionClient, "query_database", selective_query)
+        code = prices_daily.main(
+            ["--dry-run", "--codes", "7203", "--skip-valuation"], env=_env(tmp_path)
+        )
+        assert code == 0  # ① read 失敗でも crash しない（degrade して続行）
+        client = captured_clients[0]
+        # master_id 解決不能でも ② は書かれる（relation 空で継続）
+        assert len(_ops_with_prop(client, S.PRICE_PROP_RSI14)) == 1
+
 
 class TestTdnetHourly:
     def test_dry_run_with_fixture(self, monkeypatch, tmp_path, captured_clients):

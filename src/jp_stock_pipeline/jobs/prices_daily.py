@@ -41,10 +41,18 @@ def resolve_codes(ctx: JobContext) -> list[str]:
     if codes:
         return apply_limit(codes, ctx.args.limit)
 
-    pages = ctx.client.query_database(
-        ctx.settings.db_id("stock_master"),
-        filter={"property": S.MASTER_PROP_LISTED, "checkbox": {"equals": True}},
-    )
+    # ① クエリ(Notion read)。Notion 障害でも EDINET コードリストへ degrade して
+    # ローカル PG への ② 書き込みを成立させる（双方向フェールセーフの read 側 §3-2）。
+    try:
+        pages = ctx.client.query_database(
+            ctx.settings.db_id("stock_master"),
+            filter={"property": S.MASTER_PROP_LISTED, "checkbox": {"equals": True}},
+        )
+    except Exception as exc:  # noqa: BLE001 - Notion 断は EDINET コードリストで救済
+        logger.warning(
+            "① クエリ失敗 → EDINET コードリストから銘柄解決へフォールバック (§3-2): %s", exc
+        )
+        pages = []
     codes = []
     for page in pages:
         rich = page.get("properties", {}).get(S.MASTER_PROP_CODE, {}).get("rich_text", [])
@@ -132,7 +140,8 @@ def execute(ctx: JobContext) -> None:
     # 1-3. yfinance 一括取得 (原本+Parquet変換版は fetch 内で生成済み)
     yf_artifact, frames, missing = yfinance_prices.fetch_daily_batch(ctx.settings, codes)
 
-    # 4. 原本必須: ⑤ へアップロード (失敗時 RawUploadError → 構造化書き込みなしで異常終了)
+    # 4. 原本必須: ⑤ へ UL（Notion⑤/ローカル⑤ 独立）。両系統とも失敗時のみ
+    #    RawUploadError で中止（片系統に原本が残れば構造化は続行 §7.1/§3-3）
     ctx.upload_raw(yf_artifact)
 
     # フォールバック: yfinance 欠損銘柄は stooq の実データのみ (§3-2)
@@ -164,8 +173,16 @@ def execute(ctx: JobContext) -> None:
             valuation_artifact = None
             logger.warning("バリュエーション取得/原本UL失敗 (②は価格系のみ更新 §8.1-4): %s", exc)
 
-    # 5-6. テクニカル計算 → ② upsert。①の relation は一括マップで解決 (§8.3 レート対策)
-    master_map = upsert.load_stock_master_map(ctx.client, ctx.settings)
+    # 5-6. テクニカル計算 → ② upsert。①の relation は一括マップで解決 (§8.3 レート対策)。
+    # relation マップの Notion read 失敗は degrade（master_id=None で本体は書く）。
+    # これにより Notion 断でもローカル PG へ ② を書き切れる（双方向フェールセーフ §3-2）。
+    try:
+        master_map = upsert.load_stock_master_map(ctx.client, ctx.settings)
+    except Exception as exc:  # noqa: BLE001 - relation read 失敗は本体を止めない
+        master_map = {}
+        logger.warning(
+            "① relation マップ取得失敗 → master_id=None で ② を継続 (§3-2): %s", exc
+        )
     for code in codes:
         if code in frames:
             src, df, artifact = Source.YFINANCE, frames[code], yf_artifact

@@ -550,7 +550,9 @@ _CATALOG_DICTIONARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "銘柄コード (text): 証券コード4桁。ユニークキー",
             "市場区分 / 33業種 / 17業種 (select)",
             "EDINETコード (text)",
-            "上場状態 (checkbox): チェック=上場中",
+            "上場状態 (checkbox): チェック=上場中 (master_sync=コードリスト所有)",
+            "状態 (select: 上場/監理/整理/上場廃止) / 上場日 (date) / 上場廃止日 (date)"
+            "。一次開示由来 (tdnet_hourly が所有) で listed と二重所有を回避 (§3-7)",
             "最終データ更新日 (date)",
             "②③④⑤への relation は dual_property により自動生成 (銘柄ページから全情報を辿れる)",
         ),
@@ -558,6 +560,7 @@ _CATALOG_DICTIONARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
         "prices",
         "ソース: yfinance/stooq+計算 (personal-only) / 更新頻度: 毎営業日19:30 (prices_daily)。"
+        "土曜は reconcile_weekly が stooq と終値突合しデータ品質=要確認を更新 (値は書換えない §3-5)。"
         "最新スナップショットのみ。全履歴は⑥のParquet/CSVを利用",
         (
             "銘柄コード (title)",
@@ -597,7 +600,10 @@ _CATALOG_DICTIONARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "毎営業日21:00 (edinet_daily)",
         (
             "開示タイトル (title) / 開示日時 (date)",
-            "書類種別 (select: 短信/有報/四半期報告/業績修正/配当修正/大量保有/自社株買い/その他)",
+            "書類種別 (select: 短信/有報/四半期報告/業績修正/配当修正/大量保有/自社株買い/"
+            "株式分割/株式併合/上場廃止/新規上場/その他)",
+            "分割比率 (text: 例 1:3) / 分割係数 (number) / 効力発生日 (date): コーポレート"
+            "アクション属性。人間の判断材料に留め株価の自動調整はしない (§3-7)",
             "書類管理番号 (text): docID。ユニークキー",
             "銘柄コード (text) / 取得元URL (url) / XBRL有無 (checkbox)",
         ),
