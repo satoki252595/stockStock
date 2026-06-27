@@ -208,6 +208,16 @@ APIコール1回 or ダウンロード1回で得たレスポンス/ファイル 
 - **データカタログページ**を必ず整備: 各DBのスキーマ辞書（項目名・型・単位・算式・ソース・ライセンス・更新頻度）、利用者別クイックスタート、免責（情報提供のみ・投資助言ではない）、出典表記（EDINET等）
 - 公開時は`commercial-ok`/`factual-cite`のみのフィルタビューを公開対象にする
 
+### 7.1 ローカル端末への dual-write + REST API（端末B）
+
+Notion を正本としつつ、収集ジョブが LAN 内の別端末（端末B）の PostgreSQL へ同時ミラー書き込みし、ユーザーが FastAPI（REST + `X-API-Key`）で逐次アクセスできる（`local_store/`）。接続情報は全て `.env`（`LOCAL_DB_*` / `LOCAL_API_KEY`）で管理しコードに埋め込まない（§9）。
+
+- **トポロジ**: パイプラインを端末B（または同一 LAN）で実行し dual-write。端末DBを外部公開しないため安全（`connect_local_store` は未設定/接続不可なら `None` を返し Notion のみで稼働）。`LOCAL_DB_HOST` 未設定なら従来どおり Notion のみ。
+- **整合性**: Notion 正本・ミラー失敗はジョブを止めず degrade（§3-2 で warning 記録、`ctx.mirror_failed`）。`①` の状態/上場日/上場廃止日は Notion と対称に二重所有を回避（codelist 同期は `listed` のみ、状態確定は一次開示）。完全置換（`ON CONFLICT DO UPDATE` で `EXCLUDED` 上書き）で前回値を残さない（§3-1）。値はプレースホルダ渡しで SQL インジェクションを避ける。
+- **②の時系列化**: ローカルは `(code, data_date)` を主キーに時系列を蓄積（Notion は最新スナップショット）。API の `/prices/{code}?from=&to=` で期間取得できる。
+- **テーブル**: ①〜⑤⑦ に対応。`②`（personal-only）はローカル自己利用に限定し、公開 API として外部提供する場合は `commercial-ok`/`factual-cite`（①③④）のみをフィルタする。
+- **起動**: `uvicorn jp_stock_pipeline.local_store.api:app`（`/docs` に OpenAPI。`/health` のみ認証不要）。
+
 ---
 
 ## 8. アーキテクチャとパイプライン

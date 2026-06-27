@@ -16,7 +16,7 @@ from ..convert import convert_artifact, xbrl_to_csv
 from ..http import FetchError, fetch
 from ..licensing import source_license
 from ..models import DisclosureRecord, Provenance, RawArtifact, Source, now_jst
-from ..notion import file_upload, upsert
+from ..notion import upsert
 from ..rawstore import save_raw
 from ..transform import normalize
 from .runner import JobContext, apply_limit, build_parser, main_exit, run_job
@@ -83,7 +83,7 @@ def _process_financial_xbrl(
         artifact.local_path.read_bytes(), record.code or "", record.doc_id
     )
     xbrl_to_csv.write_tidy(tidy, artifact)
-    raw_page_id = file_upload.upload_raw_artifact(ctx.client, ctx.settings, artifact)
+    raw_page_id = ctx.upload_raw(artifact)
 
     prov = Provenance(
         source=Source.TDNET,
@@ -104,6 +104,7 @@ def _process_financial_xbrl(
         else None
     )
     upsert.upsert_financial_summary(ctx.client, ctx.settings, fin, master_id)
+    ctx.mirror(fin)
 
 
 def execute(ctx: JobContext) -> None:
@@ -112,7 +113,7 @@ def execute(ctx: JobContext) -> None:
 
     for artifact, records, xbrl_urls in batches:
         # 原本必須: 失敗時はこの取得単位の構造化書き込みをしない (§8.1-4)
-        raw_page_id = file_upload.upload_raw_artifact(ctx.client, ctx.settings, artifact)
+        raw_page_id = ctx.upload_raw(artifact)
 
         for record in apply_limit(records, ctx.args.limit):
             record.provenance.raw_page_id = raw_page_id
@@ -123,6 +124,7 @@ def execute(ctx: JobContext) -> None:
                     else None
                 )
                 upsert.upsert_disclosure(ctx.client, ctx.settings, record, master_id)
+                ctx.mirror(record)
                 ctx.add_success()
             except Exception as exc:
                 ctx.add_failure(record.doc_id, f"④upsert失敗: {exc}")
@@ -132,6 +134,7 @@ def execute(ctx: JobContext) -> None:
             if record.doc_type in upsert.LIFECYCLE_DOC_TYPES:
                 try:
                     upsert.apply_disclosure_lifecycle(ctx.client, ctx.settings, record)
+                    ctx.mirror_lifecycle(record)
                 except Exception as exc:
                     ctx.add_failure(record.doc_id, f"①ライフサイクル更新失敗: {exc}")
 

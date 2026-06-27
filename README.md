@@ -34,6 +34,41 @@ uv run pytest        # テスト
 
 全ジョブ `--dry-run` 対応（Notion に書き込まない）。
 
+## ローカル API（端末B・任意）
+
+Notion への格納と同時に、LAN 内の別端末（端末B）の PostgreSQL へ dual-write し、
+FastAPI(REST + APIキー)で逐次アクセスできる。`LOCAL_DB_HOST` を設定すると有効化
+（未設定なら Notion のみ＝従来動作）。接続情報は全て `.env`（[.env.example](.env.example) 参照）。
+
+- **正本は Notion**。ローカルミラー失敗はジョブを止めず degrade（warning 記録）。
+- `②株価` はローカルでは `(code, data_date)` を主キーに**時系列を蓄積**（Notion は最新スナップショット）。
+- `②` は personal-only（yfinance/stooq）。**ローカル自己利用に限り、公開しないこと**。
+
+```bash
+# 端末B: PostgreSQL に DB/ユーザーを用意（テーブルは初回ジョブ実行時に自動作成）
+createuser jp_stock --pwprompt && createdb -O jp_stock jp_stock
+
+# 端末A: .env に LOCAL_DB_* を設定して通常どおりジョブを実行（Notion と同時にミラー）
+nix develop -c uv run python -m jp_stock_pipeline.jobs.prices_daily
+
+# 端末B: API を起動（X-API-Key 認証は LOCAL_API_KEY）
+nix develop -c uv run uvicorn jp_stock_pipeline.local_store.api:app --host 0.0.0.0 --port 8000
+```
+
+| エンドポイント | 内容 |
+|---|---|
+| `GET /stocks` `GET /stocks/{code}` | ① 銘柄マスタ |
+| `GET /prices/{code}?from=&to=` | ② 株価テクニカル（時系列・data_date 降順） |
+| `GET /financials/{code}` | ③ 財務サマリ |
+| `GET /disclosures?code=&doc_type=&from=&to=` | ④ 開示書類 |
+| `GET /raw` `GET /jobs` | ⑤原本メタ / ⑦ジョブログ |
+| `GET /health` | 死活確認（認証不要） / `GET /docs` Swagger UI |
+
+```bash
+# 利用例（端末B の IP が 192.168.1.50 の場合）
+curl -H "X-API-Key: $LOCAL_API_KEY" "http://192.168.1.50:8000/prices/7203?from=2026-01-01"
+```
+
 ## 不変条件
 
 - 取得単位ごとに原本を ⑤原本ファイルDB へ必ず保存（失敗時は構造化データを書かない）

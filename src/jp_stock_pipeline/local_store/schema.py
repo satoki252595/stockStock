@@ -1,0 +1,171 @@
+"""ローカル PostgreSQL スキーマ DDL (Notion ①〜⑤⑦ に対応)。
+
+設計方針:
+- Notion の正規化オブジェクト(models.py の dataclass)を素直に列へ展開する。
+- 共通の来歴 (§6.3): source / license_tag / data_date / fetched_at / quality を各行に持つ。
+- ②株価は Notion が「最新スナップショット」なのに対し、ローカルは
+  (code, data_date) を主キーに**時系列を蓄積**する(API の価値が上がる §7)。
+- 数値はすべて NULL 許容（取得できなかった値は NULL のまま。捏造しない §3-1）。
+- DDL は冪等 (IF NOT EXISTS)。LocalStore.init_schema() が起動時に流す。
+"""
+
+from __future__ import annotations
+
+# 各文を個別に実行する（psycopg は複数文 execute も可だが、冪等性と可読性のため分割）。
+SCHEMA_STATEMENTS: tuple[str, ...] = (
+    # ① 銘柄マスタ -----------------------------------------------------------
+    """
+    CREATE TABLE IF NOT EXISTS stock_master (
+        code            TEXT PRIMARY KEY,
+        name            TEXT NOT NULL,
+        market          TEXT,
+        sector33        TEXT,
+        sector17        TEXT,
+        edinet_code     TEXT,
+        listed          BOOLEAN NOT NULL DEFAULT TRUE,
+        status          TEXT,
+        listing_date    DATE,
+        delisting_date  DATE,
+        source          TEXT NOT NULL,
+        license_tag     TEXT NOT NULL,
+        data_date       DATE,
+        fetched_at      TIMESTAMPTZ NOT NULL,
+        quality         TEXT NOT NULL,
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    # ② 株価テクニカル（時系列: code × data_date） ---------------------------
+    """
+    CREATE TABLE IF NOT EXISTS prices (
+        code               TEXT NOT NULL,
+        data_date          DATE NOT NULL,
+        open               DOUBLE PRECISION,
+        high               DOUBLE PRECISION,
+        low                DOUBLE PRECISION,
+        close              DOUBLE PRECISION,
+        prev_close_pct     DOUBLE PRECISION,
+        volume             DOUBLE PRECISION,
+        turnover           DOUBLE PRECISION,
+        market_cap         DOUBLE PRECISION,
+        week52_high        DOUBLE PRECISION,
+        week52_low         DOUBLE PRECISION,
+        sma5               DOUBLE PRECISION,
+        sma25              DOUBLE PRECISION,
+        sma75              DOUBLE PRECISION,
+        sma200             DOUBLE PRECISION,
+        sma25_dev_pct      DOUBLE PRECISION,
+        rsi14              DOUBLE PRECISION,
+        macd               DOUBLE PRECISION,
+        macd_signal        DOUBLE PRECISION,
+        macd_hist          DOUBLE PRECISION,
+        bb_upper           DOUBLE PRECISION,
+        bb_lower           DOUBLE PRECISION,
+        atr14              DOUBLE PRECISION,
+        volume_ratio25     DOUBLE PRECISION,
+        per                DOUBLE PRECISION,
+        pbr                DOUBLE PRECISION,
+        dividend_yield_pct DOUBLE PRECISION,
+        source             TEXT NOT NULL,
+        license_tag        TEXT NOT NULL,
+        fetched_at         TIMESTAMPTZ NOT NULL,
+        quality            TEXT NOT NULL,
+        updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (code, data_date)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS prices_code_idx ON prices (code)",
+    # ③ 財務サマリ（code × 決算期末 × 開示種別） -----------------------------
+    """
+    CREATE TABLE IF NOT EXISTS financials (
+        code                      TEXT NOT NULL,
+        fiscal_period_end         DATE NOT NULL,
+        disclosure_type           TEXT NOT NULL,
+        consolidated              TEXT,
+        accounting_standard       TEXT,
+        net_sales                 DOUBLE PRECISION,
+        operating_income          DOUBLE PRECISION,
+        ordinary_income           DOUBLE PRECISION,
+        net_income                DOUBLE PRECISION,
+        eps                       DOUBLE PRECISION,
+        bps                       DOUBLE PRECISION,
+        roe_pct                   DOUBLE PRECISION,
+        roa_pct                   DOUBLE PRECISION,
+        equity_ratio_pct          DOUBLE PRECISION,
+        cf_operating              DOUBLE PRECISION,
+        cf_investing              DOUBLE PRECISION,
+        cf_financing              DOUBLE PRECISION,
+        dps_actual                DOUBLE PRECISION,
+        dps_forecast              DOUBLE PRECISION,
+        forecast_net_sales        DOUBLE PRECISION,
+        forecast_operating_income DOUBLE PRECISION,
+        forecast_ordinary_income  DOUBLE PRECISION,
+        forecast_net_income       DOUBLE PRECISION,
+        forecast_eps              DOUBLE PRECISION,
+        disclosed_at              TIMESTAMPTZ,
+        source                    TEXT NOT NULL,
+        license_tag               TEXT NOT NULL,
+        data_date                 DATE,
+        fetched_at                TIMESTAMPTZ NOT NULL,
+        quality                   TEXT NOT NULL,
+        updated_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (code, fiscal_period_end, disclosure_type)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS financials_code_idx ON financials (code)",
+    # ④ 開示書類（doc_id 一意） ---------------------------------------------
+    """
+    CREATE TABLE IF NOT EXISTS disclosures (
+        doc_id          TEXT PRIMARY KEY,
+        title           TEXT NOT NULL,
+        disclosed_at    TIMESTAMPTZ NOT NULL,
+        code            TEXT,
+        doc_type        TEXT NOT NULL,
+        source_url      TEXT,
+        has_xbrl        BOOLEAN NOT NULL DEFAULT FALSE,
+        split_ratio     TEXT,
+        split_factor    DOUBLE PRECISION,
+        effective_date  DATE,
+        source          TEXT NOT NULL,
+        license_tag     TEXT NOT NULL,
+        data_date       DATE,
+        fetched_at      TIMESTAMPTZ NOT NULL,
+        quality         TEXT NOT NULL,
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS disclosures_code_idx ON disclosures (code)",
+    "CREATE INDEX IF NOT EXISTS disclosures_disclosed_idx ON disclosures (disclosed_at)",
+    # ⑤ 原本ファイル（メタのみ。原本バイナリは Notion ⑤ / ローカル data/raw に保管） --
+    """
+    CREATE TABLE IF NOT EXISTS raw_files (
+        sha256          TEXT PRIMARY KEY,
+        filename        TEXT NOT NULL,
+        source          TEXT NOT NULL,
+        datatype        TEXT NOT NULL,
+        scope           TEXT NOT NULL,
+        data_date       DATE,
+        fetched_at      TIMESTAMPTZ NOT NULL,
+        url             TEXT NOT NULL,
+        size_bytes      BIGINT NOT NULL,
+        license_tag     TEXT NOT NULL,
+        convert_status  TEXT NOT NULL,
+        notion_page_id  TEXT,
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    # ⑦ 収集ジョブログ（1行=1ジョブ実行） ----------------------------------
+    """
+    CREATE TABLE IF NOT EXISTS job_log (
+        id              BIGSERIAL PRIMARY KEY,
+        job_name        TEXT NOT NULL,
+        status          TEXT NOT NULL,
+        processed       INTEGER NOT NULL,
+        failed          INTEGER NOT NULL,
+        failed_codes    TEXT,
+        run_url         TEXT,
+        duration_secs   DOUBLE PRECISION,
+        finished_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS job_log_name_idx ON job_log (job_name, finished_at)",
+)

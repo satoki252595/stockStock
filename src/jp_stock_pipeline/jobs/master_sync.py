@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 
 from ..collectors import edinet_codelist
-from ..notion import file_upload, upsert
+from ..notion import upsert
 from .runner import JobContext, apply_limit, build_parser, main_exit, run_job
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ def execute(ctx: JobContext) -> None:
 
     # 4. ⑤へ原本+変換版を必ずアップロード。RawUploadError はそのまま伝播し
     #    ジョブ失敗となる（構造化書き込みはこの後なので一切行われない §8.1-4）
-    raw_page_id = file_upload.upload_raw_artifact(ctx.client, ctx.settings, artifact)
+    raw_page_id = ctx.upload_raw(artifact)
 
     # 5. Transform（全件。上場廃止検知のため limit 前の全コードを保持）
     records = edinet_codelist.parse_codelist(
@@ -45,6 +45,7 @@ def execute(ctx: JobContext) -> None:
             upsert.upsert_stock_master(
                 ctx.client, ctx.settings, record, include_lifecycle=False
             )
+            ctx.mirror(record, include_lifecycle=False)  # ローカルへも同条件でミラー
             ctx.add_success()
         except Exception as exc:
             ctx.add_failure(record.code, f"①upsert失敗: {exc}")
@@ -86,6 +87,7 @@ def _detect_delistings(ctx: JobContext, fetched_codes: set[str]) -> None:
     for code, page_id in absent:
         try:
             upsert.mark_master_absent_from_codelist(ctx.client, ctx.settings, page_id)
+            ctx.mirror_mark_absent(code)
             ctx.add_success()
         except Exception as exc:
             ctx.add_failure(code, f"listed=Falseマーク失敗: {exc}")

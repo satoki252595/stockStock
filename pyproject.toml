@@ -16,6 +16,10 @@ dependencies = [
     "xlrd>=2.0.1",
     "pypdfium2>=4.30",
     "tenacity>=9.0",
+    # ローカル端末への dual-write(②時系列含む)+ FastAPI 配信
+    "psycopg[binary]>=3.2",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
 ]
 
 [dependency-groups]
@@ -34,6 +38,9 @@ packages = ["src/jp_stock_pipeline"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+filterwarnings = [
+    "ignore:Using `httpx` with `starlette.testclient`",
+]
 
 [tool.ruff]
 line-length = 100

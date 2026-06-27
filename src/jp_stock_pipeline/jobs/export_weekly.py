@@ -88,7 +88,7 @@ def export_prices_track_b(ctx: JobContext) -> None:
     artifact, frames, missing = yfinance_prices.fetch_daily_batch(
         ctx.settings, codes, period=ctx.args.period
     )
-    file_upload.upload_raw_artifact(ctx.client, ctx.settings, artifact)
+    ctx.upload_raw(artifact)
     for code in missing:
         ctx.add_failure(code, "株価履歴取得失敗 (エクスポートから欠落)")
     if not frames:
