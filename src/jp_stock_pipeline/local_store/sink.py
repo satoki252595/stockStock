@@ -11,9 +11,11 @@ import logging
 from typing import TYPE_CHECKING
 
 from . import mappers
-from .schema import SCHEMA_STATEMENTS
+from .schema import FTS_STATEMENTS, SCHEMA_STATEMENTS
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from ..config import LocalStoreSettings
     from ..models import (
         DisclosureRecord,
@@ -52,6 +54,24 @@ class LocalStore:
         with self._conn.cursor() as cur:
             for stmt in SCHEMA_STATEMENTS:
                 cur.execute(stmt)
+        self._init_fulltext_index()
+
+    def _init_fulltext_index(self) -> None:
+        """PGroonga 日本語全文検索インデックスをベストエフォートで作成する。
+
+        PGroonga 拡張が未導入の端末では CREATE EXTENSION が失敗するが、その場合も
+        本体スキーマは使える（API は ILIKE 検索へフォールバックする）。autocommit の
+        ため失敗文は単独で abort され、握って警告のみ出す。
+        """
+        for stmt in FTS_STATEMENTS:
+            try:
+                with self._conn.cursor() as cur:
+                    cur.execute(stmt)
+            except Exception as exc:  # noqa: BLE001 - 拡張未導入でも本体は使える
+                logger.warning(
+                    "PGroonga 全文検索インデックス未作成（ILIKE 検索で代替）: %s", exc
+                )
+                return
 
     def _exec(self, built: tuple[str, dict]) -> None:
         sql, params = built
@@ -80,6 +100,18 @@ class LocalStore:
 
     def upsert_raw_artifact(self, artifact: RawArtifact) -> None:
         self._exec(mappers.raw_file_upsert(artifact))
+
+    def upsert_xbrl_facts(self, rows: Iterable[dict], artifact: RawArtifact) -> int:
+        """⑧ XBRL 全ファクトを doc 単位で bulk upsert する（ローカル専用）。
+
+        格納した行数を返す（空なら 0 で何も実行しない）。executemany で一括投入。
+        """
+        sql, params_list = mappers.xbrl_facts_insert(rows, artifact)
+        if not params_list:
+            return 0
+        with self._conn.cursor() as cur:
+            cur.executemany(sql, params_list)
+        return len(params_list)
 
     def apply_disclosure_lifecycle(self, record: DisclosureRecord) -> None:
         built = mappers.lifecycle_update(record)

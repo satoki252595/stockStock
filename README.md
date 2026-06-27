@@ -67,11 +67,18 @@ nix develop -c uv run uvicorn jp_stock_pipeline.local_store.api:app --host 0.0.0
 | `GET /financials/{code}` | ③ 財務サマリ |
 | `GET /disclosures?code=&doc_type=&from=&to=` | ④ 開示書類 |
 | `GET /raw` `GET /jobs` | ⑤原本メタ / ⑦ジョブログ |
+| `GET /facts?doc_id=&code=&element=&text_only=` | ⑧ XBRL 全ファクト（数値＋定性 textBlock・ローカル専用） |
+| `GET /facts/search?q=&code=` | ⑧ 定性 textBlock の日本語全文検索（PGroonga、無ければ ILIKE） |
 | `GET /health` | 死活確認（認証不要） / `GET /docs` Swagger UI |
+
+- **⑧ XBRL 全ファクト**は Notion に無いローカル専用の派生ストア。有報/短信 XBRL の全ファクト（事業等のリスク等の定性 textBlock 含む）を保持し横断クエリ＋全文検索できる。`factual-cite`（短信原文）も含むため公開用途では `license_tag` で要フィルタ。
+- 全文検索を使うなら端末B で `CREATE EXTENSION pgroonga;`（未導入なら `/facts/search` は自動で `ILIKE` にフォールバック）。
 
 ```bash
 # 利用例（端末B の IP が 192.168.1.50 の場合）
 curl -H "X-API-Key: $LOCAL_API_KEY" "http://192.168.1.50:8000/prices/7203?from=2026-01-01"
+# 定性情報の全文検索（例: 為替変動リスクに言及する開示を横断検索）
+curl -H "X-API-Key: $LOCAL_API_KEY" "http://192.168.1.50:8000/facts/search?q=為替変動リスク"
 ```
 
 ### 本番サーバ運用（収集=GitHub Actions / サーバ=DB+API）

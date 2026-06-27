@@ -85,6 +85,9 @@ def _process_financial_xbrl(
     xbrl_to_csv.write_tidy(tidy, artifact)
     raw_page_id = ctx.upload_raw(artifact)
 
+    # ⑧ 短信 XBRL の全ファクトをローカル専用ストアへミラー（§7.1, factual-cite=内部利用）。
+    ctx.mirror_xbrl_facts(tidy, artifact)
+
     prov = Provenance(
         source=Source.TDNET,
         license_tag=source_license(Source.TDNET),  # factual-cite (§2.1)
