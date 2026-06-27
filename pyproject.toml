@@ -10,7 +10,11 @@ dependencies = [
     "pandas>=2.2",
     "pyarrow>=17.0",
     "yfinance>=0.2.50",
-    "notion-client>=2.2.1",
+    # notion-client は 2.6.0 で databases.query を廃止し data_sources.query へ移行
+    # した。現行コードは databases.query 前提（単一データソースの DB）のため、それが
+    # 残る最終版 2.5.x に固定する（file_uploads は raw_api 直叩きなので SDK 版非依存）。
+    # data_sources API への移行は別途フォローアップ。
+    "notion-client>=2.5,<2.6",
     "lxml>=5.2",
     "openpyxl>=3.1",
     "xlrd>=2.0.1",
