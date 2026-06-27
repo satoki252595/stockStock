@@ -98,13 +98,25 @@ def _process_financial_xbrl(
     if fin is None:
         logger.info("③レコード生成不可 (決算期末を導出できず): %s", record.doc_id)
         return
-    master_id = (
-        upsert.find_stock_master_page(ctx.client, ctx.settings, fin.code)
-        if fin.code
-        else None
-    )
-    upsert.upsert_financial_summary(ctx.client, ctx.settings, fin, master_id)
-    ctx.mirror(fin)
+    try:
+        master_id = (
+            upsert.find_stock_master_page(ctx.client, ctx.settings, fin.code)
+            if fin.code
+            else None
+        )
+    except Exception as exc:  # noqa: BLE001 - relation 解決失敗は本体を止めない
+        master_id = None
+        logger.warning(
+            "① relation 解決失敗 (master_id=None で続行 doc_id=%s): %s", record.doc_id, exc
+        )
+    # ③ を Notion とローカルへ独立に書く（双方向フェールセーフ）。両系統失敗は
+    # 呼び出し側 (execute) が「短信XBRL→③失敗」として記録する。
+    if not ctx.persist(
+        fin,
+        lambda: upsert.upsert_financial_summary(ctx.client, ctx.settings, fin, master_id),
+        label=f"③{record.doc_id}",
+    ):
+        raise RuntimeError(f"③ を Notion/ローカル両系統に書けず: {record.doc_id}")
 
 
 def execute(ctx: JobContext) -> None:
@@ -117,26 +129,44 @@ def execute(ctx: JobContext) -> None:
 
         for record in apply_limit(records, ctx.args.limit):
             record.provenance.raw_page_id = raw_page_id
+            # ① relation 解決(Notionクエリ)。失敗しても relation 無しで本体は書く
             try:
                 master_id = (
                     upsert.find_stock_master_page(ctx.client, ctx.settings, record.code)
                     if record.code
                     else None
                 )
-                upsert.upsert_disclosure(ctx.client, ctx.settings, record, master_id)
-                ctx.mirror(record)
+            except Exception as exc:  # noqa: BLE001 - relation 解決失敗は本体を止めない
+                master_id = None
+                logger.warning(
+                    "① relation 解決失敗 (master_id=None で続行 doc_id=%s): %s",
+                    record.doc_id, exc,
+                )
+            # ④ を Notion とローカルへ独立に書く（双方向フェールセーフ）
+            if ctx.persist(
+                record,
+                lambda rec=record, mid=master_id: upsert.upsert_disclosure(
+                    ctx.client, ctx.settings, rec, mid
+                ),
+                label=f"④{record.doc_id}",
+            ):
                 ctx.add_success()
-            except Exception as exc:
-                ctx.add_failure(record.doc_id, f"④upsert失敗: {exc}")
+            else:
+                ctx.add_failure(record.doc_id, "④: Notion/ローカル両系統に書けず")
                 continue
 
             # 上場廃止/新規上場 開示は ① のライフサイクル状態へ反映 (§ Phase3)
             if record.doc_type in upsert.LIFECYCLE_DOC_TYPES:
-                try:
-                    upsert.apply_disclosure_lifecycle(ctx.client, ctx.settings, record)
-                    ctx.mirror_lifecycle(record)
-                except Exception as exc:
-                    ctx.add_failure(record.doc_id, f"①ライフサイクル更新失敗: {exc}")
+                if not ctx.persist_lifecycle(
+                    record,
+                    lambda rec=record: upsert.apply_disclosure_lifecycle(
+                        ctx.client, ctx.settings, rec
+                    ),
+                    label=f"①lifecycle:{record.doc_id}",
+                ):
+                    ctx.add_failure(
+                        record.doc_id, "①ライフサイクル: Notion/ローカル両系統に書けず"
+                    )
 
             if record.doc_type == "短信" and record.has_xbrl and record.doc_id in xbrl_urls:
                 try:
