@@ -33,6 +33,61 @@ class ConfigError(RuntimeError):
     pass
 
 
+# 端末B(ローカル PostgreSQL)既定値。IP/ユーザー等の機微情報は .env で上書きする。
+DEFAULT_LOCAL_DB_PORT = 5432
+DEFAULT_LOCAL_DB_NAME = "jp_stock"
+
+
+@dataclass
+class LocalStoreSettings:
+    """端末B(PostgreSQL)への dual-write / FastAPI 配信の接続情報 (.env 管理)。
+
+    host が未設定なら dual-write は無効（Notion のみ書き込む）。資格情報は
+    コードに埋め込まず LOCAL_DB_* 環境変数 (.env) からのみ読む (§9)。
+    """
+
+    host: str | None
+    port: int
+    dbname: str
+    user: str | None
+    password: str | None
+    api_key: str | None  # FastAPI の X-API-Key 認証用 (API 側のみ参照)
+
+    @property
+    def enabled(self) -> bool:
+        """host が設定されていれば dual-write / API を有効化する。"""
+        return bool(self.host)
+
+    def connect_kwargs(self) -> dict:
+        """psycopg.connect(**kwargs) 用の接続引数。
+
+        文字列連結ではなくキーワード引数で渡す（空白・特殊文字を含むパスワードでも
+        libpq のクォート不備で壊れない）。
+        """
+        kwargs: dict = {"host": self.host, "port": self.port, "dbname": self.dbname}
+        if self.user:
+            kwargs["user"] = self.user
+        if self.password:
+            kwargs["password"] = self.password
+        return kwargs
+
+
+def _load_local_store(env: dict[str, str]) -> LocalStoreSettings:
+    raw_port = (env.get("LOCAL_DB_PORT") or "").strip()
+    try:
+        port = int(raw_port) if raw_port else DEFAULT_LOCAL_DB_PORT
+    except ValueError as exc:
+        raise ConfigError(f"LOCAL_DB_PORT が不正: {raw_port!r}") from exc
+    return LocalStoreSettings(
+        host=env.get("LOCAL_DB_HOST") or None,
+        port=port,
+        dbname=env.get("LOCAL_DB_NAME") or DEFAULT_LOCAL_DB_NAME,
+        user=env.get("LOCAL_DB_USER") or None,
+        password=env.get("LOCAL_DB_PASSWORD") or None,
+        api_key=env.get("LOCAL_API_KEY") or None,
+    )
+
+
 @dataclass
 class Settings:
     notion_token: str | None
@@ -42,6 +97,12 @@ class Settings:
     raw_data_dir: Path
     dry_run: bool
     db_ids: dict[str, str] = field(default_factory=dict)
+    local_store: LocalStoreSettings = field(
+        default_factory=lambda: LocalStoreSettings(
+            host=None, port=DEFAULT_LOCAL_DB_PORT, dbname=DEFAULT_LOCAL_DB_NAME,
+            user=None, password=None, api_key=None,
+        )
+    )
 
     def db_id(self, key: str) -> str:
         if key not in DB_REGISTRY:
@@ -87,4 +148,5 @@ def load_settings(*, dry_run: bool | None = None, env: dict[str, str] | None = N
         raw_data_dir=Path(env.get("RAW_DATA_DIR", "data/raw")),
         dry_run=resolved_dry_run,
         db_ids=_load_db_ids(env),
+        local_store=_load_local_store(env),
     )

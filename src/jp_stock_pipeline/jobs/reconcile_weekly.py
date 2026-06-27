@@ -152,7 +152,7 @@ def execute(ctx: JobContext) -> None:
         try:
             artifact, df = stooq_prices.fetch_daily(ctx.settings, code)
             attach_dataframe_parquet(artifact, df)  # 型付き変換版 (§5.2)
-            file_upload.upload_raw_artifact(ctx.client, ctx.settings, artifact)
+            ctx.upload_raw(artifact)
             stooq_by_code[code] = df
         except (FetchError, file_upload.RawUploadError) as exc:
             # 取得失敗は欠損として記録（突合できないことを隠さない §3-2）

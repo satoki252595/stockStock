@@ -79,7 +79,7 @@ def _process_document(ctx: JobContext, doc: dict, list_page_id: str) -> None:
     # 財務系: CSV/XBRL → tidy 変換版付き原本を ⑤ へ (変換失敗でも原本は上げる §5.2)
     if doc_type_code in FINANCIAL_DOC_TYPES:
         tidy_artifact, tidy = _fetch_financial_tidy(ctx, doc_id, code, data_date)
-        doc_raw_page = file_upload.upload_raw_artifact(ctx.client, ctx.settings, tidy_artifact)
+        doc_raw_page = ctx.upload_raw(tidy_artifact)
 
     # PDF 原本 (§4 書類一覧の対象すべて)。失敗しても書類処理自体は継続
     try:
@@ -87,7 +87,7 @@ def _process_document(ctx: JobContext, doc: dict, list_page_id: str) -> None:
             ctx.settings, doc_id, 2, code=code, data_date=data_date
         )
         json_to_parquet.convert_artifact(pdf_artifact, "pdf")
-        pdf_page = file_upload.upload_raw_artifact(ctx.client, ctx.settings, pdf_artifact)
+        pdf_page = ctx.upload_raw(pdf_artifact)
         doc_raw_page = doc_raw_page or pdf_page
     except (FetchError, file_upload.RawUploadError) as exc:
         logger.warning("PDF取得/UL失敗 (書類処理は継続 doc_id=%s): %s", doc_id, exc)
@@ -100,6 +100,7 @@ def _process_document(ctx: JobContext, doc: dict, list_page_id: str) -> None:
         else None
     )
     upsert.upsert_disclosure(ctx.client, ctx.settings, record, master_id)
+    ctx.mirror(record)
 
     # ③ 財務サマリ (有報は既定で本決算、四半期は tidy の DEI から導出)
     if tidy is not None and tidy_artifact is not None and code:
@@ -117,6 +118,7 @@ def _process_document(ctx: JobContext, doc: dict, list_page_id: str) -> None:
         )
         if fin is not None:
             upsert.upsert_financial_summary(ctx.client, ctx.settings, fin, master_id)
+            ctx.mirror(fin)
 
 
 def execute(ctx: JobContext) -> None:
@@ -125,7 +127,7 @@ def execute(ctx: JobContext) -> None:
     # 1-4. 書類一覧の取得・原本⑤UL (失敗時 RawUploadError → 構造化書き込みなし §8.1-4)
     list_artifact, docs = edinet.list_documents(ctx.settings, target_date)
     json_to_parquet.convert_artifact(list_artifact, "json")
-    list_page_id = file_upload.upload_raw_artifact(ctx.client, ctx.settings, list_artifact)
+    list_page_id = ctx.upload_raw(list_artifact)
 
     targets = [d for d in docs if edinet.is_target_document(d) and edinet.has_sec_code(d)]
     targets = apply_limit(targets, ctx.args.limit)

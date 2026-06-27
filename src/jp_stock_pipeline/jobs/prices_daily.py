@@ -57,7 +57,7 @@ def resolve_codes(ctx: JobContext) -> list[str]:
         logger.info("① から銘柄を取得できないため EDINET コードリストから解決する")
         artifact = edinet_codelist.fetch_codelist(ctx.settings)
         artifact = edinet_codelist.convert_codelist(artifact)
-        file_upload.upload_raw_artifact(ctx.client, ctx.settings, artifact)
+        ctx.upload_raw(artifact)
         records = edinet_codelist.parse_codelist(
             artifact.local_path.read_bytes(), raw_page_id=artifact.notion_page_id
         )
@@ -133,7 +133,7 @@ def execute(ctx: JobContext) -> None:
     yf_artifact, frames, missing = yfinance_prices.fetch_daily_batch(ctx.settings, codes)
 
     # 4. 原本必須: ⑤ へアップロード (失敗時 RawUploadError → 構造化書き込みなしで異常終了)
-    file_upload.upload_raw_artifact(ctx.client, ctx.settings, yf_artifact)
+    ctx.upload_raw(yf_artifact)
 
     # フォールバック: yfinance 欠損銘柄は stooq の実データのみ (§3-2)
     stooq_results: dict[str, tuple[RawArtifact, pd.DataFrame]] = {}
@@ -141,7 +141,7 @@ def execute(ctx: JobContext) -> None:
         try:
             artifact, df = stooq_prices.fetch_daily(ctx.settings, code)
             attach_dataframe_parquet(artifact, df)  # 株価履歴の型付き変換版 (§5.2)
-            file_upload.upload_raw_artifact(ctx.client, ctx.settings, artifact)
+            ctx.upload_raw(artifact)
             stooq_results[code] = (artifact, df)
         except FetchError as exc:
             # 全ソース失敗 → 欠損として記録 (§3-2。前日値コピー等は絶対にしない)
@@ -157,7 +157,7 @@ def execute(ctx: JobContext) -> None:
             if raw_vals:
                 valuation_artifact = yfinance_prices.save_valuation_raw(ctx.settings, raw_vals)
                 convert_artifact(valuation_artifact, "json")
-                file_upload.upload_raw_artifact(ctx.client, ctx.settings, valuation_artifact)
+                ctx.upload_raw(valuation_artifact)
                 valuations = raw_vals
         except (Exception, file_upload.RawUploadError) as exc:
             valuations = {}
@@ -185,6 +185,7 @@ def execute(ctx: JobContext) -> None:
             upsert.upsert_price_technical(
                 ctx.client, ctx.settings, record, master_map.get(code), extra_raw
             )
+            ctx.mirror(record)  # ローカルは (code, data_date) で時系列蓄積
             ctx.add_success()
         except Exception as exc:
             ctx.add_failure(code, f"②upsert失敗: {exc}")
