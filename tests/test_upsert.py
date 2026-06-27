@@ -306,7 +306,9 @@ class TestLifecycleUpdates:
         assert op.payload["page_id"] == "master-7203"
         props = op.payload["properties"]
         assert props[S.MASTER_PROP_LISTED]["checkbox"] is False
-        assert props[S.MASTER_PROP_STATUS]["select"]["name"] == "上場廃止"
+        # 状態の上場廃止確定は一次開示に一本化 (§3-1/§3-7)。コードリスト消失だけでは
+        # 状態を倒さない(listed=True∧状態=上場廃止 の矛盾行や誤検知固着を防ぐ)
+        assert S.MASTER_PROP_STATUS not in props
 
     def test_apply_lifecycle_delisting(self, dry_client, monkeypatch):
         monkeypatch.setattr(dry_client, "query_database", lambda *a, **k: [{"id": "m-7203"}])
@@ -324,6 +326,24 @@ class TestLifecycleUpdates:
         # 発表時点では listed は触らない（効力発生まで取得継続。停止は消失検知が担う §3-1）
         assert S.MASTER_PROP_LISTED not in props
 
+    def test_apply_lifecycle_delisting_without_date_preserves_existing(
+        self, dry_client, monkeypatch
+    ):
+        """効力発生日を持たない後続の上場廃止開示は状態のみ更新し、上場廃止日を
+        消さない（先行開示で取り込んだ確定日付を {date:None} で上書きしない §3-1）。"""
+        monkeypatch.setattr(dry_client, "query_database", lambda *a, **k: [{"id": "m-7203"}])
+        rec = DisclosureRecord(
+            doc_id="d5", title="上場廃止後の当社株式の取り扱いに関するお知らせ",
+            disclosed_at=datetime(2026, 9, 1, tzinfo=JST),
+            provenance=prov(source=Source.TDNET, license_tag=LicenseTag.FACTUAL_CITE),
+            code="7203", doc_type="上場廃止",  # effective_date は未指定(None)
+        )
+        upsert.apply_disclosure_lifecycle(dry_client, make_settings(), rec)
+        props = self._updates(dry_client)[-1].payload["properties"]
+        assert props[S.MASTER_PROP_STATUS]["select"]["name"] == "上場廃止"
+        # 日付キーは送らない = Notion 側の既存「上場廃止日」を保持する
+        assert S.MASTER_PROP_DELISTING_DATE not in props
+
     def test_apply_lifecycle_new_listing(self, dry_client, monkeypatch):
         monkeypatch.setattr(dry_client, "query_database", lambda *a, **k: [{"id": "m-300A"}])
         rec = DisclosureRecord(
@@ -335,9 +355,24 @@ class TestLifecycleUpdates:
         upsert.apply_disclosure_lifecycle(dry_client, make_settings(), rec)
         props = self._updates(dry_client)[-1].payload["properties"]
         assert props[S.MASTER_PROP_STATUS]["select"]["name"] == "上場"
-        # 効力発生日不明なら上場日は明示クリア (§3-1。発表日を流用しない)
-        assert props[S.MASTER_PROP_LISTING_DATE] == {"date": None}
+        # 効力発生日が取れないときは上場日キーを送らない (発表日を流用しない §3-1。
+        # かつ先行開示で取り込んだ既存の確定日付を {date:None} で消さない)
+        assert S.MASTER_PROP_LISTING_DATE not in props
         assert S.MASTER_PROP_LISTED not in props  # listed は codelist 所有
+
+    def test_apply_lifecycle_new_listing_with_date(self, dry_client, monkeypatch):
+        """効力発生日が判明している場合は上場日キーを書く(取れた時のみ設定)。"""
+        monkeypatch.setattr(dry_client, "query_database", lambda *a, **k: [{"id": "m-300A"}])
+        rec = DisclosureRecord(
+            doc_id="d6", title="新規上場（効力発生日 2026年4月1日）に関するお知らせ",
+            disclosed_at=datetime(2026, 3, 1, tzinfo=JST),
+            provenance=prov(source=Source.TDNET, license_tag=LicenseTag.FACTUAL_CITE),
+            code="300A", doc_type="新規上場", effective_date=date(2026, 4, 1),
+        )
+        upsert.apply_disclosure_lifecycle(dry_client, make_settings(), rec)
+        props = self._updates(dry_client)[-1].payload["properties"]
+        assert props[S.MASTER_PROP_STATUS]["select"]["name"] == "上場"
+        assert props[S.MASTER_PROP_LISTING_DATE]["date"]["start"] == "2026-04-01"
 
     def test_codelist_sync_does_not_clobber_lifecycle(self):
         """master_sync は include_lifecycle=False で 状態/日付 を payload に含めない

@@ -49,8 +49,9 @@ def execute(ctx: JobContext) -> None:
         except Exception as exc:
             ctx.add_failure(record.code, f"①upsert失敗: {exc}")
 
-    # 7. 上場廃止検知 (§ Phase3): コードリストから消えた銘柄を listed=False/上場廃止 へ。
-    #    --limit 指定時は部分取得のため誤判定回避でスキップする。
+    # 7. 上場廃止検知 (§ Phase3): コードリストから消えた銘柄を listed=False にする
+    #    (状態=上場廃止 の確定は一次開示が所有)。--limit 指定時は部分取得のため
+    #    誤判定回避でスキップする。
     if ctx.args.limit:
         logger.info("--limit 指定のため上場廃止検知はスキップ (部分取得 § Phase3)")
         return
@@ -58,10 +59,13 @@ def execute(ctx: JobContext) -> None:
 
 
 def _detect_delistings(ctx: JobContext, fetched_codes: set[str]) -> None:
-    """① にあってコードリストから消えた銘柄を上場廃止扱いにする (§ Phase3)。
+    """① にあってコードリストから消えた銘柄を listed=False にする (§ Phase3)。
 
-    EDINET 上場区分が非上場へ変わった信号。日付は推定せず listed/状態 のみ更新。
-    再上場時は次回 upsert が自己修復する。dry-run は ① クエリが空のため no-op。
+    EDINET 上場区分が非上場へ変わった＝取得停止の信号。listed のみ更新し、
+    状態=上場廃止 の確定は一次開示 (apply_disclosure_lifecycle) に一本化する
+    (コードリストの一時的揺らぎで誤った権威的状態を書かない §3-1/§3-7)。
+    再上場時は次回 upsert が listed=True へ自己修復する。
+    dry-run は ① クエリが空のため no-op。
     """
     existing = upsert.load_stock_master_map(ctx.client, ctx.settings)  # {code: page_id}
     # 安全弁: 取得コードが既存に対し極端に少ない＝異常取得とみなし一括廃止を防ぐ。
@@ -76,13 +80,15 @@ def _detect_delistings(ctx: JobContext, fetched_codes: set[str]) -> None:
     absent = [(code, pid) for code, pid in existing.items() if code not in fetched_codes]
     if not absent:
         return
-    logger.warning("コードリストから消えた %d 銘柄を上場廃止扱いにする (§ Phase3)", len(absent))
+    logger.warning(
+        "コードリストから消えた %d 銘柄を取得停止(listed=False)にする (§ Phase3)", len(absent)
+    )
     for code, page_id in absent:
         try:
             upsert.mark_master_absent_from_codelist(ctx.client, ctx.settings, page_id)
             ctx.add_success()
         except Exception as exc:
-            ctx.add_failure(code, f"上場廃止マーク失敗: {exc}")
+            ctx.add_failure(code, f"listed=Falseマーク失敗: {exc}")
 
 
 def main(argv: list[str] | None = None, *, env: dict[str, str] | None = None) -> int:

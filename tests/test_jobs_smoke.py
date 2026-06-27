@@ -122,7 +122,8 @@ class TestMasterSync:
         assert logs[0].payload["properties"][S.JOB_PROP_STATUS]["select"]["name"] == "失敗"
 
     def test_delisting_detection_marks_absent(self, monkeypatch, tmp_path, captured_clients):
-        """コードリストから消えた銘柄を listed=False/状態=上場廃止 にする (§ Phase3)。"""
+        """コードリストから消えた銘柄を listed=False にする (§ Phase3)。
+        状態=上場廃止 の確定は一次開示に一本化し、消失検知では状態を倒さない。"""
         from jp_stock_pipeline.licensing import LicenseTag
         from jp_stock_pipeline.models import Provenance, StockMasterRecord, now_jst
         from jp_stock_pipeline.notion.client import NotionClient
@@ -157,7 +158,8 @@ class TestMasterSync:
         assert len(delisted) == 1
         props = delisted[0].payload["properties"]
         assert props[S.MASTER_PROP_LISTED]["checkbox"] is False
-        assert props[S.MASTER_PROP_STATUS]["select"]["name"] == "上場廃止"
+        # 消失検知は listed=False のみ。状態=上場廃止 は一次開示由来に一本化 (§3-1/§3-7)
+        assert S.MASTER_PROP_STATUS not in props
 
     def test_blast_radius_guard_blocks_mass_delisting(self, monkeypatch, tmp_path, captured_clients):
         """コードリストが既存の50%未満なら一括上場廃止せず中止する (§ Phase3 安全弁)。"""

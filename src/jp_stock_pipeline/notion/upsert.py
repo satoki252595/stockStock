@@ -415,21 +415,19 @@ LIFECYCLE_DOC_TYPES: frozenset[str] = frozenset({"上場廃止", "新規上場"}
 def mark_master_absent_from_codelist(
     client: NotionClient, settings: Settings, page_id: str
 ) -> None:
-    """① 行を「EDINET上場リストから消えた」= listed=False / 状態=上場廃止 にする。
+    """① 行を「EDINET上場リストから消えた」= listed=False にする。
 
-    コードリストからの消失は EDINET の 上場区分 が非上場へ変わった = 実際に
-    市場から外れた信号であり、listed=False（取得停止）の唯一の確定トリガ (§ Phase3)。
-    上場廃止日は開示で判明した場合のみ別途設定し、ここでは推定しない (§3-1)。
-    部分更新（listed/状態 のみ。他フィールドは直前 master_sync の値を保持）。
+    コードリストからの消失は listed=False（取得停止）の確定トリガ (§ Phase3)。
+    ただし「状態=上場廃止」の確定はコードリストのヒューリスティックでは行わず、
+    一次開示 (apply_disclosure_lifecycle) に一本化する: EDINET コードリストの
+    一時的な揺らぎ（行スキップ・提出者要件の一時割れ等）で個別銘柄が誤検知された
+    場合に、「上場廃止」という誤った権威的状態を ① へ書き込まない (§3-1 誤った
+    権威的値は欠損より悪い / §3-7 状態は一次開示由来)。これにより listed=True かつ
+    状態=上場廃止 という矛盾行も生じない（状態の所有は disclosure 側に一本化）。
     再上場時は次回 master_sync の upsert が listed=True へ自己修復する。
+    部分更新（listed のみ。状態を含む他フィールドは直前の値を保持）。
     """
-    client.update_page(
-        page_id,
-        {
-            S.MASTER_PROP_LISTED: checkbox_prop(False),
-            S.MASTER_PROP_STATUS: select_prop(STATUS_DELISTED),
-        },
-    )
+    client.update_page(page_id, {S.MASTER_PROP_LISTED: checkbox_prop(False)})
 
 
 def apply_disclosure_lifecycle(
@@ -444,8 +442,11 @@ def apply_disclosure_lifecycle(
     - 新規上場: 状態=上場 / 上場日=effective_date(判明時のみ)。
       listed は codelist 同期が所有するため触らない。
 
-    開示日(発表日) ≠ 効力発生日のため、日付は effective_date が取れた場合のみ設定し、
-    不明なら None のまま（推定しない §3-1。原文リンクに委ねる）。
+    開示日(発表日) ≠ 効力発生日のため、日付は effective_date がタイトルから取れた
+    場合のみ書き、発表日を流用しない (§3-1)。**効力発生日が取れないときは日付キーを
+    payload に含めない**（真の部分更新）: 先行開示で取り込んだ確定日付を、効力発生日を
+    持たない後続の同種開示（例「上場廃止後の取り扱いに関するお知らせ」）が {date:None}
+    で黙って消去しないようにする。状態(select)は確定値なので常に設定する。
     ① に該当銘柄が無ければ何もしない (None を返す)。部分更新。
     """
     if record.doc_type not in LIFECYCLE_DOC_TYPES or not record.code:
@@ -455,10 +456,13 @@ def apply_disclosure_lifecycle(
         return None
     if record.doc_type == STATUS_DELISTED:
         props = {S.MASTER_PROP_STATUS: select_prop(STATUS_DELISTED)}
-        _set(props, S.MASTER_PROP_DELISTING_DATE, date_prop, record.effective_date)
+        date_prop_name = S.MASTER_PROP_DELISTING_DATE
     else:  # 新規上場
         props = {S.MASTER_PROP_STATUS: select_prop(STATUS_LISTED)}
-        _set(props, S.MASTER_PROP_LISTING_DATE, date_prop, record.effective_date)
+        date_prop_name = S.MASTER_PROP_LISTING_DATE
+    # 効力発生日は取れた時のみ書く（None で既存の確定日付を上書き消去しない）
+    if record.effective_date is not None:
+        props[date_prop_name] = date_prop(record.effective_date)
     client.update_page(page_id, props)
     return page_id
 
