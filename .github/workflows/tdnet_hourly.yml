@@ -23,6 +23,15 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Sync dependencies
         run: nix develop -c uv sync
+      # dual-write 先サーバ(tailnet)へ到達するため runner を tailnet に参加させる。
+      # OAuth Secrets 未設定なら失敗するが収集は継続(Notion のみ=dual-write degrade)。
+      - name: Join tailnet
+        uses: tailscale/github-action@v3
+        continue-on-error: true
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
       - name: Run tdnet_hourly
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
