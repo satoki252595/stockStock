@@ -222,7 +222,8 @@ def xbrl_facts_insert(
     - rows は convert.xbrl_to_csv の tidy レコード（dict）。value が空（nil/欠損 §3-1）
       の行は格納しない（欠損は格納せず＝非存在で表現）。
     - PK=(doc_id, element, context_ref)。同一バッチ内の PK 重複は最後の値で de-dup する
-      （executemany の "ON CONFLICT が同一行を二度更新" エラーを避ける）。
+      （決定的な last-wins と冗長 upsert の削減。複数 .xbrl を同一 doc_id でパースする
+      EDINET 等で同一 PK が異なる値で現れた場合は後勝ちになる点に注意）。
     - 来歴 source/license_tag/fetched_at は原本 artifact から付与（行ごとにライセンスを
       持たせ、公開面で commercial-ok のみフィルタできるようにする §2.2）。
     - 返り値: (executemany 用 SQL, パラメータ dict のリスト)。リストが空なら呼び出し側は

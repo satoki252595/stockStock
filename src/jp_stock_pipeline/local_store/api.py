@@ -92,8 +92,11 @@ def _search_text_blocks(
                 try:
                     cur.execute(pgroonga_sql, {**base_params, "q": q})
                     return cur.fetchall()
-                except psycopg.errors.UndefinedFunction:
-                    # PGroonga 拡張なし → 同接続を rollback して LIKE 検索へフォールバック
+                except psycopg.OperationalError:
+                    raise  # 接続障害は縮退させず外側で 503 に変換する
+                except psycopg.Error:
+                    # PGroonga 拡張なし(演算子未定義)・PGroonga クエリ構文エラー等は
+                    # 同接続を rollback して ILIKE 検索へ安全に縮退する（q は値渡しで注入不可）
                     conn.rollback()
                     cur.execute(ilike_sql, {**base_params, "like": f"%{q}%"})
                     return cur.fetchall()
