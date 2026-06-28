@@ -1,0 +1,55 @@
+# 診断専用: CI の NOTION_TOKEN が指すワークスペースと File Upload 対応拡張子を確認する。
+# トークンは sha256 指紋のみ出力し値は晒さない。原因確定後に削除する一時ワークフロー。
+name: diag_notion
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe Notion identity and File Upload extension allow-list
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import os, json, hashlib, urllib.request, urllib.error
+
+          tok = os.environ.get("NOTION_TOKEN", "")
+          if not tok:
+              print("NOTION_TOKEN secret is EMPTY/unset"); raise SystemExit(1)
+          print("token_fingerprint(sha256[:12]) =", hashlib.sha256(tok.encode()).hexdigest()[:12])
+          print("token_len =", len(tok))
+
+          def call(method, path, body=None, ver="2022-06-28"):
+              url = f"https://api.notion.com/v1/{path}"
+              data = json.dumps(body).encode() if body is not None else None
+              req = urllib.request.Request(url, data=data, method=method)
+              req.add_header("Authorization", f"Bearer {tok}")
+              req.add_header("Notion-Version", ver)
+              if data is not None:
+                  req.add_header("Content-Type", "application/json")
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      return r.status, json.loads(r.read().decode())
+              except urllib.error.HTTPError as e:
+                  return e.code, json.loads(e.read().decode())
+
+          sc, me = call("GET", "users/me")
+          bot = me.get("bot", {}) if isinstance(me, dict) else {}
+          print(f"/users/me -> {sc} name={me.get('name')!r} workspace={bot.get('workspace_name')!r}")
+
+          for ext, ctype in [("csv", "text/csv"), ("zip", "application/zip")]:
+              fn = f"diag_probe.{ext}"
+              sc, j = call("POST", "file_uploads", {"mode": "single_part", "filename": fn})
+              msg = "OK" if sc < 300 else "NG: " + str(j.get("message", j))[:120]
+              print(f"create bare      {fn:18} -> {sc} {msg}  (resp content_type={j.get('content_type')!r})")
+              sc2, j2 = call("POST", "file_uploads", {"mode": "single_part", "filename": fn, "content_type": ctype})
+              msg2 = "OK" if sc2 < 300 else "NG: " + str(j2.get("message", j2))[:120]
+              print(f"create +ctype    {fn:18} -> {sc2} {msg2}")
+          PY
