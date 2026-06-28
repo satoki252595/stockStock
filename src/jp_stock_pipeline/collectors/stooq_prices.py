@@ -133,7 +133,17 @@ def fetch_daily(
       (datatype="daily_prices", scope=銘柄コード, license=personal-only §2.1)
     - データ基準日 = CSV 中の最終取引日
     - 取得失敗・無効レスポンスは FetchError（呼び出し側は欠損として記録 §3-2）
+
+    stooq 無効時 (settings.stooq_enabled=False、既定) は HTTP も PoW も行わず即
+    FetchError を投げる。stooq は 2026年時点でブラウザ検証(PoW)しか返さず CSV を
+    一切返さない＝実質死亡しており、解いても必ず失敗するため、死んだソースのコストを
+    ~0 にする(呼び出し側は従来どおり FetchError を握り欠損として記録 §3-2)。
     """
+    if not settings.stooq_enabled:
+        raise http.FetchError(
+            "stooq: 無効化中 (STOOQ_ENABLED 未設定/2026年死亡確認)。"
+            "第2ソース未稼働として欠損記録 §3-2"
+        )
     content, url = _fetch_csv_bytes(code, session=session)
     df = parse_daily_csv(content)  # 無効レスポンスはここで FetchError
     data_date = df["Date"].max() if len(df) else None

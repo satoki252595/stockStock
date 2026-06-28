@@ -27,7 +27,24 @@ from conftest import fixture_path
 
 
 def _settings(tmp_path):
-    return load_settings(dry_run=True, env={"RAW_DATA_DIR": str(tmp_path)})
+    # フェッチ/パース経路を検証するため stooq を有効化する（既定 False だと fetch_daily が
+    # HTTP 前に fast-fail するため。fast-fail 自体は別テストで検証）。
+    return load_settings(
+        dry_run=True, env={"RAW_DATA_DIR": str(tmp_path), "STOOQ_ENABLED": "true"}
+    )
+
+
+def test_fetch_daily_disabled_fast_fails_without_http(tmp_path, monkeypatch):
+    """stooq 無効(既定)時は HTTP/PoW を一切行わず即 FetchError (§3-2 死んだ源のコスト~0)。"""
+    settings = load_settings(dry_run=True, env={"RAW_DATA_DIR": str(tmp_path)})
+    assert settings.stooq_enabled is False
+
+    def _boom(*a, **k):  # _fetch_csv_bytes に到達したら失敗扱い
+        raise AssertionError("stooq 無効時に HTTP 取得へ到達してはならない")
+
+    monkeypatch.setattr(sp, "_fetch_csv_bytes", _boom)
+    with pytest.raises(FetchError, match="無効化中"):
+        sp.fetch_daily(settings, "7203")
 
 
 # ---------------------------------------------------------------------------

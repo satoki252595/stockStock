@@ -134,6 +134,11 @@ class Settings:
     notion_rps: float
     raw_data_dir: Path
     dry_run: bool
+    # stooq は 2026年時点でブラウザ検証(PoW)を返し CSV を一切返さない＝実質死亡。
+    # 既定 False で「死んだ第2ソース」を即 fast-fail し、PoW 計算と HTTP 往復を
+    # 丸ごと省く(reconcile_weekly の 46分タイムアウト / prices_daily フォールバックの
+    # 浪費を排除)。復活時は env STOOQ_ENABLED=true で従来挙動に戻る(コード変更不要)。
+    stooq_enabled: bool = False
     db_ids: dict[str, str] = field(default_factory=dict)
     local_store: LocalStoreSettings = field(
         default_factory=lambda: LocalStoreSettings(
@@ -185,6 +190,7 @@ def load_settings(*, dry_run: bool | None = None, env: dict[str, str] | None = N
         notion_rps=float(env.get("NOTION_RPS", DEFAULT_NOTION_RPS)),
         raw_data_dir=Path(env.get("RAW_DATA_DIR", "data/raw")),
         dry_run=resolved_dry_run,
+        stooq_enabled=_truthy(env.get("STOOQ_ENABLED")),
         db_ids=_load_db_ids(env),
         local_store=_load_local_store(env),
     )

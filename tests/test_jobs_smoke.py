@@ -481,6 +481,25 @@ class TestReconcileWeekly:
         code = reconcile_weekly.main(["--dry-run"], env=_env(tmp_path))
         assert code == 0
 
+    def test_stooq_disabled_early_exits_without_snapshot_or_fetch(
+        self, monkeypatch, tmp_path, captured_clients
+    ):
+        """stooq 無効(既定)時は ② スナップショット読みも fetch ループも行わず即終了する
+        (成果ゼロの 46分タイムアウトを排除 §3-2)。"""
+        from jp_stock_pipeline.collectors import stooq_prices
+
+        def _no_snapshot(*a, **k):
+            raise AssertionError("stooq 無効時に ② スナップショット読みへ到達してはならない")
+
+        def _no_fetch(*a, **k):
+            raise AssertionError("stooq 無効時に fetch_daily へ到達してはならない")
+
+        monkeypatch.setattr(reconcile_weekly, "load_price_snapshot", _no_snapshot)
+        monkeypatch.setattr(stooq_prices, "fetch_daily", _no_fetch)
+        # STOOQ_ENABLED を設定しない env = 既定 False
+        code = reconcile_weekly.main(["--dry-run"], env=_env(tmp_path))
+        assert code == 0  # 突合スキップは正常完了（設定状態でCIを赤にしない）
+
 
 class TestWorkflowCrons:
     """§8.2 スケジュール (JST) と cron (UTC) の対応検証。"""
