@@ -395,7 +395,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "lxml", specifier = ">=5.2" },
-    { name = "notion-client", specifier = ">=2.2.1" },
+    { name = "notion-client", specifier = ">=2.5,<2.6" },
     { name = "openpyxl", specifier = ">=3.1" },
     { name = "pandas", specifier = ">=2.2" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
@@ -526,14 +526,14 @@ wheels = [
 
 [[package]]
 name = "notion-client"
-version = "3.1.0"
+version = "2.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c0/e3/4ac01384e86e2c381c21b87a0fefcdfe6d65577ae3153fad27e7e96c5d9c/notion_client-3.1.0.tar.gz", hash = "sha256:516e31326f855ec34559289b57be4e27ad656062f51f594c8f4ee3a608ee333d", size = 38781, upload-time = "2026-05-12T08:54:44.363Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b6/8c/b2f11904e1ef7a33338d3890fc50d30ffa2d0fca51b01b0a827d909b615a/notion_client-2.5.0.tar.gz", hash = "sha256:a03a0cc0502292193527af07a3bd13e40eb2b1083b60dcc7d733baad2d2729fd", size = 20865, upload-time = "2025-08-26T10:40:05.041Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/08/08/12645b24044301cb0d7908ec068c55c0d5724f39372891a1a27d630fdf50/notion_client-3.1.0-py2.py3-none-any.whl", hash = "sha256:7e3935f4dbc11231d8ad1fe404112e278501520342eaa35f86456f0df44a8aca", size = 23092, upload-time = "2026-05-12T08:54:43.135Z" },
+    { url = "https://files.pythonhosted.org/packages/cd/52/6b2a3081e1cb1123b1b28d5b1ebe88cb9e19b72264552dc707c1b265a1a7/notion_client-2.5.0-py2.py3-none-any.whl", hash = "sha256:d2efde1def1e7a3cc68cf4d2cab715571c71767852b26bf04474e9945d4a5903", size = 14348, upload-time = "2025-08-26T10:40:03.806Z" },
 ]
 
 [[package]]
