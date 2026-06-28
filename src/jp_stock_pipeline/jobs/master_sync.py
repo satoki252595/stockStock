@@ -36,8 +36,22 @@ def execute(ctx: JobContext) -> None:
         artifact.local_path.read_bytes(), raw_page_id=raw_page_id
     )
     fetched_codes = {r.code for r in records}
-    upsert_records = apply_limit(records, ctx.args.limit)
+    # 同一コードの重複を除去（事前マップ + page_resolved 運用では、同一 run 内に同一
+    # コードが複数あると未収録キーが二重 create されうる。コードリストはコード一意の
+    # はずだが防御的に潰す。最後の出現を採用）。
+    upsert_records = _dedup_by_code(apply_limit(records, ctx.args.limit))
     logger.info("コードリスト: %d 銘柄を ① へ upsert", len(upsert_records))
+
+    # ① 既存行マップ {code: page_id} を一括取得（per-record 検索を排除 §8.3。
+    # ~3900銘柄×1req削減）。取得失敗時は per-record 検索へ degrade（all-or-nothing:
+    # 部分マップを信用して create すると重複行になるため §8.1-6）。このマップは
+    # 上場廃止検知でも再利用し ① 全件スキャンを 2回→1回 にする。
+    try:
+        master_map = upsert.load_stock_master_map(ctx.client, ctx.settings)
+        map_ok = True
+    except Exception as exc:  # noqa: BLE001 - 失敗時は per-record 検索へフォールバック
+        master_map, map_ok = {}, False
+        logger.warning("① マップ取得失敗 → per-record 検索にフォールバック: %s", exc)
 
     # 6. Upsert (冪等キー=銘柄コード)。状態/上場日/上場廃止日 は開示・消失が所有する
     #    ため codelist 同期では書かない (include_lifecycle=False § Phase3 二重所有回避)。
@@ -46,8 +60,13 @@ def execute(ctx: JobContext) -> None:
         # 開示・消失が所有するため include_lifecycle=False で両系統とも書かない。
         if ctx.persist(
             record,
-            lambda rec=record: upsert.upsert_stock_master(
-                ctx.client, ctx.settings, rec, include_lifecycle=False
+            lambda rec=record, pid=master_map.get(record.code): upsert.upsert_stock_master(
+                ctx.client,
+                ctx.settings,
+                rec,
+                include_lifecycle=False,
+                existing_page_id=pid,
+                page_resolved=map_ok,
             ),
             label=f"①{record.code}",
             include_lifecycle=False,
@@ -62,10 +81,20 @@ def execute(ctx: JobContext) -> None:
     if ctx.args.limit:
         logger.info("--limit 指定のため上場廃止検知はスキップ (部分取得 § Phase3)")
         return
-    _detect_delistings(ctx, fetched_codes)
+    _detect_delistings(ctx, fetched_codes, master_map, map_ok)
 
 
-def _detect_delistings(ctx: JobContext, fetched_codes: set[str]) -> None:
+def _dedup_by_code(records: list) -> list:
+    """同一銘柄コードの重複レコードを除去する（最後の出現を採用、順序は初出を維持）。"""
+    out: dict[str, object] = {}
+    for record in records:
+        out[record.code] = record
+    return list(out.values())
+
+
+def _detect_delistings(
+    ctx: JobContext, fetched_codes: set[str], existing: dict[str, str], map_ok: bool
+) -> None:
     """① にあってコードリストから消えた銘柄を listed=False にする (§ Phase3)。
 
     EDINET 上場区分が非上場へ変わった＝取得停止の信号。listed のみ更新し、
@@ -73,8 +102,14 @@ def _detect_delistings(ctx: JobContext, fetched_codes: set[str]) -> None:
     (コードリストの一時的揺らぎで誤った権威的状態を書かない §3-1/§3-7)。
     再上場時は次回 upsert が listed=True へ自己修復する。
     dry-run は ① クエリが空のため no-op。
+
+    existing は execute() が upsert 前に取得済みの ① 全行マップを再利用する
+    （全件スキャンを 2回→1回 に削減 §8.3）。map_ok=False（マップ取得失敗）の場合は
+    既存集合を信用できないため検知を見送る（部分情報での誤った一括廃止を防ぐ §3-2）。
     """
-    existing = upsert.load_stock_master_map(ctx.client, ctx.settings)  # {code: page_id}
+    if not map_ok:
+        logger.warning("① マップ未取得のため上場廃止検知をスキップ (§3-2)")
+        return
     # 安全弁: 取得コードが既存に対し極端に少ない＝異常取得とみなし一括廃止を防ぐ。
     # 1件でも誤って全銘柄を listed=False にすると prices_daily が全停止するため (§3-2)。
     if existing and len(fetched_codes) < MIN_CODELIST_COVERAGE * len(existing):

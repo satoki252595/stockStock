@@ -471,6 +471,113 @@ class TestUpsertUpdatePath:
         assert "create_page" not in ops
 
 
+class _RecordingClient:
+    """query_database / update_page / create_page の呼び出しを記録するダブル。
+
+    事前マップ運用（page_resolved=True）で per-record 検索が省かれることを
+    «query が呼ばれない» で検証するために使う（dry_client は query を記録しない）。
+    """
+
+    def __init__(self, *, query_result=None, update_raises=None):
+        self.calls = []
+        self._query_result = query_result if query_result is not None else []
+        self._update_raises = update_raises
+        self._n = 0
+
+    def query_database(self, db_id, **kw):
+        self.calls.append(("query", db_id))
+        return self._query_result
+
+    def update_page(self, page_id, props):
+        self.calls.append(("update", page_id))
+        if self._update_raises is not None:
+            raise self._update_raises
+        return {"id": page_id}
+
+    def create_page(self, *, parent, properties):
+        self.calls.append(("create", parent["database_id"]))
+        self._n += 1
+        return {"id": f"created-{self._n}"}
+
+
+def _api_error(code: str):
+    from notion_client.errors import APIResponseError
+
+    class _Resp:
+        status_code = 404
+        headers: dict = {}
+        text = "{}"
+
+        def json(self):
+            return {}
+
+    return APIResponseError(_Resp(), "boom", code)
+
+
+class TestPrefetchedPageMap:
+    """事前マップ(page_resolved=True)で per-record 検索を省く (§8.3)。
+
+    全銘柄ループの 1req/銘柄 削減。all-or-nothing で渡すこと・stale page_id の
+    create フォールバックが本クラスの回帰防止対象。
+    """
+
+    def test_resolved_existing_updates_without_query(self):
+        c = _RecordingClient()
+        pid = upsert._upsert(
+            c, "db-master", {"k": 1}, {"p": 1}, existing_page_id="p-7203", page_resolved=True
+        )
+        assert pid == "p-7203"
+        assert ("query", "db-master") not in c.calls  # 検索を省いた
+        assert ("update", "p-7203") in c.calls
+
+    def test_resolved_missing_creates_without_query(self):
+        c = _RecordingClient()
+        pid = upsert._upsert(
+            c, "db-master", {"k": 1}, {"p": 1}, existing_page_id=None, page_resolved=True
+        )
+        assert pid == "created-1"
+        assert ("query", "db-master") not in c.calls  # 未収録キーは検索せず create
+        assert ("create", "db-master") in c.calls
+
+    def test_unresolved_falls_back_to_query(self):
+        # page_resolved=False（マップ取得失敗の degrade）→ 従来どおり per-record 検索
+        c = _RecordingClient(query_result=[{"id": "found"}])
+        pid = upsert._upsert(c, "db-master", {"k": 1}, {"p": 1}, page_resolved=False)
+        assert pid == "found"
+        assert ("query", "db-master") in c.calls
+        assert ("update", "found") in c.calls
+
+    def test_stale_page_id_self_heals_to_create(self):
+        # 事前マップの page_id が実在しない（削除済み）→ object_not_found を握って create
+        c = _RecordingClient(update_raises=_api_error("object_not_found"))
+        pid = upsert._upsert(
+            c, "db-master", {"k": 1}, {"p": 1}, existing_page_id="stale", page_resolved=True
+        )
+        assert pid == "created-1"
+        assert ("update", "stale") in c.calls
+        assert ("create", "db-master") in c.calls
+
+    def test_non_object_not_found_error_propagates(self):
+        # 他のAPIエラーは握り潰さず伝播（隠れた書き込み失敗にしない）
+        c = _RecordingClient(update_raises=_api_error("validation_error"))
+        with pytest.raises(Exception):  # noqa: B017 - APIResponseError 伝播の確認
+            upsert._upsert(
+                c, "db-master", {"k": 1}, {"p": 1}, existing_page_id="x", page_resolved=True
+            )
+
+    def test_load_price_page_map_reads_title_key(self):
+        # ② は title equals キー。title[0].plain_text を読む（rich_text ではない）
+        settings = make_settings()
+        pages = [
+            {"id": "pg-7203", "properties": {S.PRICE_PROP_CODE: {"title": [{"plain_text": "7203"}]}}},
+            {"id": "pg-6758", "properties": {S.PRICE_PROP_CODE: {"title": [{"plain_text": "6758"}]}}},
+            {"id": "pg-empty", "properties": {S.PRICE_PROP_CODE: {"title": []}}},  # 空はスキップ
+        ]
+        c = _RecordingClient(query_result=pages)
+        out = upsert.load_price_page_map(c, settings)
+        assert out == {"7203": "pg-7203", "6758": "pg-6758"}
+
+
 class TestJobLog:
     def test_write_job_log(self, dry_client):
         settings = make_settings()
