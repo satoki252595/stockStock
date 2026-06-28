@@ -183,7 +183,21 @@ def execute(ctx: JobContext) -> None:
         logger.warning(
             "① relation マップ取得失敗 → master_id=None で ② を継続 (§3-2): %s", exc
         )
+    # ② page マップ {code: page_id} を一括取得し per-record 検索を排除 (§8.3)。①relation
+    # 用 master_map とは別物（こちらは ② 自身の page_id でキー=title equals）。取得失敗時は
+    # per-record 検索へ degrade（all-or-nothing: 部分マップ信用は ② 重複行を毎日増やす）。
+    try:
+        price_map = upsert.load_price_page_map(ctx.client, ctx.settings)
+        price_map_ok = True
+    except Exception as exc:  # noqa: BLE001 - 失敗時は per-record 検索へフォールバック
+        price_map, price_map_ok = {}, False
+        logger.warning("② page マップ取得失敗 → per-record 検索にフォールバック: %s", exc)
+
+    seen_codes: set[str] = set()
     for code in codes:
+        if code in seen_codes:
+            continue  # 同一 run 内の重複コードは ② を二重 create しうるため1回のみ処理
+        seen_codes.add(code)
         if code in frames:
             src, df, artifact = Source.YFINANCE, frames[code], yf_artifact
         elif code in stooq_results:
@@ -206,8 +220,18 @@ def execute(ctx: JobContext) -> None:
         # ローカルは (code, data_date) で時系列蓄積する。
         if ctx.persist(
             record,
-            lambda rec=record, mid=master_map.get(code), extra=extra_raw: (
-                upsert.upsert_price_technical(ctx.client, ctx.settings, rec, mid, extra)
+            lambda rec=record, mid=master_map.get(code), extra=extra_raw, pid=price_map.get(
+                code
+            ): (
+                upsert.upsert_price_technical(
+                    ctx.client,
+                    ctx.settings,
+                    rec,
+                    mid,
+                    extra,
+                    existing_page_id=pid,
+                    page_resolved=price_map_ok,
+                )
             ),
             label=f"②{code}",
         ):
