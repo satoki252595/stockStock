@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import math
+import mimetypes
 from pathlib import Path
 
 from ..config import Settings
@@ -74,21 +75,40 @@ def _created_upload_id(resp: dict, path: Path) -> str:
     return upload_id
 
 
+def _content_type(path: Path) -> str:
+    """ファイル名から MIME 型を推定する（不明なら octet-stream）。
+
+    File Upload は「作成時に宣言した content_type」と「send 時に送るパートの
+    content_type」が一致しないと 400 (validation_error) になる。両端で同じ値を使う
+    ため、ここで一度だけ決める。requests の files= は content_type 未指定だと
+    text/plain 相当になり、作成時の推定 (filename 由来) と食い違うため必ず明示する。
+    """
+    ctype, _ = mimetypes.guess_type(path.name)
+    return ctype or "application/octet-stream"
+
+
 def _upload_single(client: NotionClient, path: Path) -> str:
+    ctype = _content_type(path)
     created = client.raw_api(
-        "POST", "file_uploads", json_body={"mode": "single_part", "filename": path.name}
+        "POST",
+        "file_uploads",
+        json_body={"mode": "single_part", "filename": path.name, "content_type": ctype},
     )
     upload_id = _created_upload_id(created, path)
     # bytes で渡す: ファイルハンドルだと 429/5xx リトライ時に消費済みハンドルの
-    # 再送 = 空ボディ送信になるため (multipart/form-data, requests の files= 経由)
+    # 再送 = 空ボディ送信になるため (multipart/form-data, requests の files= 経由)。
+    # content_type を明示し作成時の宣言と一致させる (3要素タプル)。
     content = path.read_bytes()
     client.raw_api(
-        "POST", f"file_uploads/{upload_id}/send", files={"file": (path.name, content)}
+        "POST",
+        f"file_uploads/{upload_id}/send",
+        files={"file": (path.name, content, ctype)},
     )
     return upload_id
 
 
 def _upload_multipart(client: NotionClient, path: Path, n_parts: int) -> str:
+    ctype = _content_type(path)
     created = client.raw_api(
         "POST",
         "file_uploads",
@@ -96,6 +116,7 @@ def _upload_multipart(client: NotionClient, path: Path, n_parts: int) -> str:
             "mode": "multi_part",
             "filename": path.name,
             "number_of_parts": n_parts,
+            "content_type": ctype,
         },
     )
     upload_id = _created_upload_id(created, path)
@@ -106,7 +127,7 @@ def _upload_multipart(client: NotionClient, path: Path, n_parts: int) -> str:
                 "POST",
                 f"file_uploads/{upload_id}/send",
                 data={"part_number": str(part_number)},
-                files={"file": (path.name, chunk)},
+                files={"file": (path.name, chunk, ctype)},
             )
     client.raw_api("POST", f"file_uploads/{upload_id}/complete", json_body={})
     return upload_id
