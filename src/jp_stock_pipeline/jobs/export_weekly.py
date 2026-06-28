@@ -54,7 +54,9 @@ def _upload_dataset(
     raw_page_id: str | None = None,
 ) -> None:
     paths = _write_dataset(df, stem)
-    uploads = [(file_upload.upload_file(ctx.client, p), p.name) for p in paths]
+    # upload_file は (file_upload id, 添付名) を返す。Notion 非対応拡張子(.parquet 等)は
+    # .zip ラップされ添付名が変わるため、返った名前をそのまま使う。
+    uploads = [file_upload.upload_file(ctx.client, p) for p in paths]
     upsert.create_export_row(
         ctx.client,
         ctx.settings,

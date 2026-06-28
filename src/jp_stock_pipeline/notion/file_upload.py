@@ -23,9 +23,12 @@ dry-run では client が操作を記録のみ行い合成ID ("dry-run-*") を�
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import mimetypes
+import tempfile
+import zipfile
 from pathlib import Path
 
 from ..config import Settings
@@ -48,6 +51,15 @@ logger = logging.getLogger(__name__)
 SINGLE_PART_LIMIT = 20 * 1024 * 1024
 # マルチパートの1パートサイズ (Notion仕様: 最終パート以外は 5〜20MB)
 MULTIPART_CHUNK = 10 * 1024 * 1024
+
+# Notion File Upload API が受け付ける拡張子（実 API プローブで 200 を確認した集合）。
+# これ以外（.parquet/.xbrl 等）は create が 400「extension not supported」で弾かれるため
+# .zip でラップしてからアップロードする（§5.2: 変換版を⑤に併置。Notion は .zip 対応）。
+# 迷ったら narrow 側に倒す: 対応拡張子を誤って包んでも .zip は必ず通る（取得側で解凍）が、
+# 非対応を素通しすると 400 で取得単位ごと中止になるため。
+NOTION_UPLOAD_EXTENSIONS = frozenset(
+    {"csv", "txt", "json", "zip", "tsv", "xml", "pdf", "xlsx", "htm", "html", "md", "yaml"}
+)
 
 
 class RawUploadError(RuntimeError):
@@ -145,14 +157,49 @@ def _upload_multipart(client: NotionClient, path: Path, n_parts: int) -> str:
     return upload_id
 
 
-def upload_file(client: NotionClient, path: Path) -> str:
-    """1ファイルを File Upload API でアップロードし file_upload id を返す。"""
+@contextlib.contextmanager
+def _zip_wrapped(path: Path):
+    """Notion 非対応拡張子のファイルを `<name>.zip` に包んだ一時ファイルを yield する。
+
+    zip 内のエントリ名は元ファイル名そのまま（取得側は解凍して原ファイルを得る）。
+    一時ディレクトリに `<name>.zip` で作るのは、アップロード時の filename を
+    元名 + .zip に保つため（_upload_* は path.name を Notion へ送る）。
+    """
+    tmpdir = Path(tempfile.mkdtemp(prefix="notion_zip_"))
+    zpath = tmpdir / f"{path.name}.zip"
+    try:
+        with zipfile.ZipFile(zpath, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.write(path, arcname=path.name)
+        yield zpath
+    finally:
+        with contextlib.suppress(OSError):
+            zpath.unlink(missing_ok=True)
+            tmpdir.rmdir()
+
+
+def _upload_dispatch(client: NotionClient, path: Path) -> str:
+    """サイズで single/multi を分岐して 1 ファイルを送り file_upload id を返す。"""
     size = path.stat().st_size
     mode, n_parts = plan_upload(size)
     logger.info("アップロード %s (%d bytes, %s, %dパート)", path.name, size, mode, n_parts)
     if mode == "single_part":
         return _upload_single(client, path)
     return _upload_multipart(client, path, n_parts)
+
+
+def upload_file(client: NotionClient, path: Path) -> tuple[str, str]:
+    """1ファイルをアップロードし (file_upload id, 添付ファイル名) を返す。
+
+    Notion File Upload 非対応拡張子（.parquet 等）は .zip でラップして送るため、
+    添付名が元名と変わりうる（`<name>` → `<name>.zip`）。呼び出し側は返った名前を
+    ⑤ の files プロパティに使う。
+    """
+    ext = path.suffix.lstrip(".").lower()
+    if ext and ext not in NOTION_UPLOAD_EXTENSIONS:
+        logger.info("Notion 非対応拡張子 .%s を .zip ラップして UL: %s", ext, path.name)
+        with _zip_wrapped(path) as zpath:
+            return _upload_dispatch(client, zpath), zpath.name
+    return _upload_dispatch(client, path), path.name
 
 
 def _raw_row_properties(artifact: RawArtifact, uploads: list[tuple[str, str]]) -> dict:
@@ -210,7 +257,8 @@ def upload_raw_artifact(
 
         uploads: list[tuple[str, str]] = []
         for path in [artifact.local_path, *artifact.converted_paths]:
-            uploads.append((upload_file(client, path), path.name))
+            upload_id, uploaded_name = upload_file(client, path)
+            uploads.append((upload_id, uploaded_name))
         page = client.create_page(
             parent={"database_id": settings.db_id("raw_files")},
             properties=_raw_row_properties(artifact, uploads),
