@@ -68,6 +68,24 @@ class TestPlanUpload:
         assert file_upload.plan_upload(size) == ("multi_part", 6)
 
 
+class TestContentType:
+    """作成時宣言と send パートの content_type 一致 (Notion 400 回避)。"""
+
+    def test_known_extensions(self):
+        from pathlib import Path
+
+        assert file_upload._content_type(Path("x.zip")) == "application/zip"
+        assert file_upload._content_type(Path("x.csv")) == "text/csv"
+        assert file_upload._content_type(Path("x.pdf")) == "application/pdf"
+
+    def test_unknown_extension_falls_back_to_octet_stream(self):
+        from pathlib import Path
+
+        # .xbrl / .parquet は mimetypes 未知 → octet-stream で一致を保証
+        assert file_upload._content_type(Path("x.xbrl")) == "application/octet-stream"
+        assert file_upload._content_type(Path("x.parquet")) == "application/octet-stream"
+
+
 class TestSha256DuplicateSkip:
     def test_existing_row_returns_its_page_id_without_upload(self, dry_client, tmp_path, monkeypatch):
         """SHA256 一致の既存行があれば再アップロードせず page_id を返す (§8.1-2)。"""
@@ -106,7 +124,12 @@ class TestNewUploadSinglePart:
         # (1) file_upload 作成 → (2) send → (3) ⑤ 行作成
         assert ops == ["POST file_uploads", "POST file_uploads/dry-run-1/send", "create_page"]
         create_fu = dry_client.ops[0].payload
-        assert create_fu == {"mode": "single_part", "filename": artifact.filename}
+        # content_type を作成時に宣言し send 時のパートと一致させる (.zip→application/zip)
+        assert create_fu == {
+            "mode": "single_part",
+            "filename": artifact.filename,
+            "content_type": "application/zip",
+        }
 
     def test_row_properties(self, dry_client, tmp_path):
         settings = make_settings()
