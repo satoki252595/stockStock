@@ -428,6 +428,56 @@ class TestTdnetHourly:
             tag = op.payload["properties"][S.PROP_LICENSE_TAG]["select"]["name"]
             assert tag == LicenseTag.FACTUAL_CITE.value
 
+    def test_prefetch_maps_make_queries_constant_not_per_disclosure(
+        self, monkeypatch, tmp_path, captured_clients
+    ):
+        """①/④ 事前マップで Notion query が開示件数に比例しない (§8.3 30分cap対策)。
+
+        従来は開示ごとに ① find + ④ dedup の 2 query。事前マップ化で query は
+        「① マップ + ④ マップ + ⑤原本SHA256重複(原本数)」のみ＝開示件数に非比例。
+        """
+        from jp_stock_pipeline.collectors import tdnet_yanoshin
+        from jp_stock_pipeline.http import FetchError
+        from jp_stock_pipeline.notion.client import NotionClient
+
+        payload_bytes = fixture_path("tdnet/yanoshin_list_recent.json").read_bytes()
+        payload = json.loads(payload_bytes)
+
+        def fake_list(settings, target="recent", limit=300):
+            artifact = save_raw(
+                payload_bytes, source=Source.TDNET, datatype="tdnet_list",
+                scope=str(target), data_date=date(2026, 6, 10),
+                url="fixture://tdnet/recent", ext="json",
+                license_tag=source_license(Source.TDNET), base_dir=settings.raw_data_dir,
+            )
+            records = tdnet_yanoshin.parse_list_payload(payload, fetched_at=artifact.fetched_at)
+            return artifact, records
+
+        monkeypatch.setattr(tdnet_yanoshin, "list_disclosures", fake_list)
+        monkeypatch.setattr(tdnet_hourly, "fetch", lambda url, **k: (_ for _ in ()).throw(
+            FetchError("net cut")))
+
+        per_db_queries: dict[str, int] = {}
+
+        def counting_query(self, db_id, **kwargs):
+            per_db_queries[str(db_id)] = per_db_queries.get(str(db_id), 0) + 1
+            return []  # 空 = 全 create 経路
+
+        monkeypatch.setattr(NotionClient, "query_database", counting_query)
+        # フィクスチャ開示は全て 2026-06-10。--date を一致させ全件 in-window にすることで
+        # ④ date-scoped マップが信用され per-record 検索が消える（日付不一致時は安全側で
+        # per-record 検索にフォールバックするのが正しい挙動）。
+        code = tdnet_hourly.main(["--dry-run", "--date", "2026-06-10"], env=_env(tmp_path))
+        assert code == 0
+        client = captured_clients[0]
+        n_disc = len(_ops_with_prop(client, S.DISC_PROP_DOC_ID))
+        assert n_disc > 1  # 複数開示があることを前提に「非比例」を意味あるものにする
+        # どの DB も query は最大1回（① マップ/④ マップ/⑤原本SHA256 各1回）。per-record
+        # 検索が残っていれば db-disc や db-master が n_disc 回に膨らむ。最大1で非比例を保証。
+        # 従来は開示ごとに ① find + ④ dedup = 2×n_disc query だった。
+        assert per_db_queries  # 何らかの query はある（マップロード）
+        assert max(per_db_queries.values()) == 1
+
 
 class TestReconcileWeekly:
     """第2ソース(stooq)による②終値突合の純粋ロジック検証 (§3-5)。"""

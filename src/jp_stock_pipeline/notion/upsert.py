@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from ..config import Settings
 from ..models import (
@@ -430,6 +430,39 @@ def load_price_page_map(client: NotionClient, settings: Settings) -> dict[str, s
     return out
 
 
+def load_disclosure_page_map(
+    client: NotionClient, settings: Settings, *, disclosed_date: date | None = None
+) -> dict[str, str]:
+    """④ の {書類管理番号(docID): page_id} を一括取得する (§8.3 per-record 検索排除)。
+
+    ④ は無制限に増える追記型のため、disclosed_date を渡して **その日の開示のみ** に
+    絞る（[d, d+1) の半開区間。DISC_PROP_DISCLOSED_AT は date 型）。開示ジョブは対象日の
+    一覧を処理し doc_id は開示日に生成されるので、その日のウィンドウに対象 doc_id の
+    既存行が必ず入る＝date-scoped でも create/update を取り違えない。呼び出し側は
+    record.disclosed_at.date() が disclosed_date と一致するレコードにのみ page_resolved を
+    立てること（ウィンドウ外は per-record 検索へフォールバック=重複防止）。
+    キーは DISC_PROP_DOC_ID(rich_text)。disclosed_date=None なら全件（小規模時のみ）。
+    """
+    flt = None
+    if disclosed_date is not None:
+        nxt = disclosed_date + timedelta(days=1)
+        flt = {
+            "and": [
+                {"property": S.DISC_PROP_DISCLOSED_AT, "date": {"on_or_after": disclosed_date.isoformat()}},
+                {"property": S.DISC_PROP_DISCLOSED_AT, "date": {"before": nxt.isoformat()}},
+            ]
+        }
+    pages = client.query_database(settings.db_id("disclosures"), filter=flt)
+    out: dict[str, str] = {}
+    for page in pages:
+        rich = page.get("properties", {}).get(S.DISC_PROP_DOC_ID, {}).get("rich_text", [])
+        if rich:
+            doc_id = rich[0].get("plain_text", "").strip()
+            if doc_id:
+                out[doc_id] = page["id"]
+    return out
+
+
 def upsert_stock_master(
     client: NotionClient,
     settings: Settings,
@@ -485,9 +518,20 @@ def mark_master_absent_from_codelist(
 
 
 def apply_disclosure_lifecycle(
-    client: NotionClient, settings: Settings, record: DisclosureRecord
+    client: NotionClient,
+    settings: Settings,
+    record: DisclosureRecord,
+    *,
+    master_page_id: str | None = None,
+    master_resolved: bool = False,
 ) -> str | None:
     """上場廃止/新規上場 開示を ① のライフサイクル状態へ反映する (§ Phase3)。
+
+    master_resolved=True のとき master_page_id を ① の page_id として使い、内部の
+    find_stock_master_page(① per-record 検索)を省く (§8.3。開示ジョブが ① マップを
+    事前ロードして渡す)。master_resolved=True かつ master_page_id=None は「① に該当
+    銘柄なし」を意味し、従来同様 None を返して何もしない（事前マップが正なので
+    per-record 検索へは戻らない）。
 
     - 上場廃止(発表): 状態=上場廃止 / 上場廃止日=effective_date(判明時のみ)。
       **listed は触らない**: 効力発生まで売買は継続するため取得も継続する
@@ -505,7 +549,9 @@ def apply_disclosure_lifecycle(
     """
     if record.doc_type not in LIFECYCLE_DOC_TYPES or not record.code:
         return None
-    page_id = find_stock_master_page(client, settings, record.code)
+    page_id = master_page_id if master_resolved else find_stock_master_page(
+        client, settings, record.code
+    )
     if not page_id:
         return None
     if record.doc_type == STATUS_DELISTED:
@@ -567,13 +613,23 @@ def upsert_disclosure(
     settings: Settings,
     record: DisclosureRecord,
     master_page_id: str | None = None,
+    *,
+    existing_page_id: str | None = None,
+    page_resolved: bool = False,
 ) -> str:
-    """④ 開示書類へ冪等 upsert (キー=書類管理番号 docID)。"""
+    """④ 開示書類へ冪等 upsert (キー=書類管理番号 docID)。
+
+    開示ジョブのループでは load_disclosure_page_map(disclosed_date=対象日) で得た
+    {doc_id: page_id} を existing_page_id に渡し page_resolved=True で per-record 検索を
+    省ける (§8.3)。all-or-nothing で渡すこと (_upsert 参照)。master_page_id は ① relation。
+    """
     return _upsert(
         client,
         settings.db_id("disclosures"),
         disclosure_filter(record.doc_id),
         disclosure_properties(record, master_page_id),
+        existing_page_id=existing_page_id,
+        page_resolved=page_resolved,
     )
 
 
