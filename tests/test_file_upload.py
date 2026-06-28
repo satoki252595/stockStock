@@ -69,21 +69,50 @@ class TestPlanUpload:
 
 
 class TestContentType:
-    """作成時宣言と send パートの content_type 一致 (Notion 400 回避)。"""
+    """send パートの content_type を create 応答（Notion 推定値）に一致させる。
 
-    def test_known_extensions(self):
-        from pathlib import Path
+    create には content_type を渡さず Notion に推定させ、その応答値を send の
+    3要素タプルに使う。OS 依存の mimetypes を正本にすると Linux runner で
+    .csv→None になり 400 になった事故の回帰防止。
+    """
 
-        assert file_upload._content_type(Path("x.zip")) == "application/zip"
-        assert file_upload._content_type(Path("x.csv")) == "text/csv"
-        assert file_upload._content_type(Path("x.pdf")) == "application/pdf"
+    def _fake_client(self, create_resp: dict):
+        """raw_api を差し替えて (op, json_body, files) を記録するダブル。"""
+        calls = []
 
-    def test_unknown_extension_falls_back_to_octet_stream(self):
-        from pathlib import Path
+        class _C:
+            def raw_api(self, method, path, *, json_body=None, data=None, files=None,
+                        record_in_dry_run=True):
+                calls.append({"path": path, "json": json_body, "files": files})
+                if path == "file_uploads":
+                    return create_resp
+                return {"id": create_resp.get("id", "u1")}
 
-        # .xbrl / .parquet は mimetypes 未知 → octet-stream で一致を保証
-        assert file_upload._content_type(Path("x.xbrl")) == "application/octet-stream"
-        assert file_upload._content_type(Path("x.parquet")) == "application/octet-stream"
+        return _C(), calls
+
+    def test_send_uses_create_response_content_type(self, tmp_path):
+        client, calls = self._fake_client({"id": "u1", "content_type": "text/csv; charset=utf-8"})
+        p = tmp_path / "yfinance_daily_prices_batch_ALL_20260626.csv"
+        p.write_bytes(b"code,close\n7203,2500\n")
+        upload_id = file_upload._upload_single(client, p)
+        assert upload_id == "u1"
+        # create には content_type を渡さない
+        create = next(c for c in calls if c["path"] == "file_uploads")
+        assert "content_type" not in create["json"]
+        # send は create 応答の content_type を 3要素タプルで送る
+        send = next(c for c in calls if c["path"].endswith("/send"))
+        name, content, ctype = send["files"]["file"]
+        assert ctype == "text/csv; charset=utf-8"
+        assert name == p.name
+
+    def test_send_falls_back_to_2tuple_when_response_lacks_content_type(self, tmp_path):
+        # 応答に content_type が無く mimetypes も未知（.xbrl）→ 2要素タプルに退避
+        client, calls = self._fake_client({"id": "u1"})
+        p = tmp_path / "doc.xbrl"
+        p.write_bytes(b"<xbrl/>")
+        file_upload._upload_single(client, p)
+        send = next(c for c in calls if c["path"].endswith("/send"))
+        assert len(send["files"]["file"]) == 2  # (name, content) のみ
 
 
 class TestSha256DuplicateSkip:
@@ -124,12 +153,9 @@ class TestNewUploadSinglePart:
         # (1) file_upload 作成 → (2) send → (3) ⑤ 行作成
         assert ops == ["POST file_uploads", "POST file_uploads/dry-run-1/send", "create_page"]
         create_fu = dry_client.ops[0].payload
-        # content_type を作成時に宣言し send 時のパートと一致させる (.zip→application/zip)
-        assert create_fu == {
-            "mode": "single_part",
-            "filename": artifact.filename,
-            "content_type": "application/zip",
-        }
+        # create に content_type は渡さない（Notion が filename から推定し、その応答
+        # 値を send のパートに一致させる。OS 依存の mimetypes を正本にしない）
+        assert create_fu == {"mode": "single_part", "filename": artifact.filename}
 
     def test_row_properties(self, dry_client, tmp_path):
         settings = make_settings()
