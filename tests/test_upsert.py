@@ -578,6 +578,88 @@ class TestPrefetchedPageMap:
         assert out == {"7203": "pg-7203", "6758": "pg-6758"}
 
 
+class TestDisclosurePrefetch:
+    """④/① 事前マップで開示ジョブの per-record 検索を排除する (§8.3)。"""
+
+    def test_load_disclosure_page_map_reads_doc_id_and_date_scopes(self):
+        # ④ は doc_id(rich_text)キー。disclosed_date 指定で [d, d+1) の date フィルタを送る
+        settings = make_settings()
+        captured = {}
+
+        class _C:
+            def query_database(self, db_id, *, filter=None, **kw):
+                captured["db_id"] = db_id
+                captured["filter"] = filter
+                return [
+                    {"id": "d-1", "properties": {S.DISC_PROP_DOC_ID: {"rich_text": [{"plain_text": "S100A"}]}}},
+                    {"id": "d-2", "properties": {S.DISC_PROP_DOC_ID: {"rich_text": []}}},  # 空はスキップ
+                ]
+
+        out = upsert.load_disclosure_page_map(_C(), settings, disclosed_date=date(2026, 6, 28))
+        assert out == {"S100A": "d-1"}
+        assert captured["db_id"] == "db-disc"
+        # 半開区間 [2026-06-28, 2026-06-29)
+        conds = captured["filter"]["and"]
+        assert conds[0] == {"property": S.DISC_PROP_DISCLOSED_AT, "date": {"on_or_after": "2026-06-28"}}
+        assert conds[1] == {"property": S.DISC_PROP_DISCLOSED_AT, "date": {"before": "2026-06-29"}}
+
+    def test_load_disclosure_page_map_no_date_sends_no_filter(self):
+        settings = make_settings()
+        captured = {}
+
+        class _C:
+            def query_database(self, db_id, *, filter=None, **kw):
+                captured["filter"] = filter
+                return []
+
+        upsert.load_disclosure_page_map(_C(), settings)
+        assert captured["filter"] is None
+
+    def test_upsert_disclosure_resolved_skips_dedup_query(self):
+        settings = make_settings()
+        c = _RecordingClient()
+        rec = DisclosureRecord(
+            doc_id="S100A", title="決算短信",
+            disclosed_at=datetime(2026, 6, 28, 15, 0, tzinfo=JST), provenance=prov(),
+        )
+        pid = upsert.upsert_disclosure(
+            c, settings, rec, existing_page_id="d-existing", page_resolved=True
+        )
+        assert pid == "d-existing"
+        assert ("query", "db-disc") not in c.calls  # 検索を省いた
+        assert ("update", "d-existing") in c.calls
+
+    def test_apply_lifecycle_resolved_skips_master_query(self):
+        # master_resolved=True → 内部の ① find をせず master_page_id を直接使う
+        settings = make_settings()
+        c = _RecordingClient()
+        rec = DisclosureRecord(
+            doc_id="S100A", title="上場廃止に関するお知らせ",
+            disclosed_at=datetime(2026, 6, 28, tzinfo=JST), provenance=prov(),
+            code="7203", doc_type="上場廃止",
+        )
+        pid = upsert.apply_disclosure_lifecycle(
+            c, settings, rec, master_page_id="m-7203", master_resolved=True
+        )
+        assert pid == "m-7203"
+        assert ("query", "db-master") not in c.calls  # ① 検索を省いた
+        assert ("update", "m-7203") in c.calls
+
+    def test_apply_lifecycle_resolved_none_is_noop(self):
+        # 事前マップで「① に該当なし」が確定(master_page_id=None) → 検索せず no-op
+        settings = make_settings()
+        c = _RecordingClient()
+        rec = DisclosureRecord(
+            doc_id="S100A", title="上場廃止", disclosed_at=datetime(2026, 6, 28, tzinfo=JST),
+            provenance=prov(), code="9999", doc_type="上場廃止",
+        )
+        pid = upsert.apply_disclosure_lifecycle(
+            c, settings, rec, master_page_id=None, master_resolved=True
+        )
+        assert pid is None
+        assert c.calls == []  # 検索も更新もしない
+
+
 class TestJobLog:
     def test_write_job_log(self, dry_client):
         settings = make_settings()

@@ -60,7 +60,40 @@ def _fetch_financial_tidy(
     return artifact, tidy
 
 
-def _process_document(ctx: JobContext, doc: dict, list_page_id: str) -> None:
+def _resolve_master_id(
+    ctx: JobContext, code: str, master_map: dict[str, str], master_map_ok: bool, doc_id: str
+) -> str | None:
+    """① relation の page_id を解決する。事前マップ優先、未取得時は per-record 検索。
+
+    マップ miss は relation 欠落のみ(④ 行は書ける。重複は起きない)なので degrade。
+    検索失敗も relation 無しで本体は書く(§3-2 双方向フェールセーフ)。
+    """
+    if not code:
+        return None
+    if master_map_ok:
+        return master_map.get(code)
+    try:
+        return upsert.find_stock_master_page(ctx.client, ctx.settings, code)
+    except Exception as exc:  # noqa: BLE001 - relation 解決失敗は本体を止めない
+        logger.warning(
+            "① relation 解決失敗 (master_id=None で続行 doc_id=%s): %s", doc_id, exc
+        )
+        return None
+
+
+def _process_document(
+    ctx: JobContext,
+    doc: dict,
+    list_page_id: str,
+    *,
+    master_map: dict[str, str] | None = None,
+    master_map_ok: bool = False,
+    disc_map: dict[str, str] | None = None,
+    disc_map_ok: bool = False,
+    target_date: date | None = None,
+) -> None:
+    master_map = master_map or {}
+    disc_map = disc_map or {}
     doc_id = doc["docID"]
     code = normalize_sec_code(doc.get("secCode")) or ""
     doc_type_code = str(doc.get("docTypeCode") or "")
@@ -94,22 +127,26 @@ def _process_document(ctx: JobContext, doc: dict, list_page_id: str) -> None:
 
     # ④ 開示書類 upsert (キー=docID)。原本は書類自身 → 無ければ一覧原本
     record = edinet.to_disclosure_record(doc, raw_page_id=doc_raw_page or list_page_id)
-    # ① relation 解決(Notionクエリ)。失敗しても relation 無しで本体は書く（degrade）
-    try:
-        master_id = (
-            upsert.find_stock_master_page(ctx.client, ctx.settings, record.code)
-            if record.code
-            else None
-        )
-    except Exception as exc:  # noqa: BLE001 - relation 解決失敗は本体を止めない
-        master_id = None
-        logger.warning(
-            "① relation 解決失敗 (master_id=None で続行 doc_id=%s): %s", doc_id, exc
-        )
+    # ① relation 解決。事前マップがあれば per-record 検索を省く(§8.3)。マップ miss は
+    # relation 欠落のみ(重複は起きない)なので benign degrade。マップ未取得時は従来の
+    # per-record 検索へフォールバック。
+    master_id = _resolve_master_id(
+        ctx, record.code, master_map, master_map_ok, doc_id
+    )
+    # ④ dedup を事前マップで省く。date-scoped マップは対象日のレコードにのみ信用できる
+    # ため、disclosed_at が対象日と一致する場合のみ page_resolved（範囲外は per-record
+    # 検索＝重複防止）。
+    disc_resolved = bool(
+        disc_map_ok and target_date is not None
+        and record.disclosed_at.date() == target_date
+    )
     # ④ を Notion とローカルへ独立に書く（双方向フェールセーフ）
     if not ctx.persist(
         record,
-        lambda: upsert.upsert_disclosure(ctx.client, ctx.settings, record, master_id),
+        lambda: upsert.upsert_disclosure(
+            ctx.client, ctx.settings, record, master_id,
+            existing_page_id=disc_map.get(doc_id), page_resolved=disc_resolved,
+        ),
         label=f"④{doc_id}",
     ):
         raise RuntimeError(f"④ を Notion/ローカル両系統に書けず: {doc_id}")
@@ -155,12 +192,38 @@ def execute(ctx: JobContext) -> None:
     targets = apply_limit(targets, ctx.args.limit)
     logger.info("対象書類 %d / 一覧 %d 件", len(targets), len(docs))
 
+    # ① relation マップ(全件・有界)と ④ dedup マップ(対象日のみ)を1回ずつ事前ロード。
+    # 書類ごとの ① 検索・④ 検索(各1req)を排除する(§8.3。繁忙日=有報集中の timeout 対策)。
+    # 取得失敗時は per-record 検索へ degrade(all-or-nothing)。
+    master_map, master_map_ok = _load_map_guarded(
+        lambda: upsert.load_stock_master_map(ctx.client, ctx.settings), "①"
+    )
+    disc_map, disc_map_ok = _load_map_guarded(
+        lambda: upsert.load_disclosure_page_map(
+            ctx.client, ctx.settings, disclosed_date=target_date
+        ),
+        "④",
+    )
+
     for doc in targets:
         try:
-            _process_document(ctx, doc, list_page_id)
+            _process_document(
+                ctx, doc, list_page_id,
+                master_map=master_map, master_map_ok=master_map_ok,
+                disc_map=disc_map, disc_map_ok=disc_map_ok, target_date=target_date,
+            )
             ctx.add_success()
         except Exception as exc:
             ctx.add_failure(doc.get("docID", "?"), f"書類処理失敗: {exc}")
+
+
+def _load_map_guarded(loader, label: str) -> tuple[dict[str, str], bool]:
+    """事前マップを all-or-nothing でロードする。失敗時は ({}, False) で per-record へ。"""
+    try:
+        return loader(), True
+    except Exception as exc:  # noqa: BLE001 - 失敗時は per-record 検索へフォールバック
+        logger.warning("%s 事前マップ取得失敗 → per-record 検索にフォールバック: %s", label, exc)
+        return {}, False
 
 
 def main(argv: list[str] | None = None, *, env: dict[str, str] | None = None) -> int:
