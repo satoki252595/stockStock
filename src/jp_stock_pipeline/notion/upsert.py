@@ -32,6 +32,8 @@ from ..models import (
     StockMasterRecord,
     now_jst,
 )
+from notion_client.errors import APIResponseError
+
 from . import schema as S
 from .client import NotionClient
 
@@ -354,11 +356,37 @@ def _find_page(client: NotionClient, db_id: str, flt: dict) -> str | None:
     return results[0]["id"] if results else None
 
 
-def _upsert(client: NotionClient, db_id: str, flt: dict, props: dict) -> str:
-    page_id = _find_page(client, db_id, flt)
+def _upsert(
+    client: NotionClient,
+    db_id: str,
+    flt: dict,
+    props: dict,
+    *,
+    existing_page_id: str | None = None,
+    page_resolved: bool = False,
+) -> str:
+    """キー検索 → update or create で冪等に書く (§8.1-6)。
+
+    page_resolved=True のとき existing_page_id を正として per-record の検索クエリを
+    省く（全銘柄ループでの 1req/銘柄 を削減 §8.3。事前に DB 全行マップを一括取得して
+    渡す運用）。事前マップは **all-or-nothing** で渡すこと: 部分マップを True で渡すと
+    未収録キーが create され重複行になる（§8.1-6 冪等性違反）。マップ取得に失敗した
+    ときは page_resolved=False にして従来の per-record 検索へフォールバックする。
+    existing_page_id が（削除済み等で）実在しない場合は object_not_found を握って
+    create へフォールバックし、事前マップと実DBのズレを自己修復する。
+    """
+    page_id = existing_page_id if page_resolved else _find_page(client, db_id, flt)
     if page_id:
-        client.update_page(page_id, props)
-        return page_id
+        try:
+            client.update_page(page_id, props)
+            return page_id
+        except APIResponseError as exc:
+            # 事前マップの page_id が実在しない（削除済み等）→ create で自己修復
+            if page_resolved and getattr(exc, "code", "") == "object_not_found":
+                return client.create_page(
+                    parent={"database_id": db_id}, properties=props
+                )["id"]
+            raise
     return client.create_page(parent={"database_id": db_id}, properties=props)["id"]
 
 
@@ -384,23 +412,49 @@ def load_stock_master_map(client: NotionClient, settings: Settings) -> dict[str,
     return out
 
 
+def load_price_page_map(client: NotionClient, settings: Settings) -> dict[str, str]:
+    """② 全行の {銘柄コード: page_id} を一括取得する。
+
+    ② upsert の per-record 検索 (1req/銘柄) を排除するための事前マップ (§8.3)。
+    ① は rich_text キーだが ②(price_technical_filter) は **title equals** キーのため、
+    title[0].plain_text を読む（rich_text ではない。混同すると全件ミス→重複行）。
+    """
+    pages = client.query_database(settings.db_id("prices"))
+    out: dict[str, str] = {}
+    for page in pages:
+        title = page.get("properties", {}).get(S.PRICE_PROP_CODE, {}).get("title", [])
+        if title:
+            code = title[0].get("plain_text", "").strip()
+            if code:
+                out[code] = page["id"]
+    return out
+
+
 def upsert_stock_master(
     client: NotionClient,
     settings: Settings,
     record: StockMasterRecord,
     *,
     include_lifecycle: bool = True,
+    existing_page_id: str | None = None,
+    page_resolved: bool = False,
 ) -> str:
     """① 銘柄マスタへ冪等 upsert (キー=銘柄コード)。page_id を返す。
 
     master_sync(codelist 同期) は include_lifecycle=False で呼び、開示・消失が
     所有する 状態/上場日/上場廃止日 を上書きしない (§ Phase3 二重所有の回避)。
+
+    全銘柄ループでは load_stock_master_map で得た {code: page_id} を
+    existing_page_id に渡し page_resolved=True にすると per-record 検索を省ける
+    (§8.3)。事前マップは all-or-nothing で渡すこと (_upsert 参照)。
     """
     return _upsert(
         client,
         settings.db_id("stock_master"),
         stock_master_filter(record.code),
         stock_master_properties(record, include_lifecycle=include_lifecycle),
+        existing_page_id=existing_page_id,
+        page_resolved=page_resolved,
     )
 
 
@@ -473,13 +527,23 @@ def upsert_price_technical(
     record: PriceTechnicalRecord,
     master_page_id: str | None = None,
     extra_raw_page_ids: Iterable[str] | None = None,
+    *,
+    existing_page_id: str | None = None,
+    page_resolved: bool = False,
 ) -> str:
-    """② 株価テクニカルへ冪等 upsert (キー=銘柄コード title equals)。"""
+    """② 株価テクニカルへ冪等 upsert (キー=銘柄コード title equals)。
+
+    全銘柄ループでは load_price_page_map で得た {code: page_id} を existing_page_id に
+    渡し page_resolved=True にすると per-record 検索を省ける (§8.3)。事前マップは
+    all-or-nothing で渡すこと (_upsert 参照)。master_page_id は ① relation 用で別物。
+    """
     return _upsert(
         client,
         settings.db_id("prices"),
         price_technical_filter(record.code),
         price_technical_properties(record, master_page_id, extra_raw_page_ids),
+        existing_page_id=existing_page_id,
+        page_resolved=page_resolved,
     )
 
 

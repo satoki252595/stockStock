@@ -101,6 +101,47 @@ class TestMasterSync:
             tag = op.payload["properties"][S.PROP_LICENSE_TAG]["select"]["name"]
             assert tag == LicenseTag.COMMERCIAL_OK.value
 
+    def test_prefetch_map_eliminates_per_record_queries(
+        self, monkeypatch, tmp_path, captured_clients
+    ):
+        """① マップ一括取得で per-record 検索を排除する (§8.3 ops削減=60分timeout対策)。
+
+        従来は 1銘柄あたり _find_page(query) + create/update の2callだった。マップを
+        先頭で1回ロードし page_resolved=True で渡すことで query は「マップ取得1回」のみ
+        に減る（per-record 検索ゼロ）ことを query 呼び出し回数で保証する。
+        """
+        from jp_stock_pipeline.notion.client import NotionClient
+
+        self._patch_fetch(monkeypatch, tmp_path)
+        calls = {"n": 0}
+
+        def counting_query(self, db_id, **kwargs):
+            calls["n"] += 1
+            return []  # 空 ① = 全件 create 経路
+
+        monkeypatch.setattr(NotionClient, "query_database", counting_query)
+        code = master_sync.main(["--dry-run", "--limit", "5"], env=_env(tmp_path))
+        assert code == 0
+        client = captured_clients[0]
+        assert len(_ops_with_prop(client, S.MASTER_PROP_NAME)) == 5  # ① 5件
+        # query は固定2回のみ = ⑤原本SHA256重複チェック1回 + ①マップ一括取得1回。
+        # per-record 検索(本来は銘柄数=5回)はゼロ。レコード数に比例しないのが要点
+        # (従来は 1[⑤] + 5[per-record] = 6 だった)。
+        assert calls["n"] == 2
+
+    def test_dedup_by_code_keeps_last_occurrence(self):
+        """同一コードの重複は最後を採用（事前マップ運用での二重 create を防ぐ）。"""
+        from jp_stock_pipeline.jobs.master_sync import _dedup_by_code
+
+        class _R:
+            def __init__(self, code, name):
+                self.code = code
+                self.name = name
+
+        out = _dedup_by_code([_R("7203", "a"), _R("6758", "b"), _R("7203", "c")])
+        assert [r.code for r in out] == ["7203", "6758"]  # 初出順を維持
+        assert {r.code: r.name for r in out}["7203"] == "c"  # 値は最後の出現
+
     def test_raw_upload_failure_aborts_structured_writes(
         self, monkeypatch, tmp_path, captured_clients
     ):
