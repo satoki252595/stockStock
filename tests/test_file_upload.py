@@ -115,6 +115,68 @@ class TestContentType:
         assert len(send["files"]["file"]) == 2  # (name, content) のみ
 
 
+class TestUnsupportedExtensionZipWrap:
+    """Notion 非対応拡張子(.parquet 等)は .zip ラップして UL する (§5.2)。
+
+    根本原因の回帰防止: yfinance/stooq は原本(.csv)に Parquet 変換版を併置するが、
+    Notion File Upload は .parquet を「extension not supported」で 400 にする。
+    """
+
+    def test_parquet_is_zip_wrapped_and_name_changes(self, tmp_path):
+        calls = []
+
+        class _C:
+            def raw_api(self, method, path, *, json_body=None, data=None, files=None,
+                        record_in_dry_run=True):
+                calls.append({"path": path, "json": json_body, "files": files})
+                if path == "file_uploads":
+                    return {"id": "u1", "content_type": "application/zip"}
+                return {"id": "u1"}
+
+        client = _C()
+        p = tmp_path / "yfinance_daily_prices_batch_ALL_20260626_converted.parquet"
+        p.write_bytes(b"PARQ-binary-bytes")
+        upload_id, name = file_upload.upload_file(client, p)
+        assert upload_id == "u1"
+        # 添付名は元名 + .zip（Notion は .zip 対応）
+        assert name == "yfinance_daily_prices_batch_ALL_20260626_converted.parquet.zip"
+        # create に送った filename も .zip
+        create = next(c for c in calls if c["path"] == "file_uploads")
+        assert create["json"]["filename"].endswith(".parquet.zip")
+
+    def test_supported_extension_uploaded_as_is(self, tmp_path):
+        calls = []
+
+        class _C:
+            def raw_api(self, method, path, *, json_body=None, data=None, files=None,
+                        record_in_dry_run=True):
+                calls.append({"path": path, "json": json_body})
+                if path == "file_uploads":
+                    return {"id": "u1", "content_type": "text/csv; charset=utf-8"}
+                return {"id": "u1"}
+
+        client = _C()
+        p = tmp_path / "data.csv"
+        p.write_bytes(b"a,b\n1,2\n")
+        upload_id, name = file_upload.upload_file(client, p)
+        assert name == "data.csv"  # 対応拡張子はそのまま
+        create = next(c for c in calls if c["path"] == "file_uploads")
+        assert create["json"]["filename"] == "data.csv"
+
+    def test_zip_wrapped_content_is_recoverable(self, tmp_path):
+        import zipfile
+
+        p = tmp_path / "x.parquet"
+        p.write_bytes(b"PARQ-original-content")
+        with file_upload._zip_wrapped(p) as zpath:
+            assert zpath.name == "x.parquet.zip"
+            with zipfile.ZipFile(zpath) as zf:
+                # zip 内エントリ名は元ファイル名・中身は元バイト列（解凍で原本復元可能）
+                assert zf.namelist() == ["x.parquet"]
+                assert zf.read("x.parquet") == b"PARQ-original-content"
+        assert not zpath.exists()  # コンテキスト終了で一時ファイルは消える
+
+
 class TestSha256DuplicateSkip:
     def test_existing_row_returns_its_page_id_without_upload(self, dry_client, tmp_path, monkeypatch):
         """SHA256 一致の既存行があれば再アップロードせず page_id を返す (§8.1-2)。"""
