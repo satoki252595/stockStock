@@ -75,51 +75,63 @@ def _created_upload_id(resp: dict, path: Path) -> str:
     return upload_id
 
 
-def _content_type(path: Path) -> str:
-    """ファイル名から MIME 型を推定する（不明なら octet-stream）。
+def _fallback_content_type(path: Path) -> str | None:
+    """create 応答に content_type が無い場合の保険（dry-run 等）。
 
-    File Upload は「作成時に宣言した content_type」と「send 時に送るパートの
-    content_type」が一致しないと 400 (validation_error) になる。両端で同じ値を使う
-    ため、ここで一度だけ決める。requests の files= は content_type 未指定だと
-    text/plain 相当になり、作成時の推定 (filename 由来) と食い違うため必ず明示する。
+    通常は Notion の create 応答が推定済み content_type を返すのでそれを正本にする。
+    mimetypes は OS により結果が変わり（例: Linux runner で .csv→None）、その値を
+    create と send の両方に使うと「content type … not supported」/「extension not
+    supported」で 400 になる事故が起きたため、推定の正本にはしない。ここは応答が
+    欠ける異常時のみのフォールバックで、None なら send は 2要素タプルに退避する。
     """
     ctype, _ = mimetypes.guess_type(path.name)
-    return ctype or "application/octet-stream"
+    return ctype
+
+
+def _create_upload(client: NotionClient, path: Path, json_body: dict) -> tuple[str, str | None]:
+    """File Upload を作成し (upload_id, content_type) を返す。
+
+    content_type は Notion が filename から推定した create 応答の値を使う。send 時の
+    パート content_type をこれに一致させないと 400 (validation_error) になる。
+    create 側に content_type を渡さない（=Notion に推定させる）ことで、OS 依存の
+    mimetypes に左右されず create↔send が必ず一致する。
+    """
+    created = client.raw_api("POST", "file_uploads", json_body=json_body)
+    upload_id = _created_upload_id(created, path)
+    ctype = created.get("content_type") or _fallback_content_type(path)
+    return upload_id, ctype
+
+
+def _file_part(name: str, content: bytes, ctype: str | None) -> tuple:
+    """multipart/form-data の files= 用パート。
+
+    ctype があれば 3要素タプルで明示する（create 応答の推定値と一致させる）。
+    requests は content_type 省略時 text/plain 相当を送るため、ctype 既知なら必ず付ける。
+    """
+    return (name, content, ctype) if ctype else (name, content)
 
 
 def _upload_single(client: NotionClient, path: Path) -> str:
-    ctype = _content_type(path)
-    created = client.raw_api(
-        "POST",
-        "file_uploads",
-        json_body={"mode": "single_part", "filename": path.name, "content_type": ctype},
+    upload_id, ctype = _create_upload(
+        client, path, {"mode": "single_part", "filename": path.name}
     )
-    upload_id = _created_upload_id(created, path)
     # bytes で渡す: ファイルハンドルだと 429/5xx リトライ時に消費済みハンドルの
     # 再送 = 空ボディ送信になるため (multipart/form-data, requests の files= 経由)。
-    # content_type を明示し作成時の宣言と一致させる (3要素タプル)。
     content = path.read_bytes()
     client.raw_api(
         "POST",
         f"file_uploads/{upload_id}/send",
-        files={"file": (path.name, content, ctype)},
+        files={"file": _file_part(path.name, content, ctype)},
     )
     return upload_id
 
 
 def _upload_multipart(client: NotionClient, path: Path, n_parts: int) -> str:
-    ctype = _content_type(path)
-    created = client.raw_api(
-        "POST",
-        "file_uploads",
-        json_body={
-            "mode": "multi_part",
-            "filename": path.name,
-            "number_of_parts": n_parts,
-            "content_type": ctype,
-        },
+    upload_id, ctype = _create_upload(
+        client,
+        path,
+        {"mode": "multi_part", "filename": path.name, "number_of_parts": n_parts},
     )
-    upload_id = _created_upload_id(created, path)
     with path.open("rb") as fp:
         for part_number in range(1, n_parts + 1):
             chunk = fp.read(MULTIPART_CHUNK)
@@ -127,7 +139,7 @@ def _upload_multipart(client: NotionClient, path: Path, n_parts: int) -> str:
                 "POST",
                 f"file_uploads/{upload_id}/send",
                 data={"part_number": str(part_number)},
-                files={"file": (path.name, chunk, ctype)},
+                files={"file": _file_part(path.name, chunk, ctype)},
             )
     client.raw_api("POST", f"file_uploads/{upload_id}/complete", json_body={})
     return upload_id
