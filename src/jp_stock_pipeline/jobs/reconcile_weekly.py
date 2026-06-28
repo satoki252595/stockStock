@@ -141,6 +141,19 @@ def build_reconcile_inputs(
 
 
 def execute(ctx: JobContext) -> None:
+    # 第2ソース(stooq)が無効＝死亡している間は突合相手が存在しない。② 全行スナップ
+    # ショット読み(~37 throttled query)と全銘柄 fetch ループ(~46分)を丸ごと省いて
+    # 即終了する(成果ゼロの 46分タイムアウトを排除 §3-2)。突合は行わなかったことを
+    # warning で明示し、捏造はしない(§3-1)。stooq 復活時=STOOQ_ENABLED=true で再開。
+    if not ctx.settings.stooq_enabled:
+        logger.warning(
+            "reconcile_weekly: 第2ソース(stooq)が無効(STOOQ_ENABLED 未設定/死亡確認)の"
+            "ため突合をスキップ。② 終値の独立検証は未実施 (§3-2/§3-5)。"
+            "stooq 復活 or 別の第2ソース導入時に STOOQ_ENABLED=true で再開する"
+        )
+        ctx.add_success(0)
+        return
+
     snapshot = load_price_snapshot(ctx.client, ctx.settings)
     page_by_code = {code: page_id for page_id, code, _close, _dd in snapshot}
     codes = apply_limit(sorted(page_by_code), ctx.args.limit)
