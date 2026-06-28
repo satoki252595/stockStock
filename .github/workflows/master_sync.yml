@@ -16,7 +16,10 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 初回フルロードは ~3900 銘柄 × 2.5req/s スロットルで ~52分かかる。60分では
+    # ネットワーク遅延/リトライで超過し cancelled になるため余裕を持たせる
+    # (edinet/export と同じ 120)。upsert の per-record クエリ排除でさらに半減予定。
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
