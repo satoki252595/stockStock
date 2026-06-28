@@ -64,9 +64,18 @@ def _collect(ctx: JobContext, target_date: date) -> list[tuple[RawArtifact, list
 
 
 def _process_financial_xbrl(
-    ctx: JobContext, record: DisclosureRecord, xbrl_url: str
+    ctx: JobContext,
+    record: DisclosureRecord,
+    xbrl_url: str,
+    *,
+    master_id: str | None = None,
+    master_resolved: bool = False,
 ) -> None:
-    """短信 XBRL → 原本⑤ → tidy → ③ upsert (§8.2)。"""
+    """短信 XBRL → 原本⑤ → tidy → ③ upsert (§8.2)。
+
+    master_resolved=True のとき master_id(事前①マップ由来)を ③ relation に使い、
+    内部の find_stock_master_page(① per-record 検索)を省く (§8.3)。
+    """
     resp = fetch(xbrl_url)
     artifact = save_raw(
         resp.content,
@@ -101,17 +110,20 @@ def _process_financial_xbrl(
     if fin is None:
         logger.info("③レコード生成不可 (決算期末を導出できず): %s", record.doc_id)
         return
-    try:
-        master_id = (
-            upsert.find_stock_master_page(ctx.client, ctx.settings, fin.code)
-            if fin.code
-            else None
-        )
-    except Exception as exc:  # noqa: BLE001 - relation 解決失敗は本体を止めない
-        master_id = None
-        logger.warning(
-            "① relation 解決失敗 (master_id=None で続行 doc_id=%s): %s", record.doc_id, exc
-        )
+    # ① relation: 事前マップが解決済みならそれを使い検索を省く。未解決時のみ per-record。
+    if not master_resolved:
+        try:
+            master_id = (
+                upsert.find_stock_master_page(ctx.client, ctx.settings, fin.code)
+                if fin.code
+                else None
+            )
+        except Exception as exc:  # noqa: BLE001 - relation 解決失敗は本体を止めない
+            master_id = None
+            logger.warning(
+                "① relation 解決失敗 (master_id=None で続行 doc_id=%s): %s",
+                record.doc_id, exc,
+            )
     # ③ を Notion とローカルへ独立に書く（双方向フェールセーフ）。両系統失敗は
     # 呼び出し側 (execute) が「短信XBRL→③失敗」として記録する。
     if not ctx.persist(
@@ -122,9 +134,32 @@ def _process_financial_xbrl(
         raise RuntimeError(f"③ を Notion/ローカル両系統に書けず: {record.doc_id}")
 
 
+def _load_map_guarded(loader, label: str) -> tuple[dict[str, str], bool]:
+    """事前マップを all-or-nothing でロードする。失敗時は ({}, False) で per-record へ。"""
+    try:
+        return loader(), True
+    except Exception as exc:  # noqa: BLE001 - 失敗時は per-record 検索へフォールバック
+        logger.warning("%s 事前マップ取得失敗 → per-record 検索にフォールバック: %s", label, exc)
+        return {}, False
+
+
 def execute(ctx: JobContext) -> None:
     target_date = ctx.args.date or now_jst().date()
     batches = _collect(ctx, target_date)
+
+    # ① relation マップ(全件・有界)と ④ dedup マップ(対象日のみ)を1回ずつ事前ロード。
+    # 毎時実行は同一日の一覧を丸ごと再処理するため、開示ごとの ① 検索・④ 検索(各1req)が
+    # 累積し 30分cap を脅かす。事前マップで per-record 検索を排除する(§8.3)。失敗時は
+    # per-record 検索へ degrade(all-or-nothing)。
+    master_map, master_map_ok = _load_map_guarded(
+        lambda: upsert.load_stock_master_map(ctx.client, ctx.settings), "①"
+    )
+    disc_map, disc_map_ok = _load_map_guarded(
+        lambda: upsert.load_disclosure_page_map(
+            ctx.client, ctx.settings, disclosed_date=target_date
+        ),
+        "④",
+    )
 
     for artifact, records, xbrl_urls in batches:
         # 原本必須: Notion⑤/ローカル⑤ の両系統とも失敗時のみ構造化を書かない (§7.1/§3-3)
@@ -132,24 +167,22 @@ def execute(ctx: JobContext) -> None:
 
         for record in apply_limit(records, ctx.args.limit):
             record.provenance.raw_page_id = raw_page_id
-            # ① relation 解決(Notionクエリ)。失敗しても relation 無しで本体は書く
-            try:
-                master_id = (
-                    upsert.find_stock_master_page(ctx.client, ctx.settings, record.code)
-                    if record.code
-                    else None
-                )
-            except Exception as exc:  # noqa: BLE001 - relation 解決失敗は本体を止めない
-                master_id = None
-                logger.warning(
-                    "① relation 解決失敗 (master_id=None で続行 doc_id=%s): %s",
-                    record.doc_id, exc,
-                )
+            # ① relation 解決: 事前マップ優先(miss は relation 欠落のみ=benign)、未取得時は
+            # per-record 検索へ degrade。検索失敗も relation 無しで本体は書く(§3-2)。
+            master_id, master_resolved = _resolve_master(
+                ctx, record.code, master_map, master_map_ok, record.doc_id
+            )
+            # ④ dedup を事前マップで省く。date-scoped マップは対象日のレコードにのみ信用
+            # できるため、disclosed_at が対象日と一致する場合のみ page_resolved。
+            disc_resolved = bool(
+                disc_map_ok and record.disclosed_at.date() == target_date
+            )
             # ④ を Notion とローカルへ独立に書く（双方向フェールセーフ）
             if ctx.persist(
                 record,
-                lambda rec=record, mid=master_id: upsert.upsert_disclosure(
-                    ctx.client, ctx.settings, rec, mid
+                lambda rec=record, mid=master_id, dr=disc_resolved: upsert.upsert_disclosure(
+                    ctx.client, ctx.settings, rec, mid,
+                    existing_page_id=disc_map.get(rec.doc_id), page_resolved=dr,
                 ),
                 label=f"④{record.doc_id}",
             ):
@@ -158,12 +191,16 @@ def execute(ctx: JobContext) -> None:
                 ctx.add_failure(record.doc_id, "④: Notion/ローカル両系統に書けず")
                 continue
 
-            # 上場廃止/新規上場 開示は ① のライフサイクル状態へ反映 (§ Phase3)
+            # 上場廃止/新規上場 開示は ① のライフサイクル状態へ反映 (§ Phase3)。
+            # 事前①マップ由来の master_id を渡し、内部の ① 検索を省く。
             if record.doc_type in upsert.LIFECYCLE_DOC_TYPES:
                 if not ctx.persist_lifecycle(
                     record,
-                    lambda rec=record: upsert.apply_disclosure_lifecycle(
-                        ctx.client, ctx.settings, rec
+                    lambda rec=record, mid=master_id, mr=master_resolved: (
+                        upsert.apply_disclosure_lifecycle(
+                            ctx.client, ctx.settings, rec,
+                            master_page_id=mid, master_resolved=mr,
+                        )
                     ),
                     label=f"①lifecycle:{record.doc_id}",
                 ):
@@ -173,10 +210,34 @@ def execute(ctx: JobContext) -> None:
 
             if record.doc_type == "短信" and record.has_xbrl and record.doc_id in xbrl_urls:
                 try:
-                    _process_financial_xbrl(ctx, record, xbrl_urls[record.doc_id])
+                    _process_financial_xbrl(
+                        ctx, record, xbrl_urls[record.doc_id],
+                        master_id=master_id, master_resolved=master_resolved,
+                    )
                 except Exception as exc:
                     # ③ 反映失敗は欠損として記録 (④ は成立済み。ダミーで埋めない §3-1)
                     ctx.add_failure(record.doc_id, f"短信XBRL→③失敗: {exc}")
+
+
+def _resolve_master(
+    ctx: JobContext, code: str | None, master_map: dict[str, str], master_map_ok: bool, doc_id: str
+) -> tuple[str | None, bool]:
+    """① relation の (page_id, resolved) を返す。事前マップ優先、未取得時は per-record 検索。
+
+    resolved=True は「マップで確定(値が None でも『① に該当なし』として確定)」を意味し、
+    apply_disclosure_lifecycle/_process_financial_xbrl が per-record 検索に戻らないための旗。
+    """
+    if not code:
+        return None, master_map_ok
+    if master_map_ok:
+        return master_map.get(code), True
+    try:
+        return upsert.find_stock_master_page(ctx.client, ctx.settings, code), False
+    except Exception as exc:  # noqa: BLE001 - relation 解決失敗は本体を止めない
+        logger.warning(
+            "① relation 解決失敗 (master_id=None で続行 doc_id=%s): %s", doc_id, exc
+        )
+        return None, False
 
 
 def main(argv: list[str] | None = None, *, env: dict[str, str] | None = None) -> int:
