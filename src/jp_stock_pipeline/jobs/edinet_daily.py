@@ -8,14 +8,22 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import logging
+import os
+import re
+import stat
+import tempfile
+import zipfile
 from datetime import date, datetime
+from pathlib import Path
 
 from ..collectors import edinet
 from ..collectors.edinet_codelist import normalize_sec_code
 from ..convert import json_to_parquet, xbrl_to_csv
 from ..http import FetchError
-from ..licensing import source_license
+from ..licensing import LicenseTag, source_license
 from ..models import ConvertStatus, Provenance, RawArtifact, Source, now_jst
 from ..notion import file_upload, upsert
 from ..transform import normalize
@@ -27,6 +35,70 @@ JOB_NAME = "edinet_daily"
 
 # 財務数値の抽出対象 (§4): 有報 120 / 訂正有報 130 / 四半期 140 / 半期 160
 FINANCIAL_DOC_TYPES = frozenset({"120", "130", "140", "160"})
+
+
+def _copy_kabumcp_csv(artifact: RawArtifact, doc_id: str, cache_dir: Path) -> str:
+    """永続化済み type5 原本を既存 kabuMCP パーサへ渡す。既存ファイルは上書きしない。"""
+    if not re.fullmatch(r"S[0-9A-Z]{7}", doc_id):
+        raise ValueError("不正な EDINET docID")
+    if (
+        artifact.source != Source.EDINET
+        or artifact.datatype != "csv"
+        or artifact.license_tag != LicenseTag.COMMERCIAL_OK
+    ):
+        raise ValueError("EDINET / csv / commercial-ok の原本のみ連携可能")
+    if artifact.url != f"{edinet.EDINET_API_BASE}/documents/{doc_id}?type=5":
+        raise ValueError("原本 URL と docID / type=5 が一致しない")
+    data = artifact.local_path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != artifact.sha256:
+        raise ValueError("原本 SHA-256 不一致")
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        if not any(n.lower().endswith(".csv") for n in archive.namelist()):
+            raise ValueError("CSV を含まない ZIP")
+        if archive.testzip() is not None:
+            raise ValueError("ZIP CRC 不一致")
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target = cache_dir / f"{doc_id}.zip"
+    # 同じディレクトリの一時ファイルを hard-link で公開。rename/replace と異なり、
+    # 競合した既存ファイルを上書きしない。途中までの ZIP も読者へ見せない。
+    with tempfile.NamedTemporaryFile(dir=cache_dir, prefix=f".{doc_id}-", delete=False) as tmp:
+        temporary = Path(tmp.name)
+        try:
+            tmp.write(data)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            try:
+                os.link(temporary, target)
+            except FileExistsError:
+                # symlink/FIFO 等を追わず、通常ファイルだけ照合する。
+                flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                with os.fdopen(os.open(target, flags), "rb") as existing:
+                    if not stat.S_ISREG(os.fstat(existing.fileno()).st_mode):
+                        raise ValueError("既存キャッシュが通常ファイルでない")
+                    if hashlib.file_digest(existing, "sha256").hexdigest() != artifact.sha256:
+                        raise ValueError("同じ docID の既存キャッシュと内容が異なる（上書き拒否）")
+                return "unchanged"
+            return "created"
+        finally:
+            temporary.unlink()
+
+
+def _export_kabumcp_cache(ctx: JobContext, artifact: RawArtifact, doc_id: str) -> None:
+    cache_dir = getattr(ctx.args, "kabumcp_cache_dir", None)
+    if cache_dir is None:
+        return
+    if ctx.settings.dry_run:
+        logger.info("kabuMCP cache dry-run: 書込スキップ doc_id=%s", doc_id)
+        return
+    if artifact.datatype == "xbrl":
+        ctx.add_failure(f"kabumcp:{doc_id}", "type1 fallback は連携対象外のためスキップ")
+        return
+    try:
+        result = _copy_kabumcp_csv(artifact, doc_id, cache_dir)
+        logger.info("kabuMCP cache %s: doc_id=%s", result, doc_id)
+    except Exception as exc:  # noqa: BLE001 - 保存済みの Notion/ローカルは巻き戻さない
+        ctx.add_failure(f"kabumcp:{doc_id}", f"キャッシュ連携失敗: {exc}")
 
 
 def _fetch_financial_tidy(
@@ -179,6 +251,9 @@ def _process_document(
         ):
             raise RuntimeError(f"③ を Notion/ローカル両系統に書けず: {doc_id}")
 
+    if tidy_artifact is not None:
+        _export_kabumcp_cache(ctx, tidy_artifact, doc_id)
+
 
 def execute(ctx: JobContext) -> None:
     target_date = ctx.args.date or now_jst().date()
@@ -228,6 +303,10 @@ def _load_map_guarded(loader, label: str) -> tuple[dict[str, str], bool]:
 
 def main(argv: list[str] | None = None, *, env: dict[str, str] | None = None) -> int:
     parser = build_parser("EDINET当日書類 → ③④⑤ (毎営業日21:00 JST)")
+    parser.add_argument(
+        "--kabumcp-cache-dir", type=Path, default=None,
+        help="永続化済み type5 CSV ZIP を kabuMCP 用キャッシュへ追加（既定OFF・上書き禁止）",
+    )
     return run_job(JOB_NAME, execute, argv, parser=parser, env=env)
 
 

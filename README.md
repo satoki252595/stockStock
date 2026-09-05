@@ -88,6 +88,36 @@ curl -H "X-API-Key: $LOCAL_API_KEY" "http://192.168.1.50:8000/facts/search?q=為
 バックアップ・Tailscale 接続・GitHub Secrets 配線の手順は
 **[deploy/README.md](deploy/README.md)** にまとめてある。
 
+## kabuMCPへの原本引渡し（2026-09-05追加・任意）
+
+既存収集後のEDINET type5 CSV ZIPを、kabuMCPの既存パーサが読める `{docID}.zip` でローカルキャッシュへ追加する。Notionの財務要約をもう一度取り出したり、新しいAI・DB・R2・常駐サーバを作る必要はない。
+
+```bash
+# 既存全社分を保持した累積キャッシュを指定する。通常の収集ジョブのオプション。
+nix develop -c uv run python -m jp_stock_pipeline.jobs.edinet_daily \
+  --kabumcp-cache-dir /絶対パス/累積EDINETキャッシュ
+```
+
+- 指定なしは従来動作。`--dry-run` は引渡し先にも書き込まない。
+- 原本が既存Notion／ローカルの少なくとも一方に保存された後だけ引き渡す。
+- EDINET・type5 CSV・`commercial-ok`、docID／原本URL／SHA-256／ZIPを検査。同一原本は変更せず、異内容の既存ファイル・symlink・不正入力は拒否する。
+- 非上書きのatomic追加で途中のファイルを見せない。出力はローカルの通常ファイルシステム（hard-link対応）を使う。
+- type1 XBRL fallbackはこの連携では未対応。連携失敗・type1スキップはジョブログの部分失敗に計上し、保存済みNotion／ローカルデータは維持する。既存runnerは部分失敗でも終了コード0なので、ジョブログと `kabumcp:` の失敗項目も確認する。
+- このオプションによる追加API呼出しはない。ただしコマンド本体の通常収集は実行される。検証目的で過去の日付を何度も再収集しない。
+- **日次の差分だけでkabuMCP全社データを再生成しない。** 既存全社分を含む累積キャッシュへ追加し、kabuMCPで索引→既存パーサ→golden／原典照合→既存Cloudflareデプロイの順に進める。
+- GitHub ActionsからCloudflareへの常設転送・自動デプロイは今回未配線。既存workflowの頻度・費用・Secrets、Notionの内容は変更していない。
+- TDnet・株価はこの経路に流さない。内部タグは商用許諾の証明ではなく、既存trackAにもTDnet財務数値が含まれるため丸ごと公開禁止。TDnetの商用配信条件と株価ベンダー契約を先に確認する。[JPX利用条件](https://www.jpx.co.jp/term-of-use/)
+
+### 更新記録
+
+| 日付・時間帯 | 更新者／依頼者 | 目的・変更内容 |
+|---|---|---|
+| 2026-09-05 JST | Codex（OpenAI）／satoki252595の依頼 | kabuMCPへの低コスト原本再利用。edinet_dailyに任意のキャッシュ引渡しと安全性テストを追加。通常収集・Notion・workflow・公開範囲は維持。 |
+
+正確な更新時刻・更新者・差分は `git log --format=fuller --stat` を参照。コミット本文にも目的と依頼者を残す。
+
+検証記録: 新規キャッシュ連携テスト11件合格。INPEXの実EDINET原本 `S100XU9L` をkabuMCPへ渡して再解析し、現行JSONの19指標と完全一致。テストと実原本のコピーだけを行い、収集API再実行・Notion更新・本番配信は行っていない。
+
 ## 不変条件
 
 - 取得単位ごとに原本を ⑤原本ファイルDB へ必ず保存（失敗時は構造化データを書かない）
