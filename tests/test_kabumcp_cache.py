@@ -98,7 +98,8 @@ def test_bad_zip_and_optional_modes(tmp_path, artifact, caplog):
 
 
 @pytest.mark.parametrize("raw_saved", [True, False])
-def test_cache_only_after_persistence(tmp_path, artifact, monkeypatch, raw_saved):
+@pytest.mark.parametrize("doc_type", ["120", "130", "140", "150", "160", "170"])
+def test_cache_only_after_persistence(tmp_path, artifact, monkeypatch, raw_saved, doc_type):
     events = []
     ctx = context(tmp_path / "cache")
     monkeypatch.setattr(job, "_fetch_financial_tidy", lambda *a: (artifact, None))
@@ -119,7 +120,8 @@ def test_cache_only_after_persistence(tmp_path, artifact, monkeypatch, raw_saved
     ))
     monkeypatch.setattr(ctx, "persist", lambda *a, **kw: events.append("disclosure") or True)
     monkeypatch.setattr(job, "_export_kabumcp_cache", lambda *a: events.append("cache"))
-    doc = {"docID": DOC_ID, "docTypeCode": "120", "secCode": "72030"}
+    doc = {"docID": DOC_ID, "docTypeCode": doc_type, "secCode": "72030"}
+    assert job.edinet.is_target_document(doc)
     if raw_saved:
         job._process_document(ctx, doc, "list-page", master_map_ok=True)
         assert events == ["raw", "disclosure", "cache"]
@@ -127,3 +129,47 @@ def test_cache_only_after_persistence(tmp_path, artifact, monkeypatch, raw_saved
         with pytest.raises(RawUploadError):
             job._process_document(ctx, doc, "list-page", master_map_ok=True)
         assert events == ["raw"]
+
+
+@pytest.mark.parametrize("doc_type", ["150", "170"])
+@pytest.mark.parametrize("fallback", [False, True])
+def test_amended_interim_reports_use_financial_pipeline(
+    tmp_path, artifact, monkeypatch, doc_type, fallback,
+):
+    """訂正報告も type5→type1、⑤原本→③財務→任意キャッシュの既存経路を通る。"""
+    ctx = context(tmp_path / "cache")
+    fetch_types, persisted = [], []
+    selected = replace(artifact, datatype="xbrl") if fallback else artifact
+    tidy, financial = object(), object()  # 制御フロー用 sentinel。財務値は作らない。
+
+    def fetch_document(settings, doc_id, fetch_type, **kw):
+        fetch_types.append(fetch_type)
+        if fetch_type == 2 or (fetch_type == 5 and fallback):
+            raise FetchError("unavailable")
+        return selected
+
+    def normalize(tidy_arg, code, provenance, **kw):
+        assert tidy_arg is tidy
+        assert provenance.source == Source.EDINET
+        assert provenance.license_tag == LicenseTag.COMMERCIAL_OK
+        assert kw["disclosure_type"] is None  # 訂正有報のように本決算へ固定しない
+        return financial
+
+    monkeypatch.setattr(job.edinet, "fetch_document", fetch_document)
+    monkeypatch.setattr(job.xbrl_to_csv, "edinet_csv_zip_to_tidy", lambda *a: tidy)
+    monkeypatch.setattr(job.xbrl_to_csv, "xbrl_zip_to_tidy", lambda *a: tidy)
+    monkeypatch.setattr(job.xbrl_to_csv, "write_tidy", lambda *a: None)
+    monkeypatch.setattr(ctx, "upload_raw", lambda *a: persisted.append("raw") or "raw-page")
+    monkeypatch.setattr(ctx, "mirror_xbrl_facts", lambda *a: None)
+    monkeypatch.setattr(ctx, "persist", lambda rec, *a, **kw: persisted.append(rec) or True)
+    monkeypatch.setattr(job.normalize, "tidy_to_financial_record", normalize)
+    doc = {
+        "docID": DOC_ID, "docTypeCode": doc_type, "secCode": "72030",
+        "submitDateTime": "2026-09-04 09:00",
+    }
+    job._process_document(ctx, doc, "list-page", master_map_ok=True)
+    assert fetch_types == ([5, 1, 2] if fallback else [5, 2])
+    assert persisted[0] == "raw" and persisted[-1] is financial
+    assert persisted[1].doc_type == "四半期報告"  # Notionの既存選択肢は維持
+    assert ctx.failed == int(fallback)  # type1 は保存済みでもキャッシュ未対応を隠さない
+    assert (tmp_path / "cache" / f"{DOC_ID}.zip").exists() is not fallback
