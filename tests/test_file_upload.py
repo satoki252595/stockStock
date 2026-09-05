@@ -295,6 +295,34 @@ class TestMultipart:
 
 
 class TestRawUploadError:
+    def test_ambiguous_page_creation_degrades_without_second_post(
+        self, dry_client, tmp_path, monkeypatch
+    ):
+        """作成済みか不明でも再POSTせず、既存 RawUploadError 契約で原本を保全する。"""
+        from unittest.mock import Mock
+
+        from notion_client.errors import RequestTimeoutError
+
+        from jp_stock_pipeline.notion.client import NotionClient
+
+        settings = make_settings()
+        artifact = make_artifact(tmp_path)
+        client = NotionClient("test-token-not-a-credential")
+        create = Mock(side_effect=RequestTimeoutError())
+        monkeypatch.setattr(client._client.pages, "create", create)
+        monkeypatch.setattr(client._throttle, "wait", lambda: None)
+        monkeypatch.setattr(client, "query_database", lambda *a, **kw: [])
+        monkeypatch.setattr(client, "raw_api", dry_client.raw_api)
+        try:
+            with pytest.raises(file_upload.RawUploadError, match="結果不明"):
+                file_upload.upload_raw_artifact(client, settings, artifact)
+            assert create.call_count == 1
+            assert artifact.local_path.read_bytes() == b"raw-bytes"
+            assert artifact.notion_page_id is None
+        finally:
+            client._client.close()
+            client._session.close()
+
     def test_api_failure_raises_raw_upload_error(self, dry_client, tmp_path, monkeypatch):
         """失敗時は RawUploadError (呼び出し側は構造化書き込みを中止 §8.1-4)。"""
         settings = make_settings()
