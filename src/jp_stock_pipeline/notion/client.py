@@ -1,7 +1,8 @@
 """スロットル付き Notion API クライアント (DESIGN.md §6.1, §12-4)。
 
 - 全リクエストを設定値 (既定 2.5req/s) でスロットル
-- 429 / 5xx は Retry-After を尊重した指数バックオフで再試行
+- 429 / 529 は再試行。5xx / 通信断は安全に再送できる読み取り・上書きだけ再試行
+- 作成・追記は結果不明なら再送せず失敗を返す（成功後の応答欠落による重複を防ぐ）
 - dry-run (§3-6): 本番DBへ一切書き込まない。書き込み操作は self.ops に記録し
   合成ID (`dry-run-*`) を返す。読み取りはトークンがあれば実行、無ければ空を返す
 - 標準エンドポイントは notion-client、File Upload 等の未対応エンドポイントは
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -32,7 +34,7 @@ MAX_RETRIES = 6
 
 
 class NotionRequestError(RuntimeError):
-    """リトライ後も失敗した Notion API 呼び出し。"""
+    """Notion API の失敗。作成結果不明の場合も、再送せずこの例外を返す。"""
 
 
 class _RetryableRawError(Exception):
@@ -104,31 +106,38 @@ class NotionClient:
     # 低レベル: スロットル+バックオフ付き呼び出し
     # ------------------------------------------------------------------
 
-    def _call(self, fn, /, **kwargs) -> Any:
+    def _call(self, fn, /, *, _retry_safe: bool = True, **kwargs) -> Any:
+        # 公式方針: 429/529 は再試行、5xx は冪等な操作のみ。
+        # https://developers.notion.com/reference/request-limits
+        # POST query/search は読取だが、PATCH children.append は非冪等なので
+        # HTTPメソッドだけでは判定しない。呼び出し側が操作の性質を指定する。
         last_exc: Exception | None = None
         for attempt in range(MAX_RETRIES):
             self._throttle.wait()
             try:
                 return fn(**kwargs)
-            except APIResponseError as exc:
+            except (
+                APIResponseError, HTTPResponseError, _RetryableRawError,
+                requests.RequestException, RequestTimeoutError, httpx.HTTPError,
+            ) as exc:
                 status = getattr(exc, "status", None) or 0
-                if exc.code == "rate_limited" or status >= 500:
-                    delay = _retry_after_seconds(exc, attempt)
-                    logger.warning("Notion %s (attempt %d) — %.1fs 待機", exc.code, attempt, delay)
-                    time.sleep(delay)
-                    last_exc = exc
-                    continue
-                raise
-            except (HTTPResponseError, _RetryableRawError) as exc:
-                delay = _retry_after_seconds(exc, attempt)
-                logger.warning("Notion HTTP error (attempt %d) — %.1fs 待機: %s", attempt, delay, exc)
+                rate_limited = status in (429, 529) or getattr(exc, "code", None) == "rate_limited"
+                if isinstance(exc, APIResponseError) and not (rate_limited or status >= 500):
+                    raise
+                if not _retry_safe and not rate_limited:
+                    raise NotionRequestError(
+                        "Notion 書き込みの結果不明。重複防止のため自動再送しません。"
+                        "対象が既に作成・追記されていないか確認してから再実行してください。"
+                        f" ({type(exc).__name__}, HTTP {status or '不明'})"
+                    ) from exc
+                delay = (
+                    _retry_after_seconds(exc, attempt)
+                    if isinstance(exc, (HTTPResponseError, _RetryableRawError))
+                    else min(2.0**attempt, 60.0)
+                )
+                logger.warning("Notion %s (attempt %d) — %.1fs 待機", type(exc).__name__, attempt, delay)
                 time.sleep(delay)
                 last_exc = exc
-                continue
-            except (requests.RequestException, RequestTimeoutError, httpx.HTTPError) as exc:
-                time.sleep(min(2.0**attempt, 60.0))
-                last_exc = exc
-                continue
         raise NotionRequestError(f"Notion API リトライ枯渇: {last_exc}") from last_exc
 
     def raw_api(
@@ -173,7 +182,16 @@ class NotionClient:
                 raise NotionRequestError(f"Notion API {resp.status_code}: {resp.text[:500]}")
             return resp.json()
 
-        return self._call(_do)
+        # raw POST の読取だけを列挙する。未知のPOST・File Upload作成/送信/完了は
+        # 冪等性を仮定せず、応答不明なら上位の RawUploadError / 部分失敗経路へ返す。
+        endpoint = path.strip("/")
+        retry_safe = method.upper() == "GET" or (
+            method.upper() == "POST" and (
+                endpoint == "search"
+                or re.fullmatch(r"(?:databases|data_sources)/[^/]+/query", endpoint) is not None
+            )
+        )
+        return self._call(_do, _retry_safe=retry_safe)
 
     def _record(self, op: str, payload: dict[str, Any]) -> dict:
         self.ops.append(RecordedOp(op=op, payload=payload))
@@ -260,7 +278,7 @@ class NotionClient:
             payload["icon"] = icon
         if self.dry_run:
             return self._record("create_page", payload)
-        return self._call(self._client.pages.create, **payload)
+        return self._call(self._client.pages.create, _retry_safe=False, **payload)
 
     def update_page(self, page_id: str, properties: dict) -> dict:
         if self.dry_run:
@@ -287,7 +305,7 @@ class NotionClient:
             payload["description"] = [{"type": "text", "text": {"content": description}}]
         if self.dry_run:
             return self._record("create_database", payload)
-        return self._call(self._client.databases.create, **payload)
+        return self._call(self._client.databases.create, _retry_safe=False, **payload)
 
     def update_database(
         self, database_id: str, *, properties: dict | None = None
@@ -303,5 +321,6 @@ class NotionClient:
         if self.dry_run:
             return self._record("append_block_children", {"block_id": block_id, "children": children})
         return self._call(
-            self._client.blocks.children.append, block_id=block_id, children=children
+            self._client.blocks.children.append, _retry_safe=False,
+            block_id=block_id, children=children
         )
