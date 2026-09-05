@@ -113,10 +113,13 @@ nix develop -c uv run python -m jp_stock_pipeline.jobs.edinet_daily \
 | 日付・時間帯 | 更新者／依頼者 | 目的・変更内容 |
 |---|---|---|
 | 2026-09-05 JST | Codex（OpenAI）／satoki252595の依頼 | kabuMCPへの低コスト原本再利用。edinet_dailyに任意のキャッシュ引渡しと安全性テストを追加。通常収集・Notion・workflow・公開範囲は維持。 |
+| 2026-09-05 12:15 JST | Codex（OpenAI）／satoki252595の依頼 | EDINETの期中報告を利用するため、一覧収集のみだった訂正四半期（150）・訂正半期（170）をCSV/XBRL財務抽出・任意kabuMCPキャッシュ引渡しにも追加。有報・四半期・半期と各訂正の計6種を既存経路で処理。Notion分類・TDnet・workflowは変更せず、実取得／Notion書込みは未実施。 |
 
 正確な更新時刻・更新者・差分は `git log --format=fuller --stat` を参照。コミット本文にも目的と依頼者を残す。
 
 検証記録: 新規キャッシュ連携テスト11件合格。INPEXの実EDINET原本 `S100XU9L` をkabuMCPへ渡して再解析し、現行JSONの19指標と完全一致。テストと実原本のコピーだけを行い、収集API再実行・Notion更新・本番配信は行っていない。
+
+期中訂正対応の検証: EDINET・ジョブ・キャッシュ関連59件合格、既存の実APIフィクスチャ未取得2件skip、変更ファイルのruff合格。6書類種別の永続化前引渡し禁止と、訂正四半期／訂正半期のtype5優先・type1 fallback・財務保存経路を確認。type1のkabuMCPキャッシュ未対応は引き続き部分失敗として記録する。
 
 ## 不変条件
 

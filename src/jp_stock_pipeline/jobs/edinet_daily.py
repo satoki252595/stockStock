@@ -33,8 +33,16 @@ logger = logging.getLogger(__name__)
 
 JOB_NAME = "edinet_daily"
 
-# 財務数値の抽出対象 (§4): 有報 120 / 訂正有報 130 / 四半期 140 / 半期 160
-FINANCIAL_DOC_TYPES = frozenset({"120", "130", "140", "160"})
+# 財務数値の抽出対象 (§4): 有報・四半期・半期と、それぞれの訂正報告書。
+# 一覧収集だけでなく CSV/XBRL 抽出・kabuMCP 原本引渡しまで同じ経路へ通す。
+FINANCIAL_DOC_TYPES = frozenset({
+    edinet.DOC_TYPE_ANNUAL_REPORT,
+    edinet.DOC_TYPE_ANNUAL_REPORT_AMEND,
+    edinet.DOC_TYPE_QUARTERLY_REPORT,
+    edinet.DOC_TYPE_QUARTERLY_REPORT_AMEND,
+    edinet.DOC_TYPE_SEMIANNUAL_REPORT,
+    edinet.DOC_TYPE_SEMIANNUAL_REPORT_AMEND,
+})
 
 
 def _copy_kabumcp_csv(artifact: RawArtifact, doc_id: str, cache_dir: Path) -> str:
