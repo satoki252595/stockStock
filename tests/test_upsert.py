@@ -144,6 +144,14 @@ class TestStockMasterPayload:
         assert props2[S.MASTER_PROP_STATUS]["select"]["name"] == "上場廃止"
         assert props2[S.MASTER_PROP_DELISTING_DATE]["date"]["start"] == "2026-07-01"
 
+    def test_history_pointer_fields_not_in_master_payload(self):
+        """履歴ポインタは master_sync の完全置換で消さない。"""
+        rec = StockMasterRecord(code="7203", name="トヨタ自動車", provenance=prov())
+        props = upsert.stock_master_properties(rec)
+        assert S.MASTER_PROP_HISTORY_DB_ID not in props
+        assert S.MASTER_PROP_HISTORY_SHARD not in props
+        assert S.MASTER_PROP_HISTORY_ROW_COUNT not in props
+
 
 class TestPriceTechnicalPayload:
     def test_missing_indicators_explicit_clear(self):

@@ -1,4 +1,4 @@
-"""prices_daily: yfinance一括 → テクニカル計算 → ② upsert (DESIGN.md §8.2, P2)。
+"""prices_daily: yfinance一括 → テクニカル計算 → ② upsert + ①配下履歴追記 (DESIGN.md §8.2, P2)。
 
 - yfinance 失敗銘柄は stooq の実データへフォールバック (§3-2)。
   両方失敗した銘柄は欠損として failed_codes に記録（ダミー埋め禁止 §3-1）
@@ -25,7 +25,7 @@ from ..models import (
     Source,
     now_jst,
 )
-from ..notion import file_upload, upsert
+from ..notion import file_upload, price_history, upsert
 from ..notion import schema as S
 from ..transform import technicals
 from .runner import JobContext, apply_limit, build_parser, main_exit, parse_codes_arg, run_job
@@ -176,10 +176,15 @@ def execute(ctx: JobContext) -> None:
     # 5-6. テクニカル計算 → ② upsert。①の relation は一括マップで解決 (§8.3 レート対策)。
     # relation マップの Notion read 失敗は degrade（master_id=None で本体は書く）。
     # これにより Notion 断でもローカル PG へ ② を書き切れる（双方向フェールセーフ §3-2）。
+    master_state: dict[str, price_history.StockMasterState] = {}
     try:
-        master_map = upsert.load_stock_master_map(ctx.client, ctx.settings)
+        if not getattr(ctx.args, "skip_history", False):
+            price_history.ensure_master_history_properties(ctx.client, ctx.settings)
+        master_state = price_history.load_stock_master_state(ctx.client, ctx.settings)
+        master_map = {code: st.page_id for code, st in master_state.items()}
     except Exception as exc:  # noqa: BLE001 - relation read 失敗は本体を止めない
         master_map = {}
+        master_state = {}
         logger.warning(
             "① relation マップ取得失敗 → master_id=None で ② を継続 (§3-2): %s", exc
         )
@@ -218,7 +223,7 @@ def execute(ctx: JobContext) -> None:
             continue
         # Notion とローカルへ独立に書く（双方向フェールセーフ）。
         # ローカルは (code, data_date) で時系列蓄積する。
-        if ctx.persist(
+        if not ctx.persist(
             record,
             lambda rec=record, mid=master_map.get(code), extra=extra_raw, pid=price_map.get(
                 code
@@ -235,15 +240,33 @@ def execute(ctx: JobContext) -> None:
             ),
             label=f"②{code}",
         ):
-            ctx.add_success()
-        else:
             ctx.add_failure(code, "②: Notion/ローカル両系統に書けず")
+            continue
+        if not getattr(ctx.args, "skip_history", False):
+            state = master_state.get(code)
+            if state is None:
+                logger.warning("① なしのため履歴子DBをスキップ: %s", code)
+            else:
+                try:
+                    _, new_state, _ = price_history.upsert_price_history(
+                        ctx.client, ctx.settings, record, state, extra_raw
+                    )
+                    master_state[code] = new_state
+                except Exception as exc:  # noqa: BLE001 - ②は残し履歴失敗を記録
+                    ctx.add_failure(code, f"履歴子DBへ書けず: {exc}")
+                    continue
+        ctx.add_success()
 
 
 def main(argv: list[str] | None = None, *, env: dict[str, str] | None = None) -> int:
     parser = build_parser("株価+テクニカル → ② (毎営業日19:30 JST)")
     parser.add_argument(
         "--skip-valuation", action="store_true", help="PER/PBR等の取得を省略 (高速化)"
+    )
+    parser.add_argument(
+        "--skip-history",
+        action="store_true",
+        help="①配下の株価テクニカル履歴子DBへの追記を省略",
     )
     return run_job(JOB_NAME, execute, argv, parser=parser, env=env)
 

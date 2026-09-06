@@ -78,6 +78,14 @@ MASTER_PROP_STATUS = "状態"  # select: 上場/監理/整理/上場廃止
 MASTER_PROP_LISTING_DATE = "上場日"
 MASTER_PROP_DELISTING_DATE = "上場廃止日"
 MASTER_PROP_LAST_UPDATED = "最終データ更新日"
+# ① 配下の株価テクニカル履歴子DBへのポインタ。master_sync は触らない
+# （prices_daily が所有。完全置換 payload に含めない）。
+MASTER_PROP_HISTORY_DB_ID = "現行履歴DB ID"
+MASTER_PROP_HISTORY_SHARD = "履歴シャード番号"
+MASTER_PROP_HISTORY_ROW_COUNT = "履歴行数"
+HISTORY_DB_TITLE = "株価テクニカル履歴"
+HISTORY_PROP_DATE_TITLE = "基準日"  # 履歴子DBの title。キー=データ基準日
+HISTORY_SHARD_THRESHOLD = 8000  # API 1クエリ1万件の手前で次DBへ
 
 # ② 株価テクニカル (§6.4)
 PRICE_PROP_CODE = "銘柄コード"  # title
@@ -238,6 +246,20 @@ def _relation_schema(database_id: str) -> dict:
     return {"relation": {"database_id": database_id, "type": "dual_property", "dual_property": {}}}
 
 
+def _relation_schema_one_way(database_id: str) -> dict:
+    """単方向 relation。銘柄ごとの履歴子DBから⑤へ張る。
+
+    dual_property にすると ⑤ 側に銘柄数ぶんの逆向きプロパティが付くため使わない。
+    """
+    return {
+        "relation": {
+            "database_id": database_id,
+            "type": "single_property",
+            "single_property": {},
+        }
+    }
+
+
 _TITLE = {"title": {}}
 _RICH_TEXT = {"rich_text": {}}
 _NUMBER = {"number": {}}
@@ -299,13 +321,24 @@ def stock_master_schema(raw_db_id: str) -> dict:
         MASTER_PROP_LISTING_DATE: _DATE,
         MASTER_PROP_DELISTING_DATE: _DATE,
         MASTER_PROP_LAST_UPDATED: _DATE,
+        MASTER_PROP_HISTORY_DB_ID: _RICH_TEXT,
+        MASTER_PROP_HISTORY_SHARD: _NUMBER,
+        MASTER_PROP_HISTORY_ROW_COUNT: _NUMBER,
         **common_properties_schema(raw_db_id),
     }
 
 
-def prices_schema(master_db_id: str, raw_db_id: str) -> dict:
-    """② 株価テクニカル (§6.4)。テクニカル列は計算値 (§3-4 加工の明示はカタログに記載)。"""
-    numeric = (
+def history_pointer_properties_schema() -> dict:
+    """① に後付けする履歴ポインタ列。既存DBへ不足分だけ追加する。"""
+    return {
+        MASTER_PROP_HISTORY_DB_ID: _RICH_TEXT,
+        MASTER_PROP_HISTORY_SHARD: _NUMBER,
+        MASTER_PROP_HISTORY_ROW_COUNT: _NUMBER,
+    }
+
+
+def _price_numeric_prop_names() -> tuple[str, ...]:
+    return (
         PRICE_PROP_OPEN, PRICE_PROP_HIGH, PRICE_PROP_LOW, PRICE_PROP_CLOSE,
         PRICE_PROP_PREV_PCT, PRICE_PROP_VOLUME, PRICE_PROP_TURNOVER, PRICE_PROP_MARKET_CAP,
         PRICE_PROP_W52_HIGH, PRICE_PROP_W52_LOW,
@@ -315,11 +348,29 @@ def prices_schema(master_db_id: str, raw_db_id: str) -> dict:
         PRICE_PROP_BB_UPPER, PRICE_PROP_BB_LOWER, PRICE_PROP_ATR14, PRICE_PROP_VOL_RATIO25,
         PRICE_PROP_PER, PRICE_PROP_PBR, PRICE_PROP_DIV_YIELD,
     )
+
+
+def prices_schema(master_db_id: str, raw_db_id: str) -> dict:
+    """② 株価テクニカル (§6.4)。テクニカル列は計算値 (§3-4 加工の明示はカタログに記載)。"""
     return {
         PRICE_PROP_CODE: _TITLE,
-        **{name: _NUMBER for name in numeric},
+        **{name: _NUMBER for name in _price_numeric_prop_names()},
         PROP_MASTER_RELATION: _relation_schema(master_db_id),
         **common_properties_schema(raw_db_id),
+    }
+
+
+def history_prices_schema(raw_db_id: str) -> dict:
+    """①銘柄ページ配下の株価テクニカル履歴子DB。1行=1営業日。
+
+    原本 relation は single_property（⑤に銘柄数ぶんの逆向き列を作らない）。
+    銘柄マスタ relation は不要（親ページが①行そのもの）。
+    """
+    return {
+        HISTORY_PROP_DATE_TITLE: _TITLE,
+        **{name: _NUMBER for name in _price_numeric_prop_names()},
+        **common_properties_schema(None, include_raw_relation=False, include_quality=True),
+        PROP_RAW_RELATION: _relation_schema_one_way(raw_db_id),
     }
 
 
@@ -554,6 +605,8 @@ _CATALOG_DICTIONARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "状態 (select: 上場/監理/整理/上場廃止) / 上場日 (date) / 上場廃止日 (date)"
             "。一次開示由来 (tdnet_hourly が所有) で listed と二重所有を回避 (§3-7)",
             "最終データ更新日 (date)",
+            "現行履歴DB ID (text) / 履歴シャード番号 (number) / 履歴行数 (number): "
+            "①ページ配下の株価テクニカル履歴子DBへのポインタ (prices_daily が所有)",
             "②③④⑤への relation は dual_property により自動生成 (銘柄ページから全情報を辿れる)",
         ),
     ),
@@ -561,7 +614,9 @@ _CATALOG_DICTIONARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "prices",
         "ソース: yfinance/stooq+計算 (personal-only) / 更新頻度: 毎営業日19:30 (prices_daily)。"
         "土曜は reconcile_weekly が stooq と終値突合しデータ品質=要確認を更新 (値は書換えない §3-5)。"
-        "最新スナップショットのみ。全履歴は⑥のParquet/CSVを利用",
+        "②は最新スナップショット。日次の計算済みテクニカルとバリュエーションは"
+        "①銘柄ページ配下の「株価テクニカル履歴」子DBへ追記 (8,000行で次シャード)。"
+        "横断の全履歴OHLCVは⑥のParquet/CSVを利用",
         (
             "銘柄コード (title)",
             "始値/高値/安値/終値 (number, 円)",
@@ -671,6 +726,7 @@ def catalog_blocks(db_ids: dict[str, str]) -> list[dict]:
         _heading(2, "利用者別クイックスタート (§7)"),
         _heading(3, "投資家 (見る人)"),
         _bullet("①銘柄マスタの銘柄ページを開くと、株価・財務・開示・原本がリレーションで全部辿れます"),
+        _bullet("同ページ配下の「株価テクニカル履歴」に、その銘柄の営業日ごとのテクニカルとバリュエーションが残ります"),
         _bullet("推奨ビュー (高ROEランキング/業種別/直近開示/決算カレンダー) でスクリーニングできます"),
         _heading(3, "データサイエンティスト"),
         _bullet("⑥時系列エクスポートDBから全銘柄×全期間の Parquet (第一推奨) / CSV を直接ダウンロード"),

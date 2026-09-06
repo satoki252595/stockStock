@@ -1,4 +1,5 @@
-# 毎営業日 19:30 JST (§8.3 試算52分) (DESIGN.md §8.2)。cron は UTC 表記
+# 毎営業日 19:30 JST (DESIGN.md §8.2)。cron は UTC 表記。
+# 初回は銘柄ごとの履歴子DB作成が乗るため 210 分。
 name: prices_daily
 
 on:
@@ -16,7 +17,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 210
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
