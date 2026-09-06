@@ -385,6 +385,49 @@ class TestPricesDaily:
         # master_id 解決不能でも ② は書かれる（relation 空で継続）
         assert len(_ops_with_prop(client, S.PRICE_PROP_RSI14)) == 1
 
+    def test_history_child_db_appended_when_master_exists(
+        self, monkeypatch, tmp_path, captured_clients
+    ):
+        """① がある銘柄は履歴子DBを作り、同日スナップショットを追記する。"""
+        from jp_stock_pipeline.notion import price_history
+
+        csv_bytes = fixture_path("transform/yfinance_7203T_daily.csv").read_bytes()
+        df = pd.read_csv(fixture_path("transform/yfinance_7203T_daily.csv"))
+
+        def fake_batch(settings, codes, period="2y", **kwargs):
+            artifact = save_raw(
+                csv_bytes, source=Source.YFINANCE, datatype="daily_prices_batch",
+                scope="ALL", data_date=date(2026, 6, 10), url="fixture://prices/7203",
+                ext="csv", license_tag=source_license(Source.YFINANCE),
+                base_dir=settings.raw_data_dir,
+            )
+            return artifact, {"7203": df}, []
+
+        monkeypatch.setattr(yfinance_prices, "fetch_daily_batch", fake_batch)
+        monkeypatch.setattr(
+            price_history,
+            "load_stock_master_state",
+            lambda client, settings: {
+                "7203": price_history.StockMasterState(page_id="master-7203")
+            },
+        )
+        code = prices_daily.main(
+            ["--dry-run", "--codes", "7203", "--skip-valuation"], env=_env(tmp_path)
+        )
+        assert code == 0
+        client = captured_clients[0]
+        db_ops = [op for op in client.ops if op.op == "create_database"]
+        assert len(db_ops) == 1
+        assert db_ops[0].payload["parent"]["page_id"] == "master-7203"
+        assert db_ops[0].payload["title"][0]["text"]["content"] == S.HISTORY_DB_TITLE
+        hist_rows = [
+            op for op in client.ops
+            if op.op == "create_page"
+            and S.HISTORY_PROP_DATE_TITLE in (op.payload.get("properties") or {})
+        ]
+        assert len(hist_rows) == 1
+        assert S.PRICE_PROP_RSI14 in hist_rows[0].payload["properties"]
+
 
 class TestTdnetHourly:
     def test_dry_run_with_fixture(self, monkeypatch, tmp_path, captured_clients):

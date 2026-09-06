@@ -160,6 +160,9 @@ class TestSpecificProperties:
         assert status_opts == list(schema.LISTING_STATUS_OPTIONS)
         assert "date" in props[schema.MASTER_PROP_LISTING_DATE]
         assert "date" in props[schema.MASTER_PROP_DELISTING_DATE]
+        assert "rich_text" in props[schema.MASTER_PROP_HISTORY_DB_ID]
+        assert "number" in props[schema.MASTER_PROP_HISTORY_SHARD]
+        assert "number" in props[schema.MASTER_PROP_HISTORY_ROW_COUNT]
 
     def test_prices_specific(self, ensured):
         client, _settings, _db_ids = ensured
@@ -327,3 +330,16 @@ class TestEnsureDatabaseIdempotency:
         updates = [op for op in dry_client.ops if op.op == "update_database"]
         assert len(updates) == 1
         assert set(updates[0].payload["properties"]) == {removed}
+
+
+class TestHistoryPricesSchema:
+    def test_title_is_date_and_raw_relation_is_one_way(self):
+        props = schema.history_prices_schema("db-raw")
+        assert props[schema.HISTORY_PROP_DATE_TITLE] == {"title": {}}
+        assert schema.PRICE_PROP_CODE not in props
+        assert schema.PROP_MASTER_RELATION not in props
+        assert schema.PRICE_PROP_RSI14 in props
+        assert schema.PROP_QUALITY in props
+        raw = props[schema.PROP_RAW_RELATION]["relation"]
+        assert raw["database_id"] == "db-raw"
+        assert raw["type"] == "single_property"

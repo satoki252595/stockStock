@@ -157,6 +157,8 @@ def stock_master_properties(
     (mark_master_absent_from_codelist) が所有する」フィールドであり、月次の
     codelist 同期 (master_sync) が上書き・消去してはならない (§ Phase3 二重所有の回避)。
     名称/市場/業種/EDINETコード/listed は codelist 所有なので常に完全置換する。
+    現行履歴DB ID / 履歴シャード番号 / 履歴行数 は prices_daily が所有し、
+    この payload に含めない（月次同期でポインタを消さない）。
     """
     props = {
         S.MASTER_PROP_NAME: title_prop(record.name),

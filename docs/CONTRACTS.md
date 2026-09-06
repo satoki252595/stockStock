@@ -81,4 +81,5 @@ notion.file_upload.upload_raw_artifact(client, settings, artifact: RawArtifact) 
 
 各ジョブ: `python -m jp_stock_pipeline.jobs.<name> [--dry-run] [--date YYYY-MM-DD] [--limit N]`
 フロー = Fetch → save_raw → convert → upload_raw_artifact → transform → upsert → ⑦ジョブログ記録 (§8.1)。
+`prices_daily` は ② upsert のあと、①銘柄ページ配下の株価テクニカル履歴子DBへ同じスナップショットを日付キーで追記する（8,000行で次シャード。`--skip-history` で省略可）。
 部分失敗は続行して最後に「一部失敗」でログ、原本アップロード失敗はその取得単位の構造化書き込みを中止。

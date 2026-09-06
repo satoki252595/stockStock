@@ -45,7 +45,7 @@ FastAPI(REST + APIキー)で逐次アクセスできる。`LOCAL_DB_HOST` を設
 - **lan**: `LOCAL_DB_LAN_HOST`(既定 localhost) + `sslmode=prefer`。同一 LAN で手動実行するとき `--db-target lan`。
 
 - **双方向フェールセーフ**。Notion とローカルへ独立に書き、**片方の保存が失敗してももう片方は必ず試み、どちらか一方にでも残ればその取得単位は成功扱い**（可用性最大化）。設計上の正本は Notion だが、ローカル API の可用性のため対称化。失敗は隠さず `notion_failed`/`mirror_failed` に計上し warning 記録、**両系統とも失敗した分だけ** ⑦ の failed に数える（§3-2）。原本 ⑤ のみ両系統失敗でその取得単位を中止（原本ゼロ＝トレーサビリティ喪失 §3-3）。
-- `②株価` はローカルでは `(code, data_date)` を主キーに**時系列を蓄積**（Notion は最新スナップショット）。
+- `②株価` はローカルでは `(code, data_date)` を主キーに**時系列を蓄積**。Notion の②は最新スナップショット。同じ値を①銘柄ページ配下の「株価テクニカル履歴」子DBへ営業日ごとに追記する（8,000行で次シャード）。
 - `②` は personal-only（yfinance/stooq）。**ローカル自己利用に限り、公開しないこと**。
 
 ```bash
@@ -122,6 +122,7 @@ nix develop -c uv run python -m jp_stock_pipeline.jobs.edinet_daily \
 
 | 日付・時間帯 | 更新者／依頼者 | 目的・変更内容 |
 |---|---|---|
+| 2026-09-07 JST | Cursor Grok 4.6／satoki252595の依頼 | ②の洗い替えで消える日次テクニカル・バリュエーションを、①銘柄ページ配下の履歴子DBへ毎営業日追記。8,000行で次シャード。③④⑤は子DB化しない。 |
 | 2026-09-05 JST | Codex（OpenAI）／satoki252595の依頼 | kabuMCPへの低コスト原本再利用。edinet_dailyに任意のキャッシュ引渡しと安全性テストを追加。通常収集・Notion・workflow・公開範囲は維持。 |
 | 2026-09-05 12:15 JST | Codex（OpenAI）／satoki252595の依頼 | EDINETの期中報告を利用するため、一覧収集のみだった訂正四半期（150）・訂正半期（170）をCSV/XBRL財務抽出・任意kabuMCPキャッシュ引渡しにも追加。有報・四半期・半期と各訂正の計6種を既存経路で処理。Notion分類・TDnet・workflowは変更せず、実取得／Notion書込みは未実施。 |
 | 2026-09-05 16時台 JST | Codex（OpenAI）／satoki252595の依頼 | 原本の並行上書きとNotion作成後の応答欠落による二重登録を防ぐため、原子的な非上書き保存・安全な再試行分類と障害注入テストを追加。通常のキー・財務内容・workflow設定は維持。AGENTS.mdにユーザー確定のnix／GitHub／専用フォルダ規則を継承。 |
