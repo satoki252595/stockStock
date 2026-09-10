@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -20,10 +20,22 @@ import pytest
 
 from conftest import fixture_path
 
-from jp_stock_pipeline.collectors import edinet_codelist, tdnet_yanoshin, yfinance_prices
-from jp_stock_pipeline.jobs import master_sync, prices_daily, reconcile_weekly, runner, tdnet_hourly
+from jp_stock_pipeline.collectors import (
+    edinet,
+    edinet_codelist,
+    tdnet_yanoshin,
+    yfinance_prices,
+)
+from jp_stock_pipeline.jobs import (
+    edinet_daily,
+    master_sync,
+    prices_daily,
+    reconcile_weekly,
+    runner,
+    tdnet_hourly,
+)
 from jp_stock_pipeline.licensing import LicenseTag, source_license
-from jp_stock_pipeline.models import Source
+from jp_stock_pipeline.models import JST, Source
 from jp_stock_pipeline.notion import file_upload
 from jp_stock_pipeline.notion import schema as S
 from jp_stock_pipeline.notion.client import NotionClient
@@ -520,6 +532,71 @@ class TestTdnetHourly:
         # 従来は開示ごとに ① find + ④ dedup = 2×n_disc query だった。
         assert per_db_queries  # 何らかの query はある（マップロード）
         assert max(per_db_queries.values()) == 1
+
+
+class TestEdinetDailyTargetDate:
+    """対象日は「起動時刻の JST 日付」ではなく cron の予定日に一致する。
+
+    2026-08-27〜09-10 に、GitHub Actions のスケジュール遅延 (実測 +3.5h〜+9.5h) で
+    起動が翌日 JST へずれ、まだ提出 0 件の「翌日」の一覧を 11 営業日連続で取得して
+    processed=0 / failed=0 の「成功」を出し続けた。その再発防止。
+    """
+
+    @pytest.mark.parametrize(
+        ("started", "expected"),
+        [
+            # 定刻 (12:00Z = 21:00 JST) 起動 → 当日が対象
+            (datetime(2026, 9, 10, 21, 0, tzinfo=JST), date(2026, 9, 10)),
+            # 実測 run 34496419755: 2026-09-10T15:33Z = 09-11 00:33 JST → 対象は 09-10
+            (datetime(2026, 9, 11, 0, 33, tzinfo=JST), date(2026, 9, 10)),
+            # 実測 run 33118324540: 2026-08-27T21:28Z = 08-28 06:28 JST → 対象は 08-27
+            (datetime(2026, 8, 28, 6, 28, tzinfo=JST), date(2026, 8, 27)),
+            # 予定時刻の直前 (遅延 24h 手前) までは前日へ吸収される
+            (datetime(2026, 9, 11, 20, 59, tzinfo=JST), date(2026, 9, 10)),
+        ],
+    )
+    def test_default_target_date_follows_schedule_not_start_time(self, started, expected):
+        assert edinet_daily.default_target_date(started) == expected
+
+    def test_empty_document_list_is_recorded_as_failure(
+        self, monkeypatch, tmp_path, captured_clients
+    ):
+        """一覧 0 件を「成功」で黙って終えない (§3-2 欠損を隠さない)。
+
+        取得単位が 1 件も成立していないので runner の規則どおり「失敗」= 終了コード 1。
+        国民の祝日は EDINET 提出が 0 件のため、この経路で毎回赤くなるのは想定内で、
+        エラー通知が未実装の現状ではこれが唯一の生存確認を兼ねる (README に明記)。
+        """
+        payload = b'{"metadata": {"status": "200"}, "results": []}'
+
+        def fake_list(settings, target_date):
+            artifact = save_raw(
+                payload,
+                source=Source.EDINET,
+                datatype="documents_list",
+                scope="ALL",
+                data_date=target_date,
+                url="fixture://edinet/empty",
+                ext="json",
+                license_tag=source_license(Source.EDINET),
+                base_dir=settings.raw_data_dir,
+            )
+            return artifact, []
+
+        monkeypatch.setattr(edinet, "list_documents", fake_list)
+        code = edinet_daily.main(
+            ["--dry-run", "--date", "2026-09-10"], env=_env(tmp_path)
+        )
+        assert code == 1  # 黙って success で終わらない（11営業日の無言欠測の再発防止）
+
+        client = captured_clients[0]
+        job_rows = _ops_with_prop(client, S.JOB_PROP_FAILED)
+        assert job_rows, "⑦ ジョブログ行が記録されていない"
+        props = job_rows[-1].payload["properties"]
+        assert props[S.JOB_PROP_FAILED]["number"] == 1
+        assert props[S.JOB_PROP_STATUS]["select"]["name"] == "失敗"
+        failed_codes = props[S.JOB_PROP_FAILED_CODES]["rich_text"][0]["text"]["content"]
+        assert "EDINET一覧_2026-09-10" in failed_codes
 
 
 class TestReconcileWeekly:
