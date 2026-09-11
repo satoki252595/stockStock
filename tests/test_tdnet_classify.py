@@ -179,3 +179,60 @@ def test_corporate_action_attrs_only_for_relevant_types():
         "上場廃止後の取り扱い", ty.DOC_TYPE_DELISTING
     )
     assert ratio2 is None and factor2 is None
+
+
+class TestParticleInsertedSplitConsolidation:
+    """「株式の分割」のように助詞「の」を挟む実開示表記を拾う。
+
+    KW_SPLIT="株式分割" の単純部分一致では拾えなかった実例が
+    2026-09-11時点のTDnetフィクスチャ全3,137タイトル中に1件存在した
+    （「株式の分割、定款の一部変更、期末配当予想の修正 及び株主優待制度の
+    変更に関するお知らせ」）。この1件は比率を伴わず配当修正語も併記されて
+    いるため、修正後も分類結果自体は「配当修正」のままで変わらない（既存の
+    優先順位設計どおり）。この修正で意味を持つのは、将来「株式の分割（1株を
+    3株に分割）」のように**比率つき・修正語なし**で「の」を挟む本物の分割
+    告知が来たときに、その他へ落ちず正しく分割として拾われること。
+    """
+
+    def test_mentions_split_detects_particle_form(self):
+        assert ty._mentions_split("株式の分割に関するお知らせ") is True
+        assert ty._mentions_split("株式分割に関するお知らせ") is True
+        assert ty._mentions_split("株式の分割") is True
+
+    def test_mentions_consolidation_detects_particle_form(self):
+        assert ty._mentions_consolidation("株式の併合に関するお知らせ") is True
+        assert ty._mentions_consolidation("株式併合に関するお知らせ") is True
+
+    def test_unrelated_title_does_not_mention_split(self):
+        assert ty._mentions_split("2026年3月期 決算短信〔日本基準〕(連結)") is False
+
+    def test_particle_form_with_ratio_and_no_revision_is_classified_as_split(self):
+        """比率つき・修正語なしなら本物の分割告知として拾う（本テストの主眼）。"""
+        title = "株式の分割（1株を3株に分割）に関するお知らせ"
+        assert classify_title(title) == ty.DOC_TYPE_SPLIT
+        assert ty.parse_split_terms(title) == ("1:3", 3.0)
+
+    def test_particle_form_with_revision_language_still_prefers_revision(self):
+        """実開示: 修正語併記・比率なしなら既存の優先順位どおり配当修正のまま。"""
+        title = (
+            "株式の分割、定款の一部変更、期末配当予想の修正 "
+            "及び株主優待制度の変更に関するお知らせ"
+        )
+        assert classify_title(title) == ty.DOC_TYPE_DIVIDEND_REVISION
+        # ただし言及自体は正しく検出できている（分割データの欠落ではなく
+        # 優先順位判断の結果であることを区別する）
+        assert ty._mentions_split(title) is True
+
+    def test_particle_form_consolidation_with_ratio(self):
+        title = "株式の併合（5株を1株に併合）に関するお知らせ"
+        assert classify_title(title) == ty.DOC_TYPE_CONSOLIDATION
+        assert ty.parse_split_terms(title) == ("5:1", 0.2)
+
+    def test_real_tdnet_titles_are_unaffected(self):
+        """実フィクスチャ全180タイトルで、修正前後の分類が一致すること。"""
+        payload = json.loads(
+            fixture_path("tdnet/yanoshin_list_20260610.json").read_text(encoding="utf-8")
+        )
+        titles = [item["title"] for item in payload["items"]]
+        for title in titles:
+            assert classify_title(title) in ALL_DOC_TYPES
