@@ -106,6 +106,32 @@ def _shina_points(rows: list[jsf.ShinaRow]) -> dict[str, list[dict]]:
     return out
 
 
+# 日証金の CSV は同一銘柄を取引所ごとに別行で出す（実測 4,755 行 / 4,351 銘柄、
+# 複数取引所に出るのは 376 銘柄）。D1 の断面は主キーが (code, data_type) なので、
+# そのまま全行を送ると**後勝ちで上書き**される。実際トヨタ(7203)は
+# 東証=融資残 1,005,100 に対し名証=0 で、名証が東証を潰していた。
+# 断面には主取引所の行を選ぶ。全取引所ぶんの明細は R2 の系列に残る。
+PRIMARY_EXCHANGE = "東証およびＰＴＳ"
+
+
+def pick_primary_rows(records: list[SupplyRecord]) -> list[SupplyRecord]:
+    """(code, data_type) ごとに主取引所の行を1つ選ぶ。
+
+    東証があればそれ。無ければ（名証・福証・札証の単独上場）**ファイル内の
+    最初の行**を採る。金額の大小で選ぶと年によって基準が変わるので、
+    公表側の並び順という決定的な規則にする。
+    """
+    chosen: dict[tuple[str, str], SupplyRecord] = {}
+    for record in records:
+        key = (record.code, record.data_type)
+        current = chosen.get(key)
+        if current is None:
+            chosen[key] = record
+        elif current.exchange != PRIMARY_EXCHANGE and record.exchange == PRIMARY_EXCHANGE:
+            chosen[key] = record
+    return list(chosen.values())
+
+
 def _latest_row(record: SupplyRecord, r2_key: str) -> list:
     return [
         record.code, record.data_type, record.data_date.isoformat(), record.isin,
@@ -194,7 +220,9 @@ def execute(ctx: JobContext) -> None:
         logger.info("D1 未設定のため jss_supply_latest は更新しない")
         return
     rows_to_write = [
-        _latest_row(r, keys[r.code]) for r in latest if r.code in keys
+        _latest_row(r, keys[r.code])
+        for r in pick_primary_rows(latest)
+        if r.code in keys
     ]
     try:
         written = cloud.d1.upsert(
