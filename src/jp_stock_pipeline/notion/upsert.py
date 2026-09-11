@@ -353,9 +353,31 @@ def export_filter(dataset_name: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _find_page(client: NotionClient, db_id: str, flt: dict) -> str | None:
+def _find_page_full(client: NotionClient, db_id: str, flt: dict) -> dict | None:
+    """キー検索でヒットした1件のページ全体（properties込み）を返す。
+
+    _find_page は id だけを返す。更新前に既存プロパティを読んで比較したい場合
+    （#14: 開示日時ガード等）はこちらを使う。
+    """
     results = client.query_database(db_id, filter=flt, page_size=1, max_pages=1)
-    return results[0]["id"] if results else None
+    return results[0] if results else None
+
+
+def _find_page(client: NotionClient, db_id: str, flt: dict) -> str | None:
+    page = _find_page_full(client, db_id, flt)
+    return page["id"] if page else None
+
+
+def _read_date_prop(page: dict, prop_name: str) -> datetime | None:
+    """page から date 型プロパティを datetime で読む。無ければ None。"""
+    prop = page.get("properties", {}).get(prop_name) or {}
+    date_obj = prop.get("date")
+    if not date_obj or not date_obj.get("start"):
+        return None
+    try:
+        return datetime.fromisoformat(date_obj["start"])
+    except ValueError:
+        return None
 
 
 def _upsert(
@@ -639,12 +661,55 @@ def upsert_financial_summary(
     record: FinancialSummaryRecord,
     master_page_id: str | None = None,
 ) -> str:
-    """③ 財務サマリへ冪等 upsert (複合キー=銘柄コード×決算期末×開示種別)。"""
+    """③ 財務サマリへ冪等 upsert (複合キー=銘柄コード×決算期末×開示種別)。
+
+    **開示日時ガード (#14)**: 既存行の開示日 (FIN_PROP_DISCLOSED_AT) が今回の
+    record.disclosed_at より新しければ上書きしない。古い原報告（またはその
+    backfill・再実行）を訂正版の後に流しても、訂正後の値を巻き戻さないため。
+    どちらかの開示日が不明 (None) なら順序を判断できないので、推測で
+    ブロックせず従来どおり完全置換する（§3-1 推測で守らない）。日時の型不一致等
+    で比較自体に失敗した場合も同様に安全側＝上書き許可へ倒す。
+
+    副次効果: TDnet短信(先行)とEDINET有報(後発、より監査済み)が同一キーを
+    共有する既知の課題（Issue #14 派生）でも、有報の開示日は短信より後になる
+    のが通常のため、有報着地後に短信バッチが再実行されても有報値を守れる。
+    ただしキー自体にソースを含めていないため、これは緩和であり根治ではない。
+    """
+    db_id = settings.db_id("financials")
+    flt = financial_summary_filter(record.code, record.fiscal_period_end, record.disclosure_type)
+    existing = _find_page_full(client, db_id, flt)
+    if existing is not None and record.disclosed_at is not None:
+        existing_disclosed_at = _read_date_prop(existing, S.FIN_PROP_DISCLOSED_AT)
+        if existing_disclosed_at is not None:
+            try:
+                is_older = existing_disclosed_at > record.disclosed_at
+            except TypeError:
+                # tz aware/naive 混在等で比較不能。安全側＝上書き許可のまま進む。
+                logger.warning(
+                    "③ 財務サマリ: 開示日の比較に失敗（型不一致）。上書きを許可して継続: "
+                    "%s %s %s 既存=%r 今回=%r",
+                    record.code, record.fiscal_period_end, record.disclosure_type,
+                    existing_disclosed_at, record.disclosed_at,
+                )
+                is_older = False
+            if is_older:
+                logger.info(
+                    "③ 財務サマリ: 既存(開示日=%s)より古い報告(開示日=%s)のため上書きしない: "
+                    "%s %s %s",
+                    existing_disclosed_at, record.disclosed_at,
+                    record.code, record.fiscal_period_end, record.disclosure_type,
+                )
+                return existing["id"]
+    # existing は直前の _find_page_full で確定済み（prefetch マップ経由ではない
+    # just-in-time の単発検索）なので、None の場合も含め page_resolved=True で渡し、
+    # _upsert 内での _find_page 再クエリ（二重問い合わせ）を避ける。
     return _upsert(
         client,
-        settings.db_id("financials"),
-        financial_summary_filter(record.code, record.fiscal_period_end, record.disclosure_type),
+        db_id,
+        flt,
         financial_summary_properties(record, master_page_id),
+        existing_page_id=existing["id"] if existing else None,
+        page_resolved=True,
     )
 
 

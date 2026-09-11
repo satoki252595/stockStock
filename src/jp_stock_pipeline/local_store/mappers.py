@@ -46,12 +46,25 @@ def _prov(prov: Provenance) -> dict:
 
 
 def _build_upsert(
-    table: str, params: dict, pk: list[str], *, exclude_cols: tuple[str, ...] = ()
+    table: str,
+    params: dict,
+    pk: list[str],
+    *,
+    exclude_cols: tuple[str, ...] = (),
+    guard_column: str | None = None,
 ) -> tuple[str, dict]:
     """INSERT ... ON CONFLICT (pk) DO UPDATE を生成する。
 
     params の挿入順がそのまま列順になる（dict は挿入順を保持）。
     exclude_cols は params から除外（INSERT 列にも UPDATE にも含めない）。
+
+    guard_column を指定すると DO UPDATE に WHERE 句を付け、
+    `EXCLUDED.<col> >= <table>.<col> OR <table>.<col> IS NULL` を満たすときだけ
+    上書きする（#14: 開示日時等で「古い方が新しい方を巻き戻す」のを防ぐ）。
+    条件を満たさない場合は Postgres の仕様どおり INSERT 自体が何もしない
+    （エラーにはならず、既存行がそのまま残る）。EXCLUDED 側が NULL（今回の
+    値が不明）なら比較は NULL＝偽になり上書きしない。既存側が NULL
+    （過去に未設定）なら常に許可する（守るべき既知の値が無いため）。
     """
     columns = [c for c in params if c not in exclude_cols]
     send = {c: params[c] for c in columns}
@@ -65,6 +78,13 @@ def _build_upsert(
         f"INSERT INTO {table} ({col_list}) VALUES ({placeholders}) "
         f"ON CONFLICT ({pk_clause}) DO UPDATE SET {set_clause}"
     )
+    if guard_column:
+        if guard_column not in columns:
+            raise ValueError(f"guard_column {guard_column!r} が params に無い: {table}")
+        sql += (
+            f" WHERE EXCLUDED.{guard_column} >= {table}.{guard_column}"
+            f" OR {table}.{guard_column} IS NULL"
+        )
     return sql, send
 
 
@@ -165,7 +185,8 @@ def financial_upsert(record: FinancialSummaryRecord) -> tuple[str, dict]:
         **_prov(record.provenance),
     }
     return _build_upsert(
-        "financials", params, ["code", "fiscal_period_end", "disclosure_type"]
+        "financials", params, ["code", "fiscal_period_end", "disclosure_type"],
+        guard_column="disclosed_at",
     )
 
 

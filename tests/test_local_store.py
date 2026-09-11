@@ -86,6 +86,36 @@ class TestStockMasterUpsert:
         assert "7203" not in sql
 
 
+class TestBuildUpsertGuardColumn:
+    """_build_upsert の guard_column オプション（#14 の共通実装）。"""
+
+    def test_no_guard_column_produces_plain_upsert(self):
+        sql, _ = mappers._build_upsert("t", {"pk": 1, "v": 2}, ["pk"])
+        assert "WHERE" not in sql
+
+    def test_guard_column_adds_where_clause(self):
+        sql, _ = mappers._build_upsert(
+            "financials", {"pk": 1, "disclosed_at": None}, ["pk"],
+            guard_column="disclosed_at",
+        )
+        assert "WHERE EXCLUDED.disclosed_at >= financials.disclosed_at" in sql
+        assert "OR financials.disclosed_at IS NULL" in sql
+
+    def test_guard_column_not_in_params_raises(self):
+        """タイポ等で存在しない列を指定したら黙って無視せずエラーにする。"""
+        with pytest.raises(ValueError, match="disclosed_at"):
+            mappers._build_upsert(
+                "financials", {"pk": 1}, ["pk"], guard_column="disclosed_at"
+            )
+
+    def test_guard_column_excluded_from_params_raises(self):
+        with pytest.raises(ValueError, match="disclosed_at"):
+            mappers._build_upsert(
+                "financials", {"pk": 1, "disclosed_at": None}, ["pk"],
+                exclude_cols=("disclosed_at",), guard_column="disclosed_at",
+            )
+
+
 class TestPriceUpsert:
     def test_pk_is_code_and_data_date(self):
         rec = PriceTechnicalRecord(
@@ -113,6 +143,21 @@ class TestFinancialUpsert:
         assert "ON CONFLICT (code, fiscal_period_end, disclosure_type)" in sql
         assert params["net_sales"] == 1.0e12
         assert params["eps"] == 250.0
+
+    def test_disclosed_at_guard_is_present(self):
+        """#14: 開示日時ガードが生成 SQL に入っていること。
+
+        古い原報告の再実行で訂正後の値を巻き戻さないための WHERE 句。
+        既存側が NULL（過去に未設定）のときは常に許可する。
+        """
+        rec = FinancialSummaryRecord(
+            code="7203", fiscal_period_end=date(2026, 3, 31), disclosure_type="本決算",
+            disclosed_at=datetime(2026, 6, 10, tzinfo=JST), provenance=_prov(),
+        )
+        sql, params = mappers.financial_upsert(rec)
+        assert "WHERE EXCLUDED.disclosed_at >= financials.disclosed_at" in sql
+        assert "OR financials.disclosed_at IS NULL" in sql
+        assert params["disclosed_at"] == datetime(2026, 6, 10, tzinfo=JST)
 
 
 class TestDisclosureUpsert:
