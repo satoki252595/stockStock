@@ -739,6 +739,25 @@ class TestWorkflowCrons:
         assert "workflow_dispatch" in text  # 手動実行と check-only は可能
         assert "jp_stock_pipeline.jobs.margin_weekly" in text
 
+    def test_yutai_backup_is_manual_only(self):
+        """yutai_backup は定期実行しない（移行 P3 の一回きりの保険）。
+
+        毎日回すと R2 に同じ中身の索引追記が積み上がるだけで、元データ
+        (kabulab-cf の D1) を無駄に走査する。内容が変わったときに手で流す。
+        """
+        text = (
+            Path(__file__).parent.parent / ".github" / "workflows" / "yutai_backup.yml"
+        ).read_text(encoding="utf-8")
+        active = [
+            ln for ln in text.splitlines()
+            if re.match(r'\s*-\s*cron:', ln)
+        ]
+        assert active == [], f"yutai_backup に cron がある: {active}"
+        assert "workflow_dispatch" in text
+        assert "jp_stock_pipeline.jobs.yutai_backup" in text
+        # 退避先は公開 Worker が bind していないバケットであること（第0層の防御）
+        assert "jp-stock-supply" in text
+
     def test_ci_runs_pytest(self):
         text = (
             Path(__file__).parent.parent / ".github" / "workflows" / "ci.yml"
