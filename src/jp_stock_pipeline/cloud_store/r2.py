@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from typing import Any
 
 from ..config import CloudStoreSettings
@@ -53,12 +54,20 @@ class R2Store:
         self.bucket = bucket
         self.writer = writer
         self._s3 = None
+        # botocore のクライアントは概ねスレッドセーフとされるが、接続プールの
+        # 競合を避けるためワーカースレッドごとに1つ持つ。テストが差し込んだ
+        # self._s3 は全スレッドで共有される（差し替えを壊さないため）。
+        self._local = threading.local()
 
     @property
     def s3(self):
-        if self._s3 is None:
-            self._s3 = _client(self.settings)
-        return self._s3
+        if self._s3 is not None:
+            return self._s3
+        client = getattr(self._local, "client", None)
+        if client is None:
+            client = _client(self.settings)
+            self._local.client = client
+        return client
 
     def get_json(self, key: str) -> tuple[Any | None, bool]:
         """(payload, found) を返す。404 は (None, False)。
