@@ -16,7 +16,7 @@ import re
 import stat
 import tempfile
 import zipfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from ..collectors import edinet
@@ -32,6 +32,12 @@ from .runner import JobContext, apply_limit, build_parser, main_exit, run_job
 logger = logging.getLogger(__name__)
 
 JOB_NAME = "edinet_daily"
+
+# cron の予定時刻 (JST)。.github/workflows/edinet_daily.yml の "0 12 * * 1-5" = 21:00 JST。
+# GitHub Actions のスケジュール遅延で実際の起動が翌日 JST へずれるため、起動時刻の
+# JST 日付をそのまま対象日にしてはならない (2026-08-27〜09-10 の実測で +3.5h〜+9.5h
+# 遅延し、11 営業日連続で「翌日」の空一覧を取得し続けた)。
+SCHEDULE_HOUR_JST = 21
 
 # 財務数値の抽出対象 (§4): 有報・四半期・半期と、それぞれの訂正報告書。
 # 一覧収集だけでなく CSV/XBRL 抽出・kabuMCP 原本引渡しまで同じ経路へ通す。
@@ -263,8 +269,26 @@ def _process_document(
         _export_kabumcp_cache(ctx, tidy_artifact, doc_id)
 
 
+def default_target_date(now: datetime) -> date:
+    """既定の対象日 = cron の予定日 (起動時刻の JST 日付ではない)。
+
+    予定は毎営業日 SCHEDULE_HOUR_JST 時 (JST)。したがって、それより前に始まった
+    実行は「前日の予定分が遅延したもの」であり、対象日は前日である。この規則は
+    予定時刻から 24 時間未満の遅延をすべて正しい日へ吸収する (§3-2 欠損を作らない)。
+    """
+    if now.hour >= SCHEDULE_HOUR_JST:
+        return now.date()
+    return now.date() - timedelta(days=1)
+
+
 def execute(ctx: JobContext) -> None:
-    target_date = ctx.args.date or now_jst().date()
+    started = now_jst()
+    target_date = ctx.args.date or default_target_date(started)
+    logger.info(
+        "対象日 %s (起動 %s JST / 指定=%s)",
+        target_date.isoformat(), started.isoformat(timespec="seconds"),
+        "あり" if ctx.args.date else "なし",
+    )
 
     # 1-4. 書類一覧取得・原本⑤UL（Notion⑤/ローカル⑤ 独立。両系統とも失敗時のみ中止 §7.1/§3-3）
     list_artifact, docs = edinet.list_documents(ctx.settings, target_date)
@@ -274,6 +298,14 @@ def execute(ctx: JobContext) -> None:
     targets = [d for d in docs if edinet.is_target_document(d) and edinet.has_sec_code(d)]
     targets = apply_limit(targets, ctx.args.limit)
     logger.info("対象書類 %d / 一覧 %d 件", len(targets), len(docs))
+
+    if not docs:
+        # 0 件は「休場日なら正常・営業日なら異常」で、成功として黙って終えると
+        # 対象日ずれ等の事故が検知できない (実績あり)。⑦ に残して可視化する (§3-2)。
+        ctx.add_failure(
+            f"EDINET一覧_{target_date.isoformat()}",
+            "書類一覧が0件。休場日なら正常だが、営業日で continue するなら対象日ずれを疑う",
+        )
 
     # ① relation マップ(全件・有界)と ④ dedup マップ(対象日のみ)を1回ずつ事前ロード。
     # 書類ごとの ① 検索・④ 検索(各1req)を排除する(§8.3。繁忙日=有報集中の timeout 対策)。
