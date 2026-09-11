@@ -707,6 +707,7 @@ class TestWorkflowCrons:
         "edinet_daily": "0 12 * * 1-5",
         "reconcile_weekly": "0 0 * * 6",
         "export_weekly": "0 0 * * 0",
+        "supply_daily": "17 3 * * 1-5",
     }
 
     @pytest.mark.parametrize("name", sorted(EXPECTED))
@@ -725,3 +726,88 @@ class TestWorkflowCrons:
         ).read_text(encoding="utf-8")
         assert "pytest" in text
         assert "nix develop" in text
+
+
+class TestEdinetLargeHolding:
+    """大量保有報告書 (350/360) の取りこぼし修正。
+
+    350/360 は**保有者が提出する**ため secCode が入らない。実データ（直近12日分の
+    一覧）で 350 が 992 件中 956 件、360 が 412 件中 405 件で secCode が空だった。
+    secCode だけで絞っていたため 96〜98% を取りこぼしていた。
+    対象会社は issuerEdinetCode（実測 956/956 = 100% 充足）から解決する。
+    """
+
+    # 実レスポンスから採った 1 件（docID/コードは実値、氏名は構造確認のため保持）
+    REAL_350 = {
+        "docID": "S100Y8QP",
+        "secCode": None,
+        "edinetCode": "E41686",
+        "issuerEdinetCode": "E04369",
+        "subjectEdinetCode": None,
+        "docTypeCode": "350",
+        "docDescription": "変更報告書（特例対象株券等）",
+        "submitDateTime": "2026-09-10 15:30",
+    }
+    REAL_120 = {
+        "docID": "S100ABCD",
+        "secCode": "72030",
+        "issuerEdinetCode": None,
+        "docTypeCode": "120",
+        "submitDateTime": "2026-09-10 15:30",
+    }
+
+    def test_large_holding_without_seccode_is_now_collected(self):
+        from jp_stock_pipeline.collectors import edinet
+
+        assert edinet.has_sec_code(self.REAL_350) is False  # 従来はここで落ちていた
+        assert edinet.is_target_document(self.REAL_350) is True
+        assert edinet.has_identifiable_company(self.REAL_350) is True
+
+    def test_issuer_edinet_code_is_extracted(self):
+        from jp_stock_pipeline.collectors import edinet
+
+        assert edinet.issuer_edinet_code(self.REAL_350) == "E04369"
+        assert edinet.issuer_edinet_code(self.REAL_120) is None
+
+    def test_ordinary_document_still_uses_seccode(self):
+        from jp_stock_pipeline.collectors import edinet
+
+        assert edinet.has_identifiable_company(self.REAL_120) is True
+
+    def test_non_large_holding_without_seccode_is_still_excluded(self):
+        """secCode も issuerEdinetCode も無い書類は対象外のまま。"""
+        from jp_stock_pipeline.collectors import edinet
+
+        doc = {"docID": "X", "docTypeCode": "120", "secCode": None}
+        assert edinet.has_identifiable_company(doc) is False
+
+    def test_issuer_code_is_not_used_for_non_large_holding(self):
+        """有報に issuerEdinetCode があっても secCode の代わりにはしない。"""
+        from jp_stock_pipeline.collectors import edinet
+
+        doc = {"docID": "X", "docTypeCode": "120", "secCode": None,
+               "issuerEdinetCode": "E04369"}
+        assert edinet.has_identifiable_company(doc) is False
+
+    def test_edinet_map_is_built_from_the_same_master_scan(self):
+        """① の1回のスキャンから逆引きを作る（追加の API 呼び出しをしない）。"""
+        from jp_stock_pipeline.notion import upsert
+
+        pages = [{
+            "id": "page-7203",
+            "properties": {
+                S.MASTER_PROP_CODE: {"rich_text": [{"plain_text": "7203"}]},
+                S.MASTER_PROP_EDINET_CODE: {"rich_text": [{"plain_text": "E04369"}]},
+            },
+        }]
+        assert upsert._master_map_from_pages(pages) == {"7203": "page-7203"}
+        assert upsert._edinet_map_from_pages(pages) == {"E04369": "7203"}
+
+    def test_master_page_without_edinet_code_is_skipped(self):
+        from jp_stock_pipeline.notion import upsert
+
+        pages = [{
+            "id": "p",
+            "properties": {S.MASTER_PROP_CODE: {"rich_text": [{"plain_text": "7203"}]}},
+        }]
+        assert upsert._edinet_map_from_pages(pages) == {}

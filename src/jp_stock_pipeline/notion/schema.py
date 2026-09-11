@@ -715,7 +715,7 @@ def catalog_blocks(db_ids: dict[str, str]) -> list[dict]:
         _para("全データ行・全原本ファイルにライセンスタグが付与されています。"),
         _bullet("commercial-ok: 商用・再配布可 (出典記載条件)。EDINET由来および commercial-ok のみから算出した計算値"),
         _bullet("factual-cite: 事実データの抽出利用可。原文は内部保管とし、メタデータ+原文リンクのみ公開可"),
-        _bullet("personal-only: 私的利用限定 (yfinance/stooq/JPXサイト統計)。公開・商用組込は禁止"),
+        _bullet("personal-only: 私的利用限定 (yfinance/stooq/JPXサイト統計/日証金)。公開・商用組込は禁止。日証金は規約で第三者提供を明文禁止"),
         _para(
             "注意: 公開ページ・エクスポートに全量を流せるのは commercial-ok のみです。"
             "factual-cite はメタデータ+リンクに限り、personal-only は非公開ビューに隔離してください。"
@@ -746,7 +746,7 @@ def catalog_blocks(db_ids: dict[str, str]) -> list[dict]:
             for view in RECOMMENDED_VIEWS
         ],
         _heading(2, "共通プロパティ (§6.3 真実性・コンプラ担保)"),
-        _bullet("ソース (select): EDINET/TDnet/yfinance/stooq/JPX/計算"),
+        _bullet("ソース (select): EDINET/TDnet/yfinance/stooq/JPX/日証金/計算"),
         _bullet("ライセンスタグ (select): commercial-ok/factual-cite/personal-only"),
         _bullet("データ基準日 (date): その値が指す時点 / 取得日時 (date): パイプラインが取得した時刻"),
         _bullet("原本 (relation→⑤): 由来する原本ファイル行。どの値も原本まで遡れます (§3-3)"),

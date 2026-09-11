@@ -91,6 +91,34 @@ def has_sec_code(doc: dict) -> bool:
     return sec is not None and str(sec).strip() != ""
 
 
+def issuer_edinet_code(doc: dict) -> str | None:
+    """発行者の EDINET コード。大量保有報告書で対象会社を特定する唯一の手掛かり。
+
+    350/360 は**保有者が提出する**ため `secCode` が入らない（実測で 992 件中
+    956 件が空、`subjectEdinetCode` も None）。一方 `issuerEdinetCode` は
+    956/956 = 100% 入っていた。
+    """
+    value = doc.get("issuerEdinetCode")
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
+def is_large_holding(doc: dict) -> bool:
+    """大量保有報告書 (350) / 訂正大量保有報告書 (360) か。"""
+    return doc.get("docTypeCode") in (DOC_TYPE_LARGE_HOLDING, DOC_TYPE_LARGE_HOLDING_AMEND)
+
+
+def has_identifiable_company(doc: dict) -> bool:
+    """対象会社を特定できる書類か。
+
+    通常の書類は secCode で、大量保有報告書は issuerEdinetCode で特定する。
+    これを secCode だけで判定していたため 350/360 がほぼ全て取りこぼされていた。
+    """
+    if has_sec_code(doc):
+        return True
+    return is_large_holding(doc) and issuer_edinet_code(doc) is not None
+
+
 def _require_api_key(settings: Settings) -> str:
     if not settings.edinet_api_key:
         raise ConfigError("EDINET_API_KEY が未設定。EDINET API v2 には必須 (§12)")

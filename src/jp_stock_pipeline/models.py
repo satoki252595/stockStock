@@ -31,6 +31,7 @@ class Source(StrEnum):
     YFINANCE = "yfinance"
     STOOQ = "stooq"
     JPX = "JPX"
+    JSF = "日証金"  # 日本証券金融 (貸借取引残高・品貸料率)
     CALC = "計算"
 
 
@@ -60,6 +61,32 @@ class Provenance:
     fetched_at: datetime  # 取得日時
     raw_page_id: str | None = None  # ⑤ 原本ファイルDB の行ID（リレーション先）
     quality: DataQuality = DataQuality.OK
+
+
+@dataclass
+class SupplyRecord:
+    """⑧' 需給 1 銘柄ぶんの断面 (日証金の貸借取引データ)。
+
+    履歴は R2 supply/{code}.json に積み、D1 jss_supply_latest には最新断面だけを持つ。
+    日次 210 万行になるため D1 に時系列を置かない (10GB/DB 上限は引き上げ不可)。
+
+    ライセンスは personal-only 固定。日証金の規約に「第三者の利用に供することを
+    固く禁じます」と明文があるため、公開面へ流してはならない。
+    """
+
+    code: str
+    data_type: str            # jsf_zandaka | jsf_shina | jpx_margin
+    data_date: date
+    provenance: Provenance
+    exchange: str = ""        # 取引所区分名 (同一銘柄が複数取引所に出るため断面のキーの一部)
+    isin: str | None = None
+    loan_bal: int | None = None     # 融資残高株数
+    loan_chg: int | None = None     # 融資の新規-返済
+    stock_bal: int | None = None    # 貸株残高株数
+    stock_chg: int | None = None    # 貸株の新規-返済
+    ratio: float | None = None      # 融資残高 / 貸株残高 (分母0は None)
+    turn_days: float | None = None  # 総合回転日数
+    extra: dict = field(default_factory=dict)  # data_type 固有の値 (逆日歩など)
 
 
 @dataclass
