@@ -1,5 +1,6 @@
 # 毎営業日 19:30 JST (DESIGN.md §8.2)。cron は UTC 表記。
-# 初回は銘柄ごとの履歴子DB作成が乗るため 210 分。
+# 履歴子DBを既定オフにしたので Notion 側は 60〜73 分、CF 側 17〜21 分を足して
+# 77〜94 分の見込み。実測が安定するまで 150 分で余裕を取る。
 name: prices_daily
 
 on:
@@ -17,7 +18,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main

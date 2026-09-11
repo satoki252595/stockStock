@@ -176,9 +176,15 @@ def execute(ctx: JobContext) -> None:
     # 5-6. テクニカル計算 → ② upsert。①の relation は一括マップで解決 (§8.3 レート対策)。
     # relation マップの Notion read 失敗は degrade（master_id=None で本体は書く）。
     # これにより Notion 断でもローカル PG へ ② を書き切れる（双方向フェールセーフ §3-2）。
+    # 履歴子DBは既定オフ（--enable-history で復活。削除はしていない）。
+    # 廃止の根拠: (a) R2 daily/ とローカルPG prices に同じものがあり3番目のコピーになる
+    # (b) Notion 日次リクエストの 71% を占める (c) 子DBはDB横断クエリができず
+    # 「全銘柄でRSI14が30以下だった日」に答えられない (d) 8,000行のシャード機構は
+    # 1銘柄あたり年245行なので約32.6年後まで発火しないデッドコード。
+    history_enabled = bool(getattr(ctx.args, "enable_history", False))
     master_state: dict[str, price_history.StockMasterState] = {}
     try:
-        if not getattr(ctx.args, "skip_history", False):
+        if history_enabled:
             price_history.ensure_master_history_properties(ctx.client, ctx.settings)
         master_state = price_history.load_stock_master_state(ctx.client, ctx.settings)
         master_map = {code: st.page_id for code, st in master_state.items()}
@@ -242,7 +248,7 @@ def execute(ctx: JobContext) -> None:
         ):
             ctx.add_failure(code, "②: Notion/ローカル両系統に書けず")
             continue
-        if not getattr(ctx.args, "skip_history", False):
+        if history_enabled:
             state = master_state.get(code)
             if state is None:
                 logger.warning("① なしのため履歴子DBをスキップ: %s", code)
@@ -264,9 +270,14 @@ def main(argv: list[str] | None = None, *, env: dict[str, str] | None = None) ->
         "--skip-valuation", action="store_true", help="PER/PBR等の取得を省略 (高速化)"
     )
     parser.add_argument(
-        "--skip-history",
+        "--enable-history",
         action="store_true",
-        help="①配下の株価テクニカル履歴子DBへの追記を省略",
+        help=(
+            "①配下の株価テクニカル履歴子DBへ追記する（既定オフ）。"
+            "同じ日足とテクニカルは R2 daily/{code}.json（10年）とローカルPG prices にあり、"
+            "この子DBは3番目のコピーになる。かつ Notion 日次リクエストの71%を占め、"
+            "所要が 60〜73分 から 3時間55分〜4時間47分 へ伸びる"
+        ),
     )
     return run_job(JOB_NAME, execute, argv, parser=parser, env=env)
 
