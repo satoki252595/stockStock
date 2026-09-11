@@ -1,0 +1,25 @@
+{
+  // 公開面。commercial-ok 全量と factual-cite のメタデータのみを無認証で返す。
+  //
+  // **personal-only の R2 (vwap-data / jp-stock-supply) を意図的に bind しない。**
+  // コードにバグがあっても物理的に到達できないようにするための第0層の防御であり、
+  // bind し忘れではない。追加する場合は必ずライセンス判定の見直しとセットで行うこと。
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "jss-api-public",
+  "main": "src/public.ts",
+  "compatibility_date": "2025-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "account_id": "5880d85c320ca5fee8baf9efddd005ed",
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "kabulab-cf",
+      "database_id": "639c0315-0d41-4345-95ab-aec5906224ed"
+    }
+  ],
+  "r2_buckets": [
+    { "binding": "RAW", "bucket_name": "jp-stock-raw" }
+  ],
+  "vars": { "SURFACE": "public" }
+}
