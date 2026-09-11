@@ -163,3 +163,40 @@ def test_dry_run_creation_still_records_without_network(dry_client):
         assert operation(dry_client)["id"].startswith("dry-run-")
     assert dry_client.raw_api("POST", "file_uploads")["id"].startswith("dry-run-")
     assert len(dry_client.ops) == 4
+
+
+class TestPostJsonErrorDetail:
+    """4xx の応答本文を握り潰さない。どの権限が足りないかは本文にしか無い。"""
+
+    def test_body_is_included_in_the_error(self, monkeypatch):
+        import requests
+
+        from jp_stock_pipeline import http
+
+        class _Resp:
+            status_code = 403
+            text = '{"success":false,"errors":[{"code":7403,"message":"Unauthorized"}]}'
+
+        monkeypatch.setattr(
+            requests.Session, "post", lambda self, url, **kw: _Resp()
+        )
+        with pytest.raises(http.FetchError, match="7403"):
+            http.post_json("https://example/api", json_body={})
+
+    def test_unreadable_body_does_not_mask_the_status(self, monkeypatch):
+        import requests
+
+        from jp_stock_pipeline import http
+
+        class _Resp:
+            status_code = 500
+
+            @property
+            def text(self):
+                raise RuntimeError("decode failed")
+
+        monkeypatch.setattr(
+            requests.Session, "post", lambda self, url, **kw: _Resp()
+        )
+        with pytest.raises(http.FetchError, match="HTTP 500"):
+            http.post_json("https://example/api", json_body={})
