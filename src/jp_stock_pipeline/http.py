@@ -44,6 +44,52 @@ def _get(session: requests.Session, url: str, params, headers, timeout) -> reque
     return resp
 
 
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(MAX_ATTEMPTS),
+    wait=wait_exponential(multiplier=2, min=2, max=60),
+    retry=retry_if_exception(_is_retryable),
+)
+def _post_idempotent(session, url, json_body, headers, timeout) -> requests.Response:
+    """冪等な POST のみリトライする内部実装。"""
+    resp = session.post(url, json=json_body, headers=headers, timeout=timeout)
+    if resp.status_code == 429 or resp.status_code >= 500:
+        raise _RetryableHTTP(f"HTTP {resp.status_code} for {url}")
+    return resp
+
+
+def post_json(
+    url: str,
+    *,
+    json_body: dict,
+    headers: dict | None = None,
+    timeout: int = DEFAULT_TIMEOUT,
+    session: requests.Session | None = None,
+    idempotent: bool = False,
+) -> requests.Response:
+    """JSON を POST する。失敗は FetchError。
+
+    ``idempotent`` を呼び出し側が明示したときだけ 5xx/タイムアウトを自動再送する。
+    既定が False なのは、作成済みか不明な POST を再送すると二重作成しうるため
+    （コミット 1b2910a で Notion の作成 POST に対して確立した方針と同じ）。
+    D1 の ``INSERT ... ON CONFLICT DO UPDATE`` や SELECT は冪等なので True でよい。
+
+    429 はサーバが処理せず弾いた応答なので、非冪等でも再送して安全。
+    """
+    sess = session or requests.Session()
+    merged_headers = {"User-Agent": USER_AGENT, **(headers or {})}
+    try:
+        if idempotent:
+            resp = _post_idempotent(sess, url, json_body, merged_headers, timeout)
+        else:
+            resp = sess.post(url, json=json_body, headers=merged_headers, timeout=timeout)
+    except Exception as exc:  # リトライ枯渇・接続不能
+        raise FetchError(f"POST 失敗: {url}: {exc}") from exc
+    if resp.status_code >= 400:
+        raise FetchError(f"POST 失敗: {url}: HTTP {resp.status_code}")
+    return resp
+
+
 def fetch(
     url: str,
     *,

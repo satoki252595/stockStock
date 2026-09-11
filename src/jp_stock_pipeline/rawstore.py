@@ -69,6 +69,7 @@ def save_raw(
     ext: str,
     license_tag: LicenseTag,
     base_dir: Path,
+    doc_id: str | None = None,
 ) -> RawArtifact:
     """取得した生バイト列を無加工で保存し RawArtifact を返す (§8.1 step 2)。
 
@@ -119,4 +120,5 @@ def save_raw(
         license_tag=license_tag,
         converted_paths=[],
         convert_status=ConvertStatus.NOT_APPLICABLE,
+        doc_id=doc_id,
     )

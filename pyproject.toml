@@ -24,6 +24,9 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
+    # Cloudflare R2 への投入は S3 互換 API を使う。R2 の Cloudflare REST API は
+    # 1,200 req/5分 の制限があり日次 4,445 PUT に足りない (CF-CANONICAL-DESIGN §2.4)。
+    "boto3>=1.35",
 ]
 
 [dependency-groups]

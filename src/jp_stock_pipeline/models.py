@@ -79,6 +79,11 @@ class RawArtifact:
     converted_paths: list[Path] = field(default_factory=list)
     convert_status: ConvertStatus = ConvertStatus.NOT_APPLICABLE
     notion_page_id: str | None = None  # ⑤ へのアップロード完了後に設定される
+    # 一次開示の文書識別子 (EDINET docID / TDnet の書類管理番号)。R2 の原本キーと
+    # D1 jss_raw_files.doc_id で ④開示 ⇄ ⑤原本 を結合する鍵になる。
+    # (scope, data_date) では文書を一意に指せない: 実測で edinet_pdf_8306_20240729 に
+    # 250 個の別内容原本が存在した。一覧やコードリストのように文書単位でないものは None。
+    doc_id: str | None = None
 
     @property
     def filename(self) -> str:
