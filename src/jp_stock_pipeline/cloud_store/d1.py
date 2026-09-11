@@ -21,6 +21,12 @@ logger = logging.getLogger(__name__)
 # 上限から逆算する（列数 × 行数 <= 100）。超えると実行時に落ちる。
 MAX_BOUND_PARAMS = 100
 
+# D1 の compound SELECT（UNION / UNION ALL / INTERSECT / EXCEPT）の項数上限。
+# 素の SQLite の既定は 500 だが、D1 は **5** で、6 項目から
+# `too many terms in compound SELECT: SQLITE_ERROR` を返す（2026-09-12 に本番で実測）。
+# 複数表を1文で数えるようなクエリはここで分割する。
+MAX_COMPOUND_SELECT_TERMS = 5
+
 
 class D1Error(RuntimeError):
     """D1 への読み書きに失敗した（取得単位の失敗として記録する）。"""
@@ -131,4 +137,4 @@ class D1Store:
         return written
 
 
-__all__ = ["D1Error", "D1Store", "MAX_BOUND_PARAMS"]
+__all__ = ["D1Error", "D1Store", "MAX_BOUND_PARAMS", "MAX_COMPOUND_SELECT_TERMS"]
