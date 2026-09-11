@@ -174,6 +174,7 @@ def _process_document(
     *,
     master_map: dict[str, str] | None = None,
     master_map_ok: bool = False,
+    edinet_map: dict[str, str] | None = None,
     disc_map: dict[str, str] | None = None,
     disc_map_ok: bool = False,
     target_date: date | None = None,
@@ -182,6 +183,12 @@ def _process_document(
     disc_map = disc_map or {}
     doc_id = doc["docID"]
     code = normalize_sec_code(doc.get("secCode")) or ""
+    if not code:
+        # 大量保有報告書は発行者の EDINETコードでしか対象会社を辿れない。
+        # ① に該当が無ければ code は空のまま（④には残すが relation は張らない）。
+        issuer = edinet.issuer_edinet_code(doc)
+        if issuer:
+            code = (edinet_map or {}).get(issuer, "")
     doc_type_code = str(doc.get("docTypeCode") or "")
     submit = doc.get("submitDateTime") or ""
     data_date: date | None = None
@@ -295,7 +302,13 @@ def execute(ctx: JobContext) -> None:
     json_to_parquet.convert_artifact(list_artifact, "json")
     list_page_id = ctx.upload_raw(list_artifact)
 
-    targets = [d for d in docs if edinet.is_target_document(d) and edinet.has_sec_code(d)]
+    # 大量保有報告書(350/360)は保有者が提出するため secCode が入らない。実測で
+    # 992件中956件(96%)が空で、secCode だけで絞ると ほぼ全て取りこぼしていた。
+    # 対象会社は issuerEdinetCode から ① の EDINETコード逆引きで解決する。
+    targets = [
+        d for d in docs
+        if edinet.is_target_document(d) and edinet.has_identifiable_company(d)
+    ]
     targets = apply_limit(targets, ctx.args.limit)
     logger.info("対象書類 %d / 一覧 %d 件", len(targets), len(docs))
 
@@ -310,9 +323,18 @@ def execute(ctx: JobContext) -> None:
     # ① relation マップ(全件・有界)と ④ dedup マップ(対象日のみ)を1回ずつ事前ロード。
     # 書類ごとの ① 検索・④ 検索(各1req)を排除する(§8.3。繁忙日=有報集中の timeout 対策)。
     # 取得失敗時は per-record 検索へ degrade(all-or-nothing)。
-    master_map, master_map_ok = _load_map_guarded(
-        lambda: upsert.load_stock_master_map(ctx.client, ctx.settings), "①"
-    )
+    # ① は1回のスキャンで {コード: page_id} と {EDINETコード: コード} の両方を作る
+    # （大量保有報告書の対象会社解決に後者が要る。追加の API 呼び出しは発生しない）。
+    master_pages: list[dict] = []
+
+    def _load_master() -> dict[str, str]:
+        master_pages.clear()
+        master_pages.extend(ctx.client.query_database(ctx.settings.db_id("stock_master")))
+        return upsert._master_map_from_pages(master_pages)
+
+    master_map, master_map_ok = _load_map_guarded(_load_master, "①")
+    edinet_map = upsert._edinet_map_from_pages(master_pages) if master_map_ok else {}
+    logger.info("① マップ: 銘柄 %d 件 / EDINETコード逆引き %d 件", len(master_map), len(edinet_map))
     disc_map, disc_map_ok = _load_map_guarded(
         lambda: upsert.load_disclosure_page_map(
             ctx.client, ctx.settings, disclosed_date=target_date
@@ -325,6 +347,7 @@ def execute(ctx: JobContext) -> None:
             _process_document(
                 ctx, doc, list_page_id,
                 master_map=master_map, master_map_ok=master_map_ok,
+                edinet_map=edinet_map,
                 disc_map=disc_map, disc_map_ok=disc_map_ok, target_date=target_date,
             )
             ctx.add_success()
