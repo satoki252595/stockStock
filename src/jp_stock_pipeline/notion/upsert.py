@@ -403,7 +403,15 @@ def load_stock_master_map(client: NotionClient, settings: Settings) -> dict[str,
     全銘柄ループでの find_stock_master_page (1req/銘柄) を置き換え、
     §8.3 のレート試算 (②upsert=2req/銘柄) に収める。
     """
-    pages = client.query_database(settings.db_id("stock_master"))
+    return _master_map_from_pages(client.query_database(settings.db_id("stock_master")))
+
+
+def _master_map_from_pages(pages: list[dict]) -> dict[str, str]:
+    """① のページ配列から {銘柄コード: page_id} を組み立てる（純粋関数）。
+
+    同じスキャン結果から EDINETコード逆引き (_edinet_map_from_pages) も作れるよう、
+    取得と組み立てを分けている。
+    """
     out: dict[str, str] = {}
     for page in pages:
         rich = page.get("properties", {}).get(S.MASTER_PROP_CODE, {}).get("rich_text", [])
@@ -411,6 +419,36 @@ def load_stock_master_map(client: NotionClient, settings: Settings) -> dict[str,
             code = rich[0].get("plain_text", "").strip()
             if code:
                 out[code] = page["id"]
+    return out
+
+
+def load_edinet_code_map(client: NotionClient, settings: Settings) -> dict[str, str]:
+    """① 全行の {EDINETコード: 銘柄コード} を一括取得する。
+
+    大量保有報告書 (350/360) は**保有者が提出する**ため `secCode` が入らない
+    (実測 992 件中 956 件が空)。対象会社は `issuerEdinetCode` にしか出ないので、
+    EDINETコードから銘柄コードへ引くための逆引きが要る。
+
+    load_stock_master_map と同じ ① の全件スキャンを使うので、呼び出し側で
+    まとめれば追加の API 呼び出しは発生しない。
+    """
+    pages = client.query_database(settings.db_id("stock_master"))
+    return _edinet_map_from_pages(pages)
+
+
+def _edinet_map_from_pages(pages: list[dict]) -> dict[str, str]:
+    """① のページ配列から {EDINETコード: 銘柄コード} を組み立てる（純粋関数）。"""
+    out: dict[str, str] = {}
+    for page in pages:
+        props = page.get("properties", {})
+        code_rich = props.get(S.MASTER_PROP_CODE, {}).get("rich_text", [])
+        edinet_rich = props.get(S.MASTER_PROP_EDINET_CODE, {}).get("rich_text", [])
+        if not code_rich or not edinet_rich:
+            continue
+        code = code_rich[0].get("plain_text", "").strip()
+        edinet_code = edinet_rich[0].get("plain_text", "").strip()
+        if code and edinet_code:
+            out[edinet_code] = code
     return out
 
 

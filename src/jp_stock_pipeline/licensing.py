@@ -35,6 +35,9 @@ SOURCE_LICENSE: dict[Source, LicenseTag] = {
     Source.YFINANCE: LicenseTag.PERSONAL_ONLY,
     Source.STOOQ: LicenseTag.PERSONAL_ONLY,
     Source.JPX: LicenseTag.PERSONAL_ONLY,
+    # 日証金の利用規約は「私的利用の範囲を超えて利用することはできず…第三者の
+    # 利用に供することを固く禁じます」と明文で定める。JPX より厳しい。
+    Source.JSF: LicenseTag.PERSONAL_ONLY,
 }
 
 
@@ -67,6 +70,7 @@ def is_metadata_publishable(tag: LicenseTag) -> bool:
 
 # 出典表記 (EDINET は規約条件 §2.1)
 ATTRIBUTION: dict[Source, str] = {
+    Source.JSF: "出典: 日本証券金融（JSF）貸借取引情報。私的利用に限定し第三者へ提供しない。",
     Source.EDINET: "出典: EDINET（金融庁）。本データは EDINET 公表情報を編集・加工して作成。",
     Source.TDNET: "出典: TDnet（東京証券取引所 適時開示情報閲覧サービス）。原文は各社開示資料。",
 }
