@@ -447,6 +447,115 @@ class TestUpsertDryRunCreatePath:
         (op,) = [o for o in dry_client.ops if o.op == "create_page"]
         assert op.payload["parent"] == {"database_id": "db-fin"}
 
+
+class TestFinancialSummaryDisclosedAtGuard:
+    """#14: 古い原報告の再実行で訂正後の値を巻き戻さない開示日時ガード。"""
+
+    def _existing_page(self, page_id: str, disclosed_at_iso: str | None):
+        return {
+            "id": page_id,
+            "properties": {
+                S.FIN_PROP_DISCLOSED_AT: (
+                    {"date": {"start": disclosed_at_iso}}
+                    if disclosed_at_iso
+                    else {"date": None}
+                ),
+            },
+        }
+
+    def test_older_report_does_not_overwrite_newer_existing(self, dry_client, monkeypatch):
+        """既存(開示日=6/10)より古い報告(開示日=5/1)は上書きしない。"""
+        existing = self._existing_page(
+            "fin-7203", datetime(2026, 6, 10, tzinfo=JST).isoformat()
+        )
+        monkeypatch.setattr(dry_client, "query_database", lambda *a, **k: [existing])
+        settings = make_settings()
+        rec = FinancialSummaryRecord(
+            code="7203", fiscal_period_end=date(2026, 3, 31), disclosure_type="本決算",
+            net_sales=999.0,  # 古い訂正前の値を模す
+            disclosed_at=datetime(2026, 5, 1, tzinfo=JST),
+            provenance=prov(),
+        )
+        page_id = upsert.upsert_financial_summary(dry_client, settings, rec)
+        assert page_id == "fin-7203"
+        assert [o for o in dry_client.ops if o.op in ("update_page", "create_page")] == []
+
+    def test_newer_report_overwrites_older_existing(self, dry_client, monkeypatch):
+        """既存(開示日=5/1)より新しい訂正(開示日=6/10)は正しく上書きする。"""
+        existing = self._existing_page(
+            "fin-7203", datetime(2026, 5, 1, tzinfo=JST).isoformat()
+        )
+        monkeypatch.setattr(dry_client, "query_database", lambda *a, **k: [existing])
+        settings = make_settings()
+        rec = FinancialSummaryRecord(
+            code="7203", fiscal_period_end=date(2026, 3, 31), disclosure_type="本決算",
+            net_sales=1000.0,
+            disclosed_at=datetime(2026, 6, 10, tzinfo=JST),
+            provenance=prov(),
+        )
+        page_id = upsert.upsert_financial_summary(dry_client, settings, rec)
+        assert page_id == "fin-7203"
+        (op,) = [o for o in dry_client.ops if o.op == "update_page"]
+        assert op.payload["page_id"] == "fin-7203"
+
+    def test_same_disclosed_at_is_idempotent_and_overwrites(self, dry_client, monkeypatch):
+        """同一開示の再実行（開示日が同じ）は従来どおり上書きされる（冪等 upsert）。"""
+        same = datetime(2026, 6, 10, tzinfo=JST)
+        existing = self._existing_page("fin-7203", same.isoformat())
+        monkeypatch.setattr(dry_client, "query_database", lambda *a, **k: [existing])
+        settings = make_settings()
+        rec = FinancialSummaryRecord(
+            code="7203", fiscal_period_end=date(2026, 3, 31), disclosure_type="本決算",
+            disclosed_at=same, provenance=prov(),
+        )
+        upsert.upsert_financial_summary(dry_client, settings, rec)
+        assert len([o for o in dry_client.ops if o.op == "update_page"]) == 1
+
+    def test_unknown_incoming_disclosed_at_does_not_block(self, dry_client, monkeypatch):
+        """今回の開示日が不明なら順序を判断できないので推測でブロックしない (§3-1)。"""
+        existing = self._existing_page(
+            "fin-7203", datetime(2026, 6, 10, tzinfo=JST).isoformat()
+        )
+        monkeypatch.setattr(dry_client, "query_database", lambda *a, **k: [existing])
+        settings = make_settings()
+        rec = FinancialSummaryRecord(
+            code="7203", fiscal_period_end=date(2026, 3, 31), disclosure_type="本決算",
+            disclosed_at=None, provenance=prov(),
+        )
+        upsert.upsert_financial_summary(dry_client, settings, rec)
+        assert len([o for o in dry_client.ops if o.op == "update_page"]) == 1
+
+    def test_existing_with_unknown_disclosed_at_always_allows_overwrite(
+        self, dry_client, monkeypatch
+    ):
+        """既存側の開示日が不明（過去にNULLで書かれた行）なら常に上書きを許可する。"""
+        existing = self._existing_page("fin-7203", None)
+        monkeypatch.setattr(dry_client, "query_database", lambda *a, **k: [existing])
+        settings = make_settings()
+        rec = FinancialSummaryRecord(
+            code="7203", fiscal_period_end=date(2026, 3, 31), disclosure_type="本決算",
+            disclosed_at=datetime(2026, 1, 1, tzinfo=JST), provenance=prov(),
+        )
+        upsert.upsert_financial_summary(dry_client, settings, rec)
+        assert len([o for o in dry_client.ops if o.op == "update_page"]) == 1
+
+    def test_no_double_query_when_page_already_resolved(self, dry_client, monkeypatch):
+        """既存有無を一度確定させたら _upsert 内で再クエリしない（往復削減）。"""
+        calls = []
+
+        def counting_query(*a, **k):
+            calls.append(1)
+            return []
+
+        monkeypatch.setattr(dry_client, "query_database", counting_query)
+        settings = make_settings()
+        rec = FinancialSummaryRecord(
+            code="7203", fiscal_period_end=date(2026, 3, 31), disclosure_type="本決算",
+            disclosed_at=datetime(2026, 6, 10, tzinfo=JST), provenance=prov(),
+        )
+        upsert.upsert_financial_summary(dry_client, settings, rec)
+        assert len(calls) == 1  # _find_page_full の1回だけ（_upsert内の再検索なし）
+
     def test_upsert_disclosure_creates(self, dry_client):
         settings = make_settings()
         rec = DisclosureRecord(
