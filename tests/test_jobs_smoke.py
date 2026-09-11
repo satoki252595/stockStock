@@ -720,6 +720,25 @@ class TestWorkflowCrons:
         assert "workflow_dispatch" in text  # 手動実行可
         assert f"jp_stock_pipeline.jobs.{name}" in text
 
+    def test_margin_weekly_schedule_is_deliberately_disabled(self):
+        """margin_weekly の cron は切替日まで**無効のまま**でなければならない。
+
+        この writer は現在 kabulab-cf の vwap-ingest.yml が担っている。
+        両方が動くと二重 writer になり、移行規則 M1/M4 に違反する。
+        切替（2026-09-26 に kabulab-cf 側を止め、2026-09-28 から stockStock）が
+        済むまで、うっかり有効化されないようテストで固定する。
+        """
+        text = (
+            Path(__file__).parent.parent / ".github" / "workflows" / "margin_weekly.yml"
+        ).read_text(encoding="utf-8")
+        active = [
+            ln for ln in text.splitlines()
+            if re.match(r'\s*-\s*cron:', ln)  # コメント行(# - cron:)は拾わない
+        ]
+        assert active == [], f"margin_weekly の cron が有効化されている: {active}"
+        assert "workflow_dispatch" in text  # 手動実行と check-only は可能
+        assert "jp_stock_pipeline.jobs.margin_weekly" in text
+
     def test_ci_runs_pytest(self):
         text = (
             Path(__file__).parent.parent / ".github" / "workflows" / "ci.yml"
