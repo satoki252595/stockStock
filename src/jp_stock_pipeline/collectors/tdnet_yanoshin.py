@@ -62,6 +62,7 @@ DOC_TYPE_SPLIT = "株式分割"
 DOC_TYPE_CONSOLIDATION = "株式併合"
 DOC_TYPE_DELISTING = "上場廃止"
 DOC_TYPE_NEW_LISTING = "新規上場"
+DOC_TYPE_YUTAI = "優待"
 DOC_TYPE_OTHER = "その他"
 
 # 比率を構造化抽出する書類種別 / 効力発生日を抽出する書類種別
@@ -83,6 +84,7 @@ KW_SPLIT = "株式分割"
 KW_CONSOLIDATION = "株式併合"
 KW_DELISTING = "上場廃止"
 KW_NEW_LISTING = "新規上場"
+KW_YUTAI = "株主優待"
 
 # 上場廃止/新規上場で ① の状態を倒すのは「確定的な本体告知」のみ。否定・回避・
 # リスク段階・解除・派生修正・第三者(子会社等)の言及を含むタイトルは状態を
@@ -153,6 +155,11 @@ def classify_title(title: str) -> str:
         return DOC_TYPE_FORECAST_REVISION
     if KW_DIVIDEND in title and KW_REVISION in title:
         return DOC_TYPE_DIVIDEND_REVISION
+    # 優待は業績修正・配当修正より後。実開示に「期末配当予想の修正及び株主優待制度の
+    # 変更」のような複合開示があり、投資判断上は配当修正の方が重い（実データ 3 件で確認）。
+    # 複合開示でも parse_yutai_action は優待の区分を返すので、優待の情報は失われない。
+    if KW_YUTAI in title:
+        return DOC_TYPE_YUTAI
     if KW_TREASURY in title and KW_ACQUIRE in title:
         return DOC_TYPE_BUYBACK
     if KW_LARGE_HOLDING in title:
@@ -162,6 +169,42 @@ def classify_title(title: str) -> str:
     if KW_QUARTERLY_REPORT in title:
         return DOC_TYPE_QUARTERLY_REPORT
     return DOC_TYPE_OTHER
+
+
+# 優待の下位区分。判定はキーワード一致のみで、内容の推測はしない (§3-1)。
+# 実開示のタイトルで確認した表現に基づく（新設/導入/変更/拡充/廃止/再開/記念）。
+YUTAI_ACTION_NEW = "新設"
+YUTAI_ACTION_CHANGE = "変更"
+YUTAI_ACTION_ABOLISH = "廃止"
+YUTAI_ACTION_RESUME = "再開"
+YUTAI_ACTION_COMMEMORATIVE = "記念"
+YUTAI_ACTION_UNKNOWN = ""
+
+# 上から順に判定する。「廃止」は「変更」より先（“一部廃止を含む変更”は廃止として
+# 扱わないよう、廃止の語が単独で出るものだけを拾う想定）。
+_YUTAI_ACTION_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (YUTAI_ACTION_ABOLISH, ("廃止",)),
+    (YUTAI_ACTION_RESUME, ("再開",)),
+    (YUTAI_ACTION_NEW, ("新設", "導入", "実施")),
+    (YUTAI_ACTION_COMMEMORATIVE, ("記念",)),
+    (YUTAI_ACTION_CHANGE, ("変更", "拡充", "一部変更")),
+)
+
+
+def parse_yutai_action(title: str) -> str:
+    """優待開示の下位区分（新設/変更/廃止/再開/記念）。判定できなければ空文字。
+
+    「記念」は先に「実施」で新設と判定されないよう、新設の後に置いている
+    （例: 「創業30周年記念株主優待の実施に関するお知らせ」は記念扱い）。
+    """
+    if KW_YUTAI not in title:
+        return YUTAI_ACTION_UNKNOWN
+    if "記念" in title:
+        return YUTAI_ACTION_COMMEMORATIVE
+    for action, keywords in _YUTAI_ACTION_RULES:
+        if any(kw in title for kw in keywords):
+            return action
+    return YUTAI_ACTION_UNKNOWN
 
 
 # 全角→半角（数字・コロン）正規化。値の改変ではなく形式変換のみ (§5.2)
