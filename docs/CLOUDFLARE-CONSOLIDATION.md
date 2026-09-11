@@ -108,9 +108,15 @@ GitHub Actions の Node が **D1 REST API**（`src/shared/db/d1-http-client.ts`�
 
 ## 5. 未確認・ユーザー確認が必要
 
-- **Workers のプランが Free か Paid か未確定。** kabuMCP が Paid 専用機能（`limits.cpu_ms`・`send_email`）を使う一方、kabulab-cf の README は「無料プランで運用」と記載。プランはアカウント単位なので両立しない。**D1 が 1DB 500MB（Free）か 10GB（Paid）かで設計が変わる。**
-- R2 / D1 の無料枠はアカウント共有だが、**現使用量が未実測**。
-- Neon PostgreSQL の実在と課金の有無。
+**解決済み（2026-09-11）:**
+
+- **Workers プランは Paid**（ユーザー確認）。kabulab-cf の README「無料プランで運用」という記載は実態と食い違っており、いずれ訂正が要る。
+- **D1 `kabulab-cf` は 71.7 MB / 20テーブル / APAC / read replication disabled**（`wrangler d1 info`）。Paid の 1DB 10 GB に対し 0.7%。本設計の5年増分を足しても 5.7%。
+
+**未解決:**
+
+- R2 バケットの現使用量（アカウント共有枠）。
+- Neon PostgreSQL の実在と課金の有無（D7）。
 
 ## 6. 判断待ち事項
 
