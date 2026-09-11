@@ -86,7 +86,17 @@ def post_json(
     except Exception as exc:  # リトライ枯渇・接続不能
         raise FetchError(f"POST 失敗: {url}: {exc}") from exc
     if resp.status_code >= 400:
-        raise FetchError(f"POST 失敗: {url}: HTTP {resp.status_code}")
+        # 応答本文には「どの権限が足りないか」が入っていることが多い
+        # (Cloudflare は code/message を返す)。ステータスだけだと切り分けられない。
+        # 資格情報そのものは本文に含まれないので、そのまま出して安全。
+        detail = ""
+        try:
+            body = resp.text[:400]
+        except Exception:  # noqa: BLE001 - 本文が読めなくても本来のエラーを潰さない
+            body = ""
+        if body:
+            detail = f" body={body!r}"
+        raise FetchError(f"POST 失敗: {url}: HTTP {resp.status_code}{detail}")
     return resp
 
 
