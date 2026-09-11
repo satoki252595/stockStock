@@ -99,19 +99,36 @@ class R2Store:
     def put_json_guarded(
         self,
         key: str,
-        payload: dict,
+        payload: Any,
         *,
         contract: dict[str, tuple[str, ...]] | None = None,
+        add_writer: bool = True,
     ) -> None:
         """mutable JSON の全置換 PUT。後退禁止ガードを必ず通す (§2.1)。
 
         ガードに落ちたら **PUT しない**。GuardError は呼び出し側で取得単位の
         失敗として記録する（隠して成功にしない §3-2）。
+
+        payload は dict と list の両方を受ける。**配列そのものが契約の
+        オブジェクトがあるため**（`margin/weeks.json` は kabulab-cf の
+        `/api/margin` が `JSON.parse(...).slice(-n)` で読むので、オブジェクトに
+        変えると読み手が壊れる）。
+
+        add_writer=False のときは writer キーを足さない。既存の公開面と
+        1バイトも変えてはいけないオブジェクト（互換シム）に使う。
         """
-        payload = dict(payload)
-        payload.setdefault("writer", self.writer)
+        if add_writer:
+            if not isinstance(payload, dict):
+                raise ValueError(
+                    f"add_writer=True は dict のみ対応（{type(payload).__name__} が渡された）: {key}"
+                )
+            payload = dict(payload)
+            payload.setdefault("writer", self.writer)
         old, _found = self.get_json(key)
-        check_no_regression(old, payload, writer=self.writer, contract=contract)
+        check_no_regression(
+            old, payload, writer=self.writer, contract=contract,
+            require_writer=add_writer,
+        )
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self.put_bytes(key, body, content_type="application/json")
 
