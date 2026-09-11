@@ -126,6 +126,66 @@ def _load_local_store(env: dict[str, str]) -> LocalStoreSettings:
     )
 
 
+# Cloudflare 正本ストア。バケットは用途ごとに分ける (docs/CF-CANONICAL-DESIGN.md §3.1)。
+# 分離の実質的な意味は R2 API トークンのスコープ分離で、R2 のトークンはバケット単位で
+# しかスコープできない（プレフィックス単位は不可）。公開 Worker がバインドしている
+# vwap-data に、第三者提供が明文で禁じられた需給(personal-only)を同居させないため。
+DEFAULT_R2_BUCKET_TIMESERIES = "vwap-data"      # 既存・公開Workerがバインド
+DEFAULT_R2_BUCKET_RAW = "jp-stock-raw"          # 新規・⑤原本と派生とエクスポート
+DEFAULT_R2_BUCKET_SUPPLY = "jp-stock-supply"    # 新規・需給(personal-only)
+
+
+@dataclass
+class CloudStoreSettings:
+    """Cloudflare R2 / D1 の接続情報 (.env と GitHub Secrets 管理)。
+
+    資格情報はコードに埋め込まず環境変数からのみ読む (§9)。未設定なら
+    enabled() が False を返し、Cloudflare への書き込みは行わない（従来どおり
+    Notion とローカル PostgreSQL のみ）。
+    """
+
+    cf_account_id: str | None = None
+    r2_access_key_id: str | None = None
+    r2_secret_access_key: str | None = None
+    cf_api_token: str | None = None          # D1 REST 用（R2 は S3 互換キーを使う）
+    d1_database_id: str | None = None
+    bucket_timeseries: str = DEFAULT_R2_BUCKET_TIMESERIES
+    bucket_raw: str = DEFAULT_R2_BUCKET_RAW
+    bucket_supply: str = DEFAULT_R2_BUCKET_SUPPLY
+
+    @property
+    def r2_endpoint(self) -> str | None:
+        if not self.cf_account_id:
+            return None
+        return f"https://{self.cf_account_id}.r2.cloudflarestorage.com"
+
+    def r2_enabled(self) -> bool:
+        """R2 への書き込みに必要な3点が揃っているか。"""
+        return bool(
+            self.cf_account_id and self.r2_access_key_id and self.r2_secret_access_key
+        )
+
+    def d1_enabled(self) -> bool:
+        """D1 への書き込みに必要な3点が揃っているか。"""
+        return bool(self.cf_account_id and self.cf_api_token and self.d1_database_id)
+
+    def enabled(self) -> bool:
+        return self.r2_enabled() or self.d1_enabled()
+
+
+def _load_cloud_store(env: dict[str, str]) -> CloudStoreSettings:
+    return CloudStoreSettings(
+        cf_account_id=env.get("CF_ACCOUNT_ID") or None,
+        r2_access_key_id=env.get("R2_ACCESS_KEY_ID") or None,
+        r2_secret_access_key=env.get("R2_SECRET_ACCESS_KEY") or None,
+        cf_api_token=env.get("CF_API_TOKEN") or None,
+        d1_database_id=env.get("CF_D1_DATABASE_ID") or None,
+        bucket_timeseries=env.get("R2_BUCKET_TIMESERIES") or DEFAULT_R2_BUCKET_TIMESERIES,
+        bucket_raw=env.get("R2_BUCKET_RAW") or DEFAULT_R2_BUCKET_RAW,
+        bucket_supply=env.get("R2_BUCKET_SUPPLY") or DEFAULT_R2_BUCKET_SUPPLY,
+    )
+
+
 @dataclass
 class Settings:
     notion_token: str | None
@@ -146,6 +206,7 @@ class Settings:
             user=None, password=None, api_key=None,
         )
     )
+    cloud_store: CloudStoreSettings = field(default_factory=CloudStoreSettings)
 
     def db_id(self, key: str) -> str:
         if key not in DB_REGISTRY:
@@ -193,4 +254,5 @@ def load_settings(*, dry_run: bool | None = None, env: dict[str, str] | None = N
         stooq_enabled=_truthy(env.get("STOOQ_ENABLED")),
         db_ids=_load_db_ids(env),
         local_store=_load_local_store(env),
+        cloud_store=_load_cloud_store(env),
     )
