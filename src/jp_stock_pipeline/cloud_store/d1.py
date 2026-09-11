@@ -27,15 +27,23 @@ class D1Error(RuntimeError):
 
 
 class D1Store:
-    def __init__(self, settings: CloudStoreSettings, *, writer: str) -> None:
+    def __init__(
+        self,
+        settings: CloudStoreSettings,
+        *,
+        writer: str,
+        database_id: str | None = None,
+    ) -> None:
         self.settings = settings
         self.writer = writer
+        # 既定は正本 DB。移行元 (kabulab-cf) を読むときだけ差し替える。
+        self.database_id = database_id or settings.d1_database_id
 
     @property
     def _url(self) -> str:
         return (
             f"https://api.cloudflare.com/client/v4/accounts/{self.settings.cf_account_id}"
-            f"/d1/database/{self.settings.d1_database_id}/query"
+            f"/d1/database/{self.database_id}/query"
         )
 
     def query(self, sql: str, params: list | None = None) -> list[dict[str, Any]]:
