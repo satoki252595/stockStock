@@ -70,39 +70,57 @@ class D1Store:
             return []
         return result[0].get("results") or []
 
-    def execute_many(self, sql: str, rows: list[list]) -> int:
-        """同一 SQL を行ごとに実行する。書き込んだ行数を返す。
+    def rows_per_request(self, column_count: int) -> int:
+        """1 リクエストに詰められる行数。バインドパラメータ上限から逆算する。
 
-        D1 REST には複数文のバッチがあるが、1 リクエストのバインドパラメータ上限が
-        100 なので、行数 × 列数がそれを超えないよう呼び出し側で分割する。ここでは
-        1 行ずつ実行し、失敗した行を明示して止める（部分適用を隠さない §3-2）。
+        D1 の 1 リクエストのバインドパラメータ上限は 100。14 列なら 7 行入る。
+        1 行ずつ投げると往復回数が行数と同じになり、4,755 行で約 16 分かかった
+        （本番実測）。まとめることで往復を 1/7 に減らす。
         """
-        written = 0
-        for row in rows:
-            self.query(sql, row)
-            written += 1
-        return written
+        if column_count <= 0:
+            raise D1Error("列が空")
+        if column_count > MAX_BOUND_PARAMS:
+            raise D1Error(f"列数が D1 のバインド上限を超える: {column_count}")
+        return max(1, MAX_BOUND_PARAMS // column_count)
 
     def upsert(
         self, table: str, columns: list[str], rows: list[list], *, conflict: list[str]
     ) -> int:
-        """ON CONFLICT DO UPDATE の upsert。
+        """ON CONFLICT DO UPDATE の upsert。複数行を 1 文にまとめて往復を減らす。
 
         更新する列は conflict に含まれないものだけ（主キーを自分で上書きしない）。
+        途中のチャンクで失敗したら、そこで例外を投げて止める。既に適用済みの
+        チャンクは残るが、upsert なので再実行で収束する（部分適用を隠さない §3-2）。
         """
         if not rows:
             return 0
-        if len(columns) > MAX_BOUND_PARAMS:
-            raise D1Error(f"列数が D1 のバインド上限を超える: {len(columns)}")
-        placeholders = ", ".join("?" for _ in columns)
-        updates = ", ".join(
-            f"{c} = excluded.{c}" for c in columns if c not in conflict
-        )
-        sql = (
-            f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) "
-            f"ON CONFLICT ({', '.join(conflict)}) DO UPDATE SET {updates}"
-        )
-        return self.execute_many(sql, rows)
+        width = len(columns)
+        for index, row in enumerate(rows):
+            if len(row) != width:
+                raise D1Error(
+                    f"{index} 行目の値の数が列数と違う: {len(row)} != {width}"
+                )
+        chunk_size = self.rows_per_request(width)
+        one = "(" + ", ".join("?" for _ in columns) + ")"
+        updates = ", ".join(f"{c} = excluded.{c}" for c in columns if c not in conflict)
+        if not updates:
+            raise D1Error(
+                f"更新できる列が無い（全列が conflict キー）: {table} {columns}"
+            )
+        written = 0
+        for start in range(0, len(rows), chunk_size):
+            chunk = rows[start : start + chunk_size]
+            sql = (
+                f"INSERT INTO {table} ({', '.join(columns)}) "
+                f"VALUES {', '.join(one for _ in chunk)} "
+                f"ON CONFLICT ({', '.join(conflict)}) DO UPDATE SET {updates}"
+            )
+            params: list = []
+            for row in chunk:
+                params.extend(row)
+            self.query(sql, params)
+            written += len(chunk)
+        return written
 
 
 __all__ = ["D1Error", "D1Store", "MAX_BOUND_PARAMS"]
