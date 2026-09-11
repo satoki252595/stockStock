@@ -707,6 +707,7 @@ class TestWorkflowCrons:
         "edinet_daily": "0 12 * * 1-5",
         "reconcile_weekly": "0 0 * * 6",
         "export_weekly": "0 0 * * 0",
+        "supply_daily": "17 3 * * 1-5",
     }
 
     @pytest.mark.parametrize("name", sorted(EXPECTED))

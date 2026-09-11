@@ -1,0 +1,167 @@
+"""⑧'需給ジョブと R2 系列書き込みの検証。
+
+実通信はしない。最重要の検証点は「既存の系列を縮めない」こと。日証金は最新
+スナップショットしか公開せず、取り逃した日は永久に埋まらないため。
+"""
+
+from __future__ import annotations
+
+from datetime import date
+
+import pytest
+
+from conftest import fixture_path
+
+from jp_stock_pipeline.cloud_store import supply
+from jp_stock_pipeline.cloud_store.guards import GuardError
+from jp_stock_pipeline.collectors import jsf_margin as jsf
+from jp_stock_pipeline.jobs import supply_daily
+
+
+class TestMergeSeries:
+    def test_appends_new_day_keeping_old(self):
+        old = [{"d": "2026-09-09", "ex": "東証", "loan_bal": 100}]
+        new = [{"d": "2026-09-10", "ex": "東証", "loan_bal": 120}]
+        merged = supply.merge_series(old, new)
+        assert [x["d"] for x in merged] == ["2026-09-09", "2026-09-10"]
+
+    def test_same_day_and_exchange_is_replaced_not_duplicated(self):
+        old = [{"d": "2026-09-10", "ex": "東証", "loan_bal": 100}]
+        new = [{"d": "2026-09-10", "ex": "東証", "loan_bal": 999}]
+        merged = supply.merge_series(old, new)
+        assert len(merged) == 1
+        assert merged[0]["loan_bal"] == 999
+
+    def test_same_day_different_exchange_coexists(self):
+        """同一銘柄が取引所ごとに複数行になる（実データで確認済み）。"""
+        old = [{"d": "2026-09-10", "ex": "東証およびＰＴＳ", "loan_bal": 100}]
+        new = [{"d": "2026-09-10", "ex": "名証", "loan_bal": 5}]
+        assert len(supply.merge_series(old, new)) == 2
+
+    def test_existing_points_are_never_dropped(self):
+        old = [{"d": f"2026-08-{d:02d}", "ex": "東証"} for d in range(1, 20)]
+        merged = supply.merge_series(old, [{"d": "2026-09-10", "ex": "東証"}])
+        assert len(merged) == 20
+
+    def test_result_is_sorted_by_date(self):
+        merged = supply.merge_series(
+            [{"d": "2026-09-10", "ex": "東証"}], [{"d": "2026-09-01", "ex": "東証"}]
+        )
+        assert [x["d"] for x in merged] == ["2026-09-01", "2026-09-10"]
+
+
+class TestBuildPayload:
+    def test_new_object_has_contract_keys(self):
+        payload = supply.build_payload(
+            "7203", existing=None,
+            by_type={"jsf_zandaka": [{"d": "2026-09-10", "ex": "東証"}]},
+            updated=date(2026, 9, 11), writer="supply_daily",
+        )
+        for key in ("code", "schema", "updated", "series"):
+            assert key in payload
+        assert payload["license"] == "personal-only"
+        assert payload["writer"] == "supply_daily"
+
+    def test_other_data_types_in_existing_are_preserved(self):
+        """zandaka だけ更新しても shina の系列を消さない。"""
+        existing = {"series": {"jsf_shina": [{"d": "2026-09-09", "ex": "東証"}]}}
+        payload = supply.build_payload(
+            "7203", existing=existing,
+            by_type={"jsf_zandaka": [{"d": "2026-09-10", "ex": "東証"}]},
+            updated=date(2026, 9, 11), writer="supply_daily",
+        )
+        assert "jsf_shina" in payload["series"]
+        assert "jsf_zandaka" in payload["series"]
+
+
+class _FakeR2:
+    def __init__(self, objects=None):
+        self.objects = dict(objects or {})
+        self.writer = "supply_daily"
+        self.puts = []
+
+    def get_json(self, key):
+        if key in self.objects:
+            return self.objects[key], True
+        return None, False
+
+    def put_json_guarded(self, key, payload, *, contract=None):
+        from jp_stock_pipeline.cloud_store.guards import check_no_regression
+
+        check_no_regression(
+            self.objects.get(key), payload, writer=self.writer, contract=contract
+        )
+        self.objects[key] = payload
+        self.puts.append(key)
+
+
+class TestUpsertSupplySeries:
+    def test_writes_to_supply_prefix(self):
+        store = _FakeR2()
+        key = supply.upsert_supply_series(
+            store, "7203", {"jsf_zandaka": [{"d": "2026-09-10", "ex": "東証"}]},
+            updated=date(2026, 9, 11),
+        )
+        assert key == "supply/7203.json"
+        assert store.puts == [key]
+
+    def test_guard_blocks_a_shrinking_series(self):
+        """系列が縮む書き込みは拒否される（日証金は過去分を再取得できない）。"""
+        store = _FakeR2({
+            "supply/7203.json": {
+                "code": "7203", "schema": 1, "writer": "supply_daily",
+                "updated": "2026-09-10", "series": {
+                    "jsf_zandaka": [
+                        {"d": "2026-09-08", "ex": "東証"},
+                        {"d": "2026-09-09", "ex": "東証"},
+                    ]
+                },
+            }
+        })
+        # merge を経由しない不正な payload を直接書こうとする
+        with pytest.raises(GuardError):
+            store.put_json_guarded("supply/7203.json", {
+                "code": "7203", "schema": 1, "writer": "supply_daily",
+                "updated": "2026-09-11",
+                "series": {"jsf_zandaka": [{"d": "2026-09-11", "ex": "東証"}]},
+            }, contract=supply.CONTRACT)
+
+
+class TestJobPointBuilders:
+    def _rows(self):
+        return jsf.parse_zandaka(fixture_path("jsf/zandaka.csv").read_bytes())
+
+    def test_zandaka_points_are_grouped_by_code(self):
+        points = supply_daily._zandaka_points(self._rows())
+        assert "1301" in points
+        assert points["1301"][0]["d"] == "2026-09-10"
+        assert points["1301"][0]["loan_bal"] == 7800
+
+    def test_change_is_new_minus_repaid(self):
+        points = supply_daily._zandaka_points(self._rows())
+        row = next(r for r in self._rows() if r.code == "1306")
+        expected = row.loan_new - row.loan_repaid
+        assert points["1306"][0]["loan_chg"] == expected
+
+    def test_none_values_are_omitted_not_zeroed(self):
+        """欠測をキーの不在で表す。0 と混同しない (§3-1)。"""
+        rows = jsf.parse_shina(fixture_path("jsf/shina.csv").read_bytes())
+        points = supply_daily._shina_points(rows)
+        first = points["1301"][0]
+        assert "today_rate" not in first  # ***** はマスク値なので落ちる
+        assert first["note"] == "満額"
+
+
+class TestLicensing:
+    def test_jsf_is_personal_only(self):
+        from jp_stock_pipeline.licensing import source_license
+        from jp_stock_pipeline.models import Source
+
+        assert source_license(Source.JSF).value == "personal-only"
+
+    def test_payload_declares_personal_only(self):
+        """公開面へ流れないよう payload 自身にも印を持たせる。"""
+        payload = supply.build_payload(
+            "7203", existing=None, by_type={}, updated=date(2026, 9, 11), writer="w"
+        )
+        assert payload["license"] == "personal-only"
