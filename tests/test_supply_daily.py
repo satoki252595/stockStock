@@ -298,3 +298,68 @@ class TestR2ClientIsPerThread:
         sentinel = object()
         store._s3 = sentinel  # noqa: SLF001
         assert store.s3 is sentinel
+
+
+class TestPrimaryExchangeSelection:
+    """D1 の断面は主キーが (code, data_type) なので、取引所ごとの複数行を潰さない。
+
+    実データ（2026-09-10 の zandaka.csv）では 4,755 行 / 4,351 銘柄で、
+    **376 銘柄が複数取引所に出る**。全行をそのまま送ると後勝ちで上書きされ、
+    トヨタ(7203)は 東証=融資残 1,005,100 が 名証=0 に潰されていた。
+    """
+
+    def _rec(self, code, exchange, loan_bal):
+        from datetime import datetime, timezone
+
+        from jp_stock_pipeline.licensing import LicenseTag
+        from jp_stock_pipeline.models import Provenance, Source, SupplyRecord
+
+        return SupplyRecord(
+            code=code, data_type="jsf_zandaka", data_date=date(2026, 9, 10),
+            exchange=exchange, loan_bal=loan_bal,
+            provenance=Provenance(
+                source=Source.JSF, license_tag=LicenseTag.PERSONAL_ONLY,
+                data_date=date(2026, 9, 10),
+                fetched_at=datetime(2026, 9, 11, tzinfo=timezone.utc),
+            ),
+        )
+
+    def test_tokyo_wins_over_nagoya_regardless_of_order(self):
+        """実データの並び順は東証が先だが、順序に依存しない規則にする。"""
+        for order in ([("東証およびＰＴＳ", 1005100), ("名証", 0)],
+                      [("名証", 0), ("東証およびＰＴＳ", 1005100)]):
+            records = [self._rec("7203", ex, bal) for ex, bal in order]
+            picked = supply_daily.pick_primary_rows(records)
+            assert len(picked) == 1
+            assert picked[0].exchange == "東証およびＰＴＳ"
+            assert picked[0].loan_bal == 1005100
+
+    def test_single_listed_stock_keeps_its_only_exchange(self):
+        """名証・福証・札証の単独上場はその行を採る。"""
+        records = [self._rec("9999", "福証", 500)]
+        picked = supply_daily.pick_primary_rows(records)
+        assert picked[0].exchange == "福証"
+        assert picked[0].loan_bal == 500
+
+    def test_first_row_wins_among_non_primary_exchanges(self):
+        """東証が無いとき、金額ではなく公表側の並び順という決定的な規則で選ぶ。"""
+        records = [self._rec("9999", "名証", 10), self._rec("9999", "札証", 9999)]
+        picked = supply_daily.pick_primary_rows(records)
+        assert picked[0].exchange == "名証"
+
+    def test_one_row_per_code_and_data_type(self):
+        records = [
+            self._rec("7203", "東証およびＰＴＳ", 1),
+            self._rec("7203", "名証", 0),
+            self._rec("1301", "東証およびＰＴＳ", 2),
+        ]
+        picked = supply_daily.pick_primary_rows(records)
+        assert len({(r.code, r.data_type) for r in picked}) == len(picked) == 2
+
+    def test_real_fixture_collapses_to_unique_codes(self):
+        from jp_stock_pipeline.collectors import jsf_margin as jsf
+
+        rows = jsf.parse_zandaka(fixture_path("jsf/zandaka.csv").read_bytes())
+        records = [self._rec(r.code, r.exchange, r.loan_bal) for r in rows]
+        picked = supply_daily.pick_primary_rows(records)
+        assert len(picked) == len({r.code for r in rows})
