@@ -314,3 +314,85 @@ class TestD1Store:
         assert "ON CONFLICT (code) DO UPDATE SET" in sql
         assert "data_date = excluded.data_date" in sql
         assert "code = excluded.code" not in sql  # 主キーは自分で上書きしない
+
+
+class TestD1BatchUpsert:
+    """複数行を1文にまとめて往復を減らす。
+
+    1行ずつ投げると往復回数が行数と同じになり、jss_supply_latest の 4,755 行で
+    約16分かかった（本番実測）。D1 のバインドパラメータ上限 100 から逆算して詰める。
+    """
+
+    def _store(self, monkeypatch, captured: list):
+        from jp_stock_pipeline import http
+        from jp_stock_pipeline.cloud_store.d1 import D1Store
+        from jp_stock_pipeline.config import CloudStoreSettings
+
+        class _Resp:
+            def json(self):
+                return {"success": True, "result": [{"results": []}]}
+
+        def fake_post(url, *, json_body, headers, idempotent=False, **kwargs):
+            captured.append(json_body)
+            return _Resp()
+
+        monkeypatch.setattr(http, "post_json", fake_post)
+        return D1Store(
+            CloudStoreSettings(cf_account_id="a", cf_api_token="t", d1_database_id="d"),
+            writer="w",
+        )
+
+    def test_rows_per_request_is_derived_from_the_bind_limit(self, monkeypatch):
+        store = self._store(monkeypatch, [])
+        assert store.rows_per_request(14) == 7   # 100 // 14
+        assert store.rows_per_request(100) == 1
+        assert store.rows_per_request(3) == 33
+
+    def test_many_rows_are_sent_in_few_requests(self, monkeypatch):
+        captured: list = []
+        store = self._store(monkeypatch, captured)
+        rows = [[f"c{i}", "t", i] for i in range(100)]
+        written = store.upsert("t", ["code", "data_type", "n"], rows, conflict=["code"])
+        assert written == 100
+        # 3 列なら 33 行/回 → 100 行は 4 回。1 行ずつなら 100 回だった。
+        assert len(captured) == 4
+
+    def test_params_are_flattened_in_row_order(self, monkeypatch):
+        captured: list = []
+        store = self._store(monkeypatch, captured)
+        store.upsert("t", ["a", "b"], [[1, 2], [3, 4]], conflict=["a"])
+        assert captured[0]["params"] == [1, 2, 3, 4]
+        assert captured[0]["sql"].count("(?, ?)") == 2
+
+    def test_never_exceeds_the_bind_limit(self, monkeypatch):
+        from jp_stock_pipeline.cloud_store.d1 import MAX_BOUND_PARAMS
+
+        captured: list = []
+        store = self._store(monkeypatch, captured)
+        columns = [f"c{i}" for i in range(14)]
+        rows = [[i] * 14 for i in range(50)]
+        store.upsert("t", columns, rows, conflict=["c0"])
+        assert all(len(body["params"]) <= MAX_BOUND_PARAMS for body in captured)
+
+    def test_ragged_row_is_rejected_before_sending(self, monkeypatch):
+        from jp_stock_pipeline.cloud_store.d1 import D1Error
+
+        captured: list = []
+        store = self._store(monkeypatch, captured)
+        with pytest.raises(D1Error, match="値の数が列数と違う"):
+            store.upsert("t", ["a", "b"], [[1, 2], [3]], conflict=["a"])
+        assert captured == []  # 送っていない
+
+    def test_all_columns_as_conflict_key_is_rejected(self, monkeypatch):
+        """更新する列が無い upsert は SQL が壊れるので事前に弾く。"""
+        from jp_stock_pipeline.cloud_store.d1 import D1Error
+
+        store = self._store(monkeypatch, [])
+        with pytest.raises(D1Error, match="更新できる列が無い"):
+            store.upsert("t", ["a"], [[1]], conflict=["a"])
+
+    def test_empty_rows_is_a_noop(self, monkeypatch):
+        captured: list = []
+        store = self._store(monkeypatch, captured)
+        assert store.upsert("t", ["a"], [], conflict=["a"]) == 0
+        assert captured == []

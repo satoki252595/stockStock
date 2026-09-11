@@ -20,3 +20,9 @@ result
 
 # codegraph ツール生成物
 .codegraph/
+
+# 配信 Worker (worker/) の依存。pnpm で入れるものでリポジトリには入れない。
+# ブランチごとの worker/.gitignore に頼るとブランチを切り替えたときに漏れる
+# （実際に 9,518 ファイル・70MB を1度コミットしてしまった）ので、ルートで止める。
+node_modules/
+worker/node_modules/
