@@ -82,6 +82,20 @@ KW_ANNUAL_REPORT = "有価証券報告書"
 KW_QUARTERLY_REPORT = "四半期報告書"
 KW_SPLIT = "株式分割"
 KW_CONSOLIDATION = "株式併合"
+# 実開示には「株式の分割」のように助詞「の」を挟む表記が存在する（実測1件、
+# 2026-09-11時点のTDnetフィクスチャ全3,137タイトル中）。KW_SPLIT の単純部分一致
+# では拾えないため、判定だけは正規表現で助詞ありも同一視する（KW_SPLIT/
+# KW_CONSOLIDATION 自体は他の用途にも使う定数なので変更しない）。
+_SPLIT_RE = re.compile(r"株式の?分割")
+_CONSOLIDATION_RE = re.compile(r"株式の?併合")
+
+
+def _mentions_split(title: str) -> bool:
+    return bool(_SPLIT_RE.search(title))
+
+
+def _mentions_consolidation(title: str) -> bool:
+    return bool(_CONSOLIDATION_RE.search(title))
 KW_DELISTING = "上場廃止"
 KW_NEW_LISTING = "新規上場"
 KW_YUTAI = "株主優待"
@@ -138,7 +152,7 @@ def classify_title(title: str) -> str:
     """
     if KW_TANSHIN in title:
         return DOC_TYPE_TANSHIN
-    if KW_SPLIT in title or KW_CONSOLIDATION in title:
+    if _mentions_split(title) or _mentions_consolidation(title):
         # 「株式分割に伴う配当予想の修正」のように分割を“言及”するだけで本体は修正、
         # という開示は、比率がタイトルに無く修正パターンに合致するなら修正へ回す
         # （本物の分割告知は比率を明記する。§ Phase2 偽陽性の抑制）。
@@ -146,7 +160,7 @@ def classify_title(title: str) -> str:
             KW_DIVIDEND in title and KW_REVISION in title
         )
         if parse_split_terms(title)[1] is not None or not is_revision:
-            return DOC_TYPE_SPLIT if KW_SPLIT in title else DOC_TYPE_CONSOLIDATION
+            return DOC_TYPE_SPLIT if _mentions_split(title) else DOC_TYPE_CONSOLIDATION
     if KW_DELISTING in title and _is_genuine_lifecycle_event(title):
         return DOC_TYPE_DELISTING  # 「上場廃止」を「新規上場」より先に判定
     if KW_NEW_LISTING in title and _is_genuine_lifecycle_event(title):
