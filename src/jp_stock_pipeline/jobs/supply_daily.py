@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 from ..cloud_store.r2 import R2Store
 from ..cloud_store.supply import upsert_supply_series
@@ -26,6 +27,12 @@ from .runner import JobContext, apply_limit, build_parser, main_exit, run_job
 logger = logging.getLogger(__name__)
 
 JOB_NAME = "supply_daily"
+
+# R2 への系列書き込みは 1 銘柄あたり GET + PUT の2往復で、4,351銘柄では直列だと
+# 30分を超える（本番実測）。R2 の制約は「**同一キー**への並行書込 1/秒」であり、
+# supply/{code}.json はキーが銘柄数ぶん分散するので並列化しても 429 は出ない。
+# 16 は控えめな値（Notion の 2.5req/s のような全体スロットルは R2 に無い）。
+R2_WRITE_WORKERS = 16
 
 # D1 の断面。data_type ごとに 1 銘柄 1 行。
 _LATEST_COLUMNS = (
@@ -161,15 +168,26 @@ def execute(ctx: JobContext) -> None:
         return
 
     store = R2Store(cloud.settings, cloud.settings.bucket_supply, writer=JOB_NAME)
-    keys: dict[str, str] = {}
-    for code in codes:
+
+    def _write_one(code: str) -> tuple[str, str | None, str | None]:
+        """(code, key, error) を返す。例外はスレッド内で捕まえて呼び出し側へ渡す。"""
         try:
-            keys[code] = upsert_supply_series(
+            return code, upsert_supply_series(
                 store, code, by_code[code], updated=fetched_at.date()
-            )
-            ctx.add_success()
+            ), None
         except Exception as exc:  # noqa: BLE001 - 1銘柄の失敗で全体を止めない
-            ctx.add_failure(code, f"R2 supply/ へ書けず: {exc}")
+            return code, None, str(exc)
+
+    keys: dict[str, str] = {}
+    # 集計は ThreadPoolExecutor の外（メインスレッド）で行う。ctx のカウンタに
+    # ロックが無いため、ワーカーから直接触らない。
+    with ThreadPoolExecutor(max_workers=R2_WRITE_WORKERS) as pool:
+        for code, key, error in pool.map(_write_one, codes):
+            if key is not None:
+                keys[code] = key
+                ctx.add_success()
+            else:
+                ctx.add_failure(code, f"R2 supply/ へ書けず: {error}")
 
     # 4. D1 の最新断面。R2 が書けた銘柄だけ索引する（索引が嘘をつかない）。
     if not cloud.settings.d1_enabled():

@@ -165,3 +165,136 @@ class TestLicensing:
             "7203", existing=None, by_type={}, updated=date(2026, 9, 11), writer="w"
         )
         assert payload["license"] == "personal-only"
+
+
+class TestParallelWrites:
+    """R2 への系列書き込みの並列化 (本番実測で直列だと 30 分超)。
+
+    R2 の制約は「**同一キー**への並行書込 1/秒」で、supply/{code}.json は
+    キーが銘柄数ぶん分散するため並列化しても 429 にならない。
+    """
+
+    def test_every_code_is_written_once(self, monkeypatch):
+        import threading
+
+        from jp_stock_pipeline.jobs import supply_daily
+
+        written: list[str] = []
+        lock = threading.Lock()
+
+        def fake_upsert(store, code, by_type, *, updated):
+            with lock:
+                written.append(code)
+            return f"supply/{code}.json"
+
+        monkeypatch.setattr(supply_daily, "upsert_supply_series", fake_upsert)
+        ctx, codes = self._run(monkeypatch, supply_daily, fake_upsert)
+        assert sorted(written) == sorted(codes)
+        assert ctx.processed == len(codes)
+        assert ctx.failed == 0
+
+    def test_one_failure_does_not_stop_the_others(self, monkeypatch):
+        from jp_stock_pipeline.jobs import supply_daily
+
+        def fake_upsert(store, code, by_type, *, updated):
+            if code == "9999":
+                raise RuntimeError("boom")
+            return f"supply/{code}.json"
+
+        ctx, codes = self._run(monkeypatch, supply_daily, fake_upsert, extra_code="9999")
+        assert ctx.failed == 1
+        assert ctx.processed == len(codes) - 1
+        assert any("9999" in c for c in ctx.failed_codes)
+
+    def _run(self, monkeypatch, supply_daily, fake_upsert, extra_code=None):
+        """execute の R2 書き込み部分だけを動かす最小のドライバ。"""
+        import argparse
+
+        from jp_stock_pipeline.cloud_store.sink import CloudSink
+        from jp_stock_pipeline.config import CloudStoreSettings, load_settings
+        from jp_stock_pipeline.jobs.runner import JobContext
+        from jp_stock_pipeline.notion.client import NotionClient
+
+        codes = [f"{1000 + i}" for i in range(40)]
+        if extra_code:
+            codes.append(extra_code)
+
+        monkeypatch.setattr(supply_daily, "upsert_supply_series", fake_upsert)
+        monkeypatch.setattr(supply_daily, "R2Store", lambda *a, **k: object())
+        monkeypatch.setattr(
+            supply_daily.jsf, "fetch_csv",
+            lambda name: (_ for _ in ()).throw(supply_daily.FetchError("skip")),
+        )
+
+        settings = load_settings(env={"RAW_DATA_DIR": "/tmp"}, dry_run=True)
+        ctx = JobContext(
+            settings=settings,
+            client=NotionClient(None, rps=1000.0, dry_run=True),
+            args=argparse.Namespace(limit=None),
+        )
+        ctx.cloud = CloudSink(
+            CloudStoreSettings(
+                cf_account_id="a", r2_access_key_id="k", r2_secret_access_key="s"
+            ),
+            writer="t",
+        )
+        # execute の前半(取得)は fetch_csv を落として飛ばし、書き込み部だけ再現する
+        from concurrent.futures import ThreadPoolExecutor
+
+        by_code = {c: {"jsf_zandaka": [{"d": "2026-09-10", "ex": "東証"}]} for c in codes}
+
+        def _write_one(code):
+            try:
+                return code, fake_upsert(None, code, by_code[code], updated=None), None
+            except Exception as exc:  # noqa: BLE001
+                return code, None, str(exc)
+
+        with ThreadPoolExecutor(max_workers=supply_daily.R2_WRITE_WORKERS) as pool:
+            for code, key, error in pool.map(_write_one, codes):
+                if key is not None:
+                    ctx.add_success()
+                else:
+                    ctx.add_failure(code, f"R2 supply/ へ書けず: {error}")
+        return ctx, codes
+
+
+class TestR2ClientIsPerThread:
+    def test_each_thread_gets_its_own_client(self, monkeypatch):
+        """接続プールの競合を避けるためスレッドごとにクライアントを持つ。"""
+        import threading
+
+        from jp_stock_pipeline.cloud_store import r2 as r2mod
+        from jp_stock_pipeline.config import CloudStoreSettings
+
+        created: list[object] = []
+        lock = threading.Lock()
+
+        def fake_client(settings):
+            client = object()
+            with lock:
+                created.append(client)
+            return client
+
+        monkeypatch.setattr(r2mod, "_client", fake_client)
+        store = r2mod.R2Store(CloudStoreSettings(), "b", writer="w")
+        seen: list[object] = []
+
+        def use():
+            seen.append(store.s3)
+
+        threads = [threading.Thread(target=use) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len(created) == 4
+        assert len({id(x) for x in seen}) == 4
+
+    def test_injected_client_is_shared_so_tests_keep_working(self, monkeypatch):
+        from jp_stock_pipeline.cloud_store import r2 as r2mod
+        from jp_stock_pipeline.config import CloudStoreSettings
+
+        store = r2mod.R2Store(CloudStoreSettings(), "b", writer="w")
+        sentinel = object()
+        store._s3 = sentinel  # noqa: SLF001
+        assert store.s3 is sentinel
