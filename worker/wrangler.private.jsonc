@@ -1,0 +1,24 @@
+{
+  // 内部面。personal-only を含む全量。APIキー必須。
+  // 鍵は `wrangler secret put JSS_API_KEYS -c wrangler.private.jsonc` で入れる
+  // (カンマ区切りで複数可)。未設定なら全リクエストを 503 で拒否する fail-closed。
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "jss-api-private",
+  "main": "src/private.ts",
+  "compatibility_date": "2025-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "account_id": "5880d85c320ca5fee8baf9efddd005ed",
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "kabulab-cf",
+      "database_id": "639c0315-0d41-4345-95ab-aec5906224ed"
+    }
+  ],
+  "r2_buckets": [
+    { "binding": "RAW", "bucket_name": "jp-stock-raw" },
+    { "binding": "SUPPLY", "bucket_name": "jp-stock-supply" }
+  ],
+  "vars": { "SURFACE": "private" }
+}
