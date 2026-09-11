@@ -1,5 +1,5 @@
 {
-  description = "jp-stock-data-pipeline 開発環境 (Python 3.12 + uv)";
+  description = "jp-stock-data-pipeline 開発環境 (Python 3.12 + uv / Worker は Node + pnpm)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
@@ -27,6 +27,10 @@
           packages = [
             pkgs.python312
             pkgs.uv
+            # 配信 Worker (worker/) は TypeScript。wrangler を pnpm 経由で使う。
+            # グローバルへ入れず nix devShell に閉じ込める (CLAUDE.md の方針)。
+            pkgs.nodejs_22
+            pkgs.pnpm
           ];
           # uv には nix の Python を使わせる（環境の再現性を nix 側で固定）
           shellHook = ''
