@@ -114,15 +114,31 @@ GitHub Actions の Node が **D1 REST API**（`src/shared/db/d1-http-client.ts`�
 
 ## 6. 判断待ち事項
 
-本ドキュメント作成時点で未決。決定次第ここに追記する。
+| # | 論点 | 決定 |
+|---|---|---|
+| D1 | vwap リポジトリの未追跡 workflow | **アーカイブ済み**（vwap `79642b6`。`archive/superseded-ingest/` へ退避） |
+| D2 | ⑨株主優待のライセンス評価 | **みんかぶを使わず TDnet/EDINET から構築**。kabulab-cf の掲載文は公開面から外す |
+| D3 | ⑧需給の取得一本化と R2 `margin/` の扱い | **stockStock に一本化し `margin/` を後方互換で拡張**。既存10週は削除しない |
+| D4 | stockStock を Cloudflare に載せる範囲 | **全面正本化**。kabulab-cf の既存を段階的に置き換える |
+| D5 | `swing_daily_ohlcv` の扱い | 設計に反映（[CF-CANONICAL-DESIGN.md](CF-CANONICAL-DESIGN.md) の移行フェーズ P7） |
+| D6 | Notion の二重保持 | 未決（設計の「残る判断事項」へ） |
+| D7 | Neon PostgreSQL の実在確認と廃止判断 | **未決・ユーザー確認待ち** |
+| D8 | 休眠リポジトリ（kabulab_tool / kabu-insight-saas）の処遇 | **未決・ユーザー確認待ち** |
 
-| # | 論点 |
-|---|---|
-| D1 | vwap リポジトリの未追跡 workflow（push した瞬間に R2 へ二重書込が始まる） |
-| D2 | ⑨株主優待のライセンス評価が stockStock と kabulab-cf で真逆 |
-| D3 | ⑧需給の取得一本化と R2 `margin/` の扱い |
-| D4 | stockStock を Cloudflare に載せる範囲の原則 |
-| D5 | `swing_daily_ohlcv` 336,185行の扱い |
-| D6 | Notion の二重保持（同一ワークスペース） |
-| D7 | Neon PostgreSQL の実在確認と廃止判断 |
-| D8 | 休眠リポジトリ（kabulab_tool / kabu-insight-saas）の処遇 |
+設計仕様は [CF-CANONICAL-DESIGN.md](CF-CANONICAL-DESIGN.md) を参照。
+
+### みんかぶ利用規約の逐条確認（2026-09-11 実取得）
+
+D2 の根拠。利用規約（info.minkabu.jp/terms/、令和3年4月25日改定、全18条）:
+
+| 条項 | 原文 | 段階 |
+|---|---|---|
+| 第7条(18) | 「本サイト公認以外の方法による、プログラム、スクレイピング等により本サイトのコンテンツを機械的に取得する行為」 | 取得 |
+| 第7条(19) | 「本サイトのコンテンツを私的使用の範囲を超えて蓄積する行為」 | 蓄積 |
+| 第14条1項 | 「運営者及びライセンサーの許諾を得ずにコンテンツを第三者に使用させたり公開させたりすることはできません」 | 公開 |
+| 第7条(22) | 「事業者（個人、法人問わず）が本サイトを利用して調査する行為」 | 収益化の有無を問わない |
+
+第2条12 が「コンテンツ」を「データ等の情報をいいますが、これらに限りません」と定義しており、**事実データだけを切り出す行為を許す条項は存在しない**。robots.txt は `User-agent: GPTBot / Disallow: /` を明示。ヘルプセンターは「著作権侵害が確認された場合には、必要に応じて法的措置を講じる場合がございます」と予告。
+
+`licensing.py` の `Source.MINKABU` → `PERSONAL_ONLY` を緩める根拠は規約内に存在しない。優待掲載文の実体は発行会社のIR文の転記であるため、**同じ内容を TDnet/EDINET から直接取得すればみんかぶ規約の適用外**になる。これが公開可能にする唯一の経路。
+
