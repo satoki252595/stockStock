@@ -397,10 +397,8 @@ class TestPricesDaily:
         # master_id 解決不能でも ② は書かれる（relation 空で継続）
         assert len(_ops_with_prop(client, S.PRICE_PROP_RSI14)) == 1
 
-    def test_history_child_db_appended_when_master_exists(
-        self, monkeypatch, tmp_path, captured_clients
-    ):
-        """① がある銘柄は履歴子DBを作り、同日スナップショットを追記する。"""
+    def _patch_history_fixtures(self, monkeypatch, tmp_path):
+        """履歴子DB系テストの共通差し替え。"""
         from jp_stock_pipeline.notion import price_history
 
         csv_bytes = fixture_path("transform/yfinance_7203T_daily.csv").read_bytes()
@@ -423,8 +421,36 @@ class TestPricesDaily:
                 "7203": price_history.StockMasterState(page_id="master-7203")
             },
         )
+
+    def test_history_child_db_is_off_by_default(
+        self, monkeypatch, tmp_path, captured_clients
+    ):
+        """既定では履歴子DBを作らない（Notion 日次リクエストの 71% を占めるため）。
+
+        同じ日足とテクニカルは R2 daily/{code}.json（10年）とローカルPG prices に
+        あり、子DBは3番目のコピーになる。復活させたいときは --enable-history。
+        """
+        self._patch_history_fixtures(monkeypatch, tmp_path)
         code = prices_daily.main(
             ["--dry-run", "--codes", "7203", "--skip-valuation"], env=_env(tmp_path)
+        )
+        assert code == 0
+        client = captured_clients[0]
+        assert [op for op in client.ops if op.op == "create_database"] == []
+        # ② 本体は従来どおり書かれる
+        assert len(_ops_with_prop(client, S.PRICE_PROP_RSI14)) == 1
+
+    def test_history_child_db_appended_when_explicitly_enabled(
+        self, monkeypatch, tmp_path, captured_clients
+    ):
+        """--enable-history を渡せば従来どおり子DBを作り同日分を追記する。"""
+        from jp_stock_pipeline.notion import price_history
+
+        del price_history  # 共通差し替えで使うのでここでは参照しない
+        self._patch_history_fixtures(monkeypatch, tmp_path)
+        code = prices_daily.main(
+            ["--dry-run", "--codes", "7203", "--skip-valuation", "--enable-history"],
+            env=_env(tmp_path),
         )
         assert code == 0
         client = captured_clients[0]

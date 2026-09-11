@@ -31,6 +31,7 @@ from ..notion.client import NotionClient
 from ..notion.upsert import write_job_log
 
 if TYPE_CHECKING:
+    from ..cloud_store.sink import CloudSink
     from ..local_store import LocalStore
 
 logger = logging.getLogger(__name__)
@@ -49,8 +50,10 @@ class JobContext:
     failed: int = 0
     failed_codes: list[str] = field(default_factory=list)
     local: LocalStore | None = None  # dual-write 先 (未設定/接続不可なら None)
+    cloud: "CloudSink | None" = None  # Cloudflare 正本 (未設定なら None)
     mirror_failed: int = 0  # ローカルミラー失敗数 (片系統失敗はジョブ成否に影響させない)
     notion_failed: int = 0  # Notion 書き込み失敗数 (双方向フェールセーフ用。同上)
+    cloud_failed: int = 0  # Cloudflare 書き込み失敗数 (同上)
 
     def add_success(self, n: int = 1) -> None:
         self.processed += n
@@ -83,6 +86,26 @@ class JobContext:
             self.mirror_failed += 1
             logger.warning("ローカルミラー失敗 (%s): %s", label, exc)
             return False
+
+    def _cloud(self, fn, label: str) -> bool | None:
+        """Cloudflare へ1件書く。
+
+        返り値: 書けた=True / 失敗=False / Cloudflare 系統なし(未設定・dry-run)=None。
+        ローカルミラーと同じくベストエフォートで、失敗しても収集は止めない
+        （cloud_failed に計上し warning §3-2）。移行期間中は Notion とローカルが
+        並行して正本を持つため、片系統の失敗で取得単位を落とす必要がない。
+        """
+        if self.cloud is None:
+            return None
+        try:
+            result = fn(self.cloud)
+        except Exception as exc:  # noqa: BLE001 - Cloudflare 失敗で収集を止めない (§3-2)
+            self.cloud_failed += 1
+            logger.warning("Cloudflare 書き込み失敗 (%s): %s", label, exc)
+            return False
+        if result is False:
+            self.cloud_failed += 1
+        return result
 
     def _mirror_record(self, store: LocalStore, record, include_lifecycle: bool) -> None:
         """record の型に応じて適切なローカル upsert を呼ぶ（純粋なディスパッチ）。"""
@@ -200,6 +223,9 @@ class JobContext:
             self.notion_failed += 1
             logger.warning("Notion ⑤ 原本UL失敗（ローカル ⑤ を試行）: %s", exc)
         local_ok = self._mirror(lambda s: s.upsert_raw_artifact(artifact), "RawArtifact")
+        # Cloudflare は移行中の第3系統。R2 に原本が残れば D1 索引が欠けても
+        # トレーサビリティは保たれるので、ここでは取得単位を落とさない。
+        self._cloud(lambda c: c.upsert_raw_artifact(artifact), f"⑤{artifact.filename}")
         if notion_err is not None and local_ok is not True:
             # Notion ⑤・ローカル ⑤ のいずれにも原本が残らなかった → 取得単位を中止
             raise file_upload.RawUploadError(
@@ -278,6 +304,15 @@ def run_job(
     if not settings.dry_run:
         target = getattr(args, "db_target", DB_TARGET_CLOUD)
         ctx.local = connect_local_store(settings.local_store, target)
+        # Cloudflare 正本。資格情報が無ければ enabled=False で何もしない。
+        if settings.cloud_store.enabled():
+            from ..cloud_store.sink import CloudSink  # noqa: PLC0415 - 任意依存
+
+            ctx.cloud = CloudSink(settings.cloud_store, writer=job_name)
+            logger.info(
+                "Cloudflare 正本へ書き込む (R2=%s / D1=%s)",
+                settings.cloud_store.r2_enabled(), settings.cloud_store.d1_enabled(),
+            )
     started = time.monotonic()
     crashed = False
     try:
@@ -318,11 +353,12 @@ def run_job(
 
     # 書き込み degrade サマリ（local 接続の有無に依らず出力。両カウンタ 0 なら無出力）。
     # Notion 単独運用でも notion_failed を俯瞰できるよう dual-write 前提の文言は避ける。
-    if ctx.mirror_failed or ctx.notion_failed:
+    if ctx.mirror_failed or ctx.notion_failed or ctx.cloud_failed:
         logger.warning(
             "書き込み degrade サマリ: Notion失敗 %d 件 / ローカルミラー失敗 %d 件"
+            " / Cloudflare失敗 %d 件"
             "（片系統失敗は継続し、両系統とも失敗した分のみ ⑦ failed に計上 §3-2）",
-            ctx.notion_failed, ctx.mirror_failed,
+            ctx.notion_failed, ctx.mirror_failed, ctx.cloud_failed,
         )
 
     logger.info(
