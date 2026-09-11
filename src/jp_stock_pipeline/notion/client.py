@@ -33,6 +33,16 @@ NOTION_VERSION = "2022-06-28"
 MAX_RETRIES = 6
 
 
+# Notion は 1 クエリ（1 ページネーション系列）あたり 10,000 件で打ち切る。
+# 到達すると has_more が false になるため、検知しないと「全件取れた」と誤認する。
+# 出典: https://developers.notion.com/reference/query-a-data-source
+QUERY_RESULT_LIMIT = 10_000
+
+
+class QueryTruncatedError(RuntimeError):
+    """クエリが 10,000 件上限で打ち切られた。全件前提の処理は続行してはならない。"""
+
+
 class NotionRequestError(RuntimeError):
     """Notion API の失敗。作成結果不明の場合も、再送せずこの例外を返す。"""
 
@@ -211,8 +221,19 @@ class NotionClient:
         sorts: list[dict] | None = None,
         page_size: int = 100,
         max_pages: int | None = None,
+        strict: bool = False,
     ) -> list[dict]:
-        """全ページをページネーションして返す。トークン無し dry-run では空。"""
+        """全ページをページネーションして返す。トークン無し dry-run では空。
+
+        Notion は **1 クエリあたり 10,000 件で打ち切る**。上限に当たると has_more が
+        false になるため、素直に読むと「全件取れた」と誤認する。これを検知して
+        必ず WARNING を出し、`strict=True` なら QueryTruncatedError を送出する。
+        全件を前提にする処理（⑥エクスポート等）は strict を立てること。
+
+        検知は2系統: (1) レスポンスの request_status.incomplete（2025-09-03 版 API で
+        文書化。現行ピン留めの 2022-06-28 版で返るかは未確認）、(2) 取得件数が
+        QUERY_RESULT_LIMIT に達した（版に依らず効く保険）。
+        """
         if self._client is None or str(database_id).startswith("dry-run-"):
             # dry-run の合成DB ID (runner が補完) への実クエリは行わない (§3-6)
             return []
@@ -230,7 +251,20 @@ class NotionClient:
             resp = self._call(self._client.databases.query, **kwargs)
             results.extend(resp.get("results", []))
             pages += 1
+            status = resp.get("request_status") or {}
+            incomplete = str(status.get("type", "")) == "incomplete"
             if not resp.get("has_more") or (max_pages and pages >= max_pages):
+                capped = len(results) >= QUERY_RESULT_LIMIT
+                if incomplete or capped:
+                    reason = status.get("incomplete_reason") or "件数が上限に到達"
+                    message = (
+                        f"Notion クエリが打ち切られた可能性: db={database_id} "
+                        f"取得={len(results)} 件 上限={QUERY_RESULT_LIMIT} 理由={reason}。"
+                        "全件前提の処理はこの結果を使ってはならない"
+                    )
+                    logger.warning("%s", message)
+                    if strict:
+                        raise QueryTruncatedError(message)
                 return results
             cursor = resp.get("next_cursor")
 

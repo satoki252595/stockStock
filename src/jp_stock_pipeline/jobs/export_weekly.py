@@ -169,7 +169,18 @@ def _track_a_filter() -> dict:
 def export_notion_db_track_a(
     ctx: JobContext, db_key: str, dataset_name: str, stem: str, schema_desc: str
 ) -> None:
-    pages = ctx.client.query_database(ctx.settings.db_id(db_key), filter=_track_a_filter())
+    # 全件を1ファイルに固めるエクスポートなので、10,000件の打ち切りに気付かず
+    # 部分データを「完全なデータセット」として配ると事実誤認を配ることになる。
+    # strict で打ち切りを失敗にする (§3-2 欠損を隠さない)。
+    from ..notion.client import QueryTruncatedError  # noqa: PLC0415 - 局所利用
+
+    try:
+        pages = ctx.client.query_database(
+            ctx.settings.db_id(db_key), filter=_track_a_filter(), strict=True
+        )
+    except QueryTruncatedError as exc:
+        ctx.add_failure(dataset_name, f"クエリ打ち切りのためエクスポートを中止: {exc}")
+        return
     if not pages:
         logger.info("%s: 対象行なし (トークン無し dry-run か未投入)。スキップ", dataset_name)
         return

@@ -200,3 +200,68 @@ class TestPostJsonErrorDetail:
         )
         with pytest.raises(http.FetchError, match="HTTP 500"):
             http.post_json("https://example/api", json_body={})
+
+class TestQueryTruncation:
+    """Notion の 10,000 件打ち切りを「全件取れた」と誤認しない (§3-2)。
+
+    上限に達すると has_more が false になるので、素直に読むと欠損に気付けない。
+    ⑥エクスポートは全件を1ファイルに固めるため、部分データを完全なデータセットと
+    して配ると事実誤認を配ることになる。
+    """
+
+    def _client(self, monkeypatch, resp):
+        from jp_stock_pipeline.notion.client import NotionClient
+
+        client = NotionClient("tok", rps=1000.0, dry_run=False)
+
+        class _DB:
+            def query(self, **kwargs):
+                return resp
+
+        class _Inner:
+            databases = _DB()
+
+        client._client = _Inner()  # noqa: SLF001
+        return client
+
+    def test_incomplete_marker_raises_in_strict_mode(self, monkeypatch):
+        from jp_stock_pipeline.notion.client import QueryTruncatedError
+
+        client = self._client(monkeypatch, {
+            "results": [{"id": "x"}],
+            "has_more": False,
+            "request_status": {
+                "type": "incomplete", "incomplete_reason": "query_result_limit_reached"
+            },
+        })
+        with pytest.raises(QueryTruncatedError, match="打ち切られた"):
+            client.query_database("db", strict=True)
+
+    def test_reaching_the_cap_is_detected_without_the_marker(self, monkeypatch):
+        """現行ピン留めの 2022-06-28 版が marker を返すかは未確認なので件数でも見る。"""
+        from jp_stock_pipeline.notion.client import QUERY_RESULT_LIMIT, QueryTruncatedError
+
+        client = self._client(monkeypatch, {
+            "results": [{"id": str(i)} for i in range(QUERY_RESULT_LIMIT)],
+            "has_more": False,
+        })
+        with pytest.raises(QueryTruncatedError):
+            client.query_database("db", page_size=QUERY_RESULT_LIMIT, strict=True)
+
+    def test_non_strict_returns_results_but_warns(self, monkeypatch, caplog):
+        client = self._client(monkeypatch, {
+            "results": [{"id": "x"}],
+            "has_more": False,
+            "request_status": {"type": "incomplete"},
+        })
+        with caplog.at_level("WARNING"):
+            rows = client.query_database("db")
+        assert len(rows) == 1
+        assert any("打ち切られた" in r.message for r in caplog.records)
+
+    def test_normal_result_neither_warns_nor_raises(self, monkeypatch, caplog):
+        client = self._client(monkeypatch, {"results": [{"id": "x"}], "has_more": False})
+        with caplog.at_level("WARNING"):
+            rows = client.query_database("db", strict=True)
+        assert len(rows) == 1
+        assert not [r for r in caplog.records if "打ち切られた" in r.message]
