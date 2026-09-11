@@ -1,0 +1,186 @@
+"""①銘柄マスタ `core_stocks` への唯一の書込口（移行 P4a）。
+
+`core_stocks` は移行元 kabulab-cf が所有する既存表で、**14個の子テーブル**が
+`stock_id` で参照している（設計書は12個としているが実測は14個）。したがって
+うっかり1文でも壊すと影響が広い。この表へ出す SQL は必ずここを通す。
+
+## なぜ upsert を使わないか
+
+`core_stocks` は `name` / `market` が NOT NULL で既定値が無い。そのため
+「code と新列だけを渡す部分 upsert」は**既存行が相手でも失敗する**
+（実測: `NOT NULL constraint failed: core_stocks.name`。ON CONFLICT の判定より
+先に INSERT の NOT NULL 検査が走るため）。よって新列の書込は **UPDATE 一択**。
+
+`D1Store.upsert()` は conflict 以外の全列を `c = excluded.c` に機械展開する
+設計なので、この表には使えない（`id` を渡せば `id = excluded.id` が生まれる）。
+ここではその関数を一切呼ばない。
+
+## SQL を「組み立てるだけ」にしてある理由
+
+設計書の G-core-1 は「書き込み SQL を実行せずダンプし、サロゲートキー列が
+SET 句に一度も現れないことを静的に検査する」ことを求めている。実行と生成が
+同じ関数に同居していると、その検査ができない。
+"""
+
+from __future__ import annotations
+
+from .d1 import MAX_COMPOUND_SELECT_TERMS, D1Error
+
+TABLE = "core_stocks"
+
+# 移行元 kabulab-cf が所有する既存列。stockStock は**読むだけ**で書かない。
+# `id` はサロゲートキーで 14 子表が参照しており、SET 句に入れたら破滅する。
+PROTECTED_COLUMNS: frozenset[str] = frozenset(
+    {
+        "id",
+        "code",
+        "name",
+        "market",
+        "sector",
+        "is_active",
+        "is_yutai",
+        "created_at",
+    }
+)
+
+# P4a で追加する列。すべて nullable（SQLite の ALTER は既定値の無い NOT NULL も
+# UNIQUE も付けられない。実測で両方エラーになることを確認済み）。
+NEW_COLUMNS: dict[str, str] = {
+    "instrument_type": "TEXT",  # equity/etf/... JPX 由来 → personal-only
+    "sector33": "TEXT",  # 33業種 (出自は §8-2 で未決)
+    "sector17": "TEXT",  # 17業種 JPX 由来 → personal-only
+    "edinet_code": "TEXT",  # EDINETコード → commercial-ok
+    "listing_status": "TEXT",  # 上場/監理/整理/上場廃止
+    "listing_date": "TEXT",  # YYYY-MM-DD
+    "delisting_date": "TEXT",  # YYYY-MM-DD
+    "license_tag": "TEXT",  # 行としての代表タグ
+    "src_source": "TEXT",  # EDINET / JPX
+    "src_data_date": "TEXT",  # データ基準日
+    "src_fetched_at": "INTEGER",  # epoch 秒
+    "quality": "TEXT",  # 正常/要確認/欠損あり
+}
+
+# 追加索引。`idx_core_stocks_edinet` は P4a 時点で全行 NULL なので部分索引にし、
+# エントリ0でサイズを食わないようにする。実測で `WHERE edinet_code = ?` が
+# COVERING INDEX 走査になることを確認済み。
+NEW_INDEXES: dict[str, str] = {
+    "idx_core_stocks_active_market": (
+        f"CREATE INDEX IF NOT EXISTS idx_core_stocks_active_market"
+        f" ON {TABLE} (is_active, market)"
+    ),
+    "idx_core_stocks_edinet": (
+        f"CREATE INDEX IF NOT EXISTS idx_core_stocks_edinet"
+        f" ON {TABLE} (edinet_code) WHERE edinet_code IS NOT NULL"
+    ),
+}
+
+
+def add_column_sql(column: str) -> str:
+    """1列分の ALTER。SQLite に `ADD COLUMN IF NOT EXISTS` は無い。"""
+    if column not in NEW_COLUMNS:
+        raise D1Error(f"P4a の追加対象外の列: {column!r}")
+    return f"ALTER TABLE {TABLE} ADD COLUMN {column} {NEW_COLUMNS[column]}"
+
+
+def plan_ddl(existing_columns: set[str], existing_indexes: set[str]) -> list[str]:
+    """まだ適用されていない DDL だけを返す（冪等）。
+
+    `PRAGMA table_info` と `sqlite_master` の実測を渡す。既にある列へ
+    `ADD COLUMN` を投げると `duplicate column name` で落ちるため、
+    事前に差分を取ってから流す。
+    """
+    statements = [
+        add_column_sql(name) for name in NEW_COLUMNS if name not in existing_columns
+    ]
+    statements += [
+        sql for name, sql in NEW_INDEXES.items() if name not in existing_indexes
+    ]
+    return statements
+
+
+def build_column_update(code: str, values: dict[str, object]) -> tuple[str, list]:
+    """新列だけを埋める UPDATE を**組み立てて返す**（実行しない）。
+
+    - 既存列（`PROTECTED_COLUMNS`）が1つでも混ざったら `D1Error`
+    - P4a の追加対象外の列も `D1Error`
+    - `WHERE code = ?` で1行に限定する（`id` は使わない）
+    - `updated_at` は明示的に進める。`src_fetched_at`（一次データの取得時刻）
+      とは別物なので混同しない
+    """
+    if not code:
+        raise D1Error("build_column_update: code は必須")
+    if not values:
+        raise D1Error("build_column_update: 更新する列が無い")
+    protected = sorted(set(values) & PROTECTED_COLUMNS)
+    if protected:
+        raise D1Error(
+            f"core_stocks の既存列は stockStock から書かない: {protected}"
+            "（所有者は kabulab-cf の universe.ts）"
+        )
+    unknown = sorted(set(values) - set(NEW_COLUMNS))
+    if unknown:
+        raise D1Error(f"P4a の追加対象外の列: {unknown}")
+
+    columns = sorted(values)
+    assignments = ", ".join(f"{c} = ?" for c in columns)
+    sql = (
+        f"UPDATE {TABLE} SET {assignments}, updated_at = (unixepoch()) WHERE code = ?"
+    )
+    return sql, [values[c] for c in columns] + [code]
+
+
+# --- 読み取り（検証用。すべて SELECT / PRAGMA）-------------------------------
+
+TABLE_INFO_SQL = f"PRAGMA table_info({TABLE})"
+INDEX_LIST_SQL = (
+    f"SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='{TABLE}'"
+)
+SNAPSHOT_SQL = (
+    f"SELECT id, code, name, market, sector, is_active, is_yutai FROM {TABLE}"
+    " ORDER BY id"
+)
+COUNTS_SQL = (
+    f"SELECT COUNT(*) AS total, SUM(is_active) AS active,"
+    f" SUM(CASE WHEN sector IS NULL THEN 1 ELSE 0 END) AS sector_null FROM {TABLE}"
+)
+SEQ_SQL = f"SELECT seq FROM sqlite_sequence WHERE name='{TABLE}'"
+
+# `core_stocks.id` を参照する子表（2026-09-12 実測で14表。設計書の12は誤り）。
+# `jss_financials` は FK 宣言の無い soft 参照だが、孤児検査には含める。
+CHILD_TABLES: tuple[str, ...] = (
+    "core_stock_annual_financials",
+    "core_stock_financials",
+    "ir_disclosures",
+    "otakara_stock_financials",
+    "otakara_stock_scores",
+    "rsi_percentile",
+    "swing_daily_ohlcv",
+    "swing_entry_signals",
+    "swing_stock_indicators",
+    "swing_stock_screening",
+    "yuho_documents",
+    "yuho_order_facts",
+    "yuho_overseas_facts",
+    "yutai_benefits",
+    "jss_financials",
+)
+
+
+def orphan_check_statements() -> list[str]:
+    """全子表の孤児件数を数える文を返す（G-core-5）。
+
+    1文にまとめられない。D1 の compound SELECT は **5 項まで**で、6 項目から
+    `too many terms in compound SELECT` を返す（本番実測。素の SQLite の既定
+    500 とは大きく違う）。15 表を1文の UNION ALL にすると必ず失敗するので、
+    上限ちょうどで分割する。
+    """
+    chunk = MAX_COMPOUND_SELECT_TERMS
+    statements: list[str] = []
+    for start in range(0, len(CHILD_TABLES), chunk):
+        parts = [
+            f"SELECT '{t}' AS t, COUNT(*) AS n FROM {t} c"
+            f" LEFT JOIN {TABLE} s ON s.id = c.stock_id WHERE s.id IS NULL"
+            for t in CHILD_TABLES[start : start + chunk]
+        ]
+        statements.append(" UNION ALL ".join(parts))
+    return statements

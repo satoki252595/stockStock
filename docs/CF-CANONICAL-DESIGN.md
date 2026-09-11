@@ -658,13 +658,37 @@ R2 のエグレスは無料なので課金は発生しないが、**所要時間
 
 #### A-1. `core_stocks`（拡張）— ①銘柄マスタ
 
-`core_stocks.id` は integer autoIncrement のサロゲートキーで、**12個の子テーブルが `stock_id` で参照する**（多くは `onDelete: cascade`）。
+`core_stocks.id` は integer autoIncrement のサロゲートキーで、**14個の子テーブルが `stock_id` で参照する**（多くは `onDelete: cascade`）。
+
+> 2026-09-12 実測で訂正: 「12個」は誤りで **14個**
+> (`core_stock_annual_financials` / `core_stock_financials` / `ir_disclosures` /
+> `otakara_stock_financials` / `otakara_stock_scores` / `rsi_percentile` /
+> `swing_daily_ohlcv` / `swing_entry_signals` / `swing_stock_indicators` /
+> `swing_stock_screening` / `yuho_documents` / `yuho_order_facts` /
+> `yuho_overseas_facts` / `yutai_benefits`)。加えて `jss_financials` が FK 宣言の
+> 無い soft 参照を持つため、孤児検査は **15表**を対象にする
+> (`cloud_store/core_stocks.CHILD_TABLES`)。
 
 **絶対規則**
 1. upsert は `INSERT … ON CONFLICT(code) DO UPDATE` のみ。**`id` を SET 句に絶対に入れない**
 2. `TRUNCATE` / `DELETE` / `DROP` を発行しない
 3. 対象外化は `is_active = 0` の UPDATE のみ
-4. `universe.ts:155-201` の**3段ガードをそのまま移植**（JPX raw 行数下限 4,000 / 内国株式 3,000・既存 active 比 98%・一括対象外化 2% 上限）。1つでも破れたら書込ゼロで異常終了
+4. `src/cron/universe.ts:82-120` の `assertUniverseCoverage` の**4条件をそのまま移植**（JPX raw 行数下限 4,000 / 内国株式 3,000 / 既存 active 比 98% / 一括対象外化 2% 上限）。1つでも破れたら書込ゼロで異常終了
+
+> 2026-09-12 実測で訂正: 参照先 `scripts/sync/universe.ts:155-201` は誤り。
+> 同ファイルは 29 行の薄い CLI で、ガードの実体は `src/cron/universe.ts:82-120`
+> （定数は :55/:57/:59/:61）。また「3段」ではなく **4条件**で、§12 の (a)-(d) の
+> 列挙のほうが実コードと一致する。移植は
+> `cloud_store/universe_guards.assert_universe_coverage` に 1:1 で入れた。
+>
+> **分母の取り違えに注意**: (c)(d) の分母は `core_stocks` の total ではなく
+> **is_active=1 の件数**（実測 3,715。total は 3,818）。
+>
+> **(c) は P4b で必ず発火する**: active が +707 されて 4,422 になると
+> 3,728/4,422 = 0.843 < 0.98 となり、kabulab-cf の月次 universe sync が毎月
+> throw して止まる。**P4b の前提条件として (c) の分母を
+> `is_active=1 AND instrument_type='equity'` に絞る改修が必須**
+> （`tests/test_universe_guards.py` に仕様として固定済み）。
 
 | 追加列 | 型 | 説明 | ライセンス |
 |---|---|---|---|
@@ -2758,7 +2782,7 @@ JPX は 2026-09-28 から週次→毎営業日16:00へ変更し、様式も変�
 
 **絶対規則**
 1. `ON CONFLICT(code) DO UPDATE` のみ。**サロゲートキーを SET 句に含めない。**
-2. `TRUNCATE` / `DELETE` / `DROP` を発行しない（12子表が cascade で消える）。
+2. `TRUNCATE` / `DELETE` / `DROP` を発行しない（**14子表**、うち多くが cascade で消える）。
 3. 対象外化は非アクティブ化の UPDATE のみ。
 4. **3段ガードを移植**（JPX 行数下限 4,000/3,000・既存 active 比 98%・1 run の対象外化が既存 active の 2% 上限）。1つでも破れたら書込ゼロで異常終了。現行の被覆率下限 0.5 は緩すぎるので 0.98 に引き上げる。
 
@@ -2767,9 +2791,50 @@ JPX は 2026-09-28 から週次→毎営業日16:00へ変更し、様式も変�
 - **G-core-2（キー集合）**: 旧にあって新に無い code がゼロ。
 - **G-core-3（値一致）**: 名称・市場・業種の完全一致率。不一致は1件ずつ原因を特定する（JPX と EDINET の表記ゆれ）。**不一致を自動で片方に寄せない。**
 - **G-core-4（ガード発火）**: JPX 行数を意図的に下限未満に細工した入力で、書込ゼロで異常終了することを確認。
-- **G-core-5（子表の孤児ゼロ）**: 切替後に全12子表で孤児が0件。
+- **G-core-5（子表の孤児ゼロ）**: 切替後に**全14子表 + `jss_financials` の soft 参照 = 15表**で孤児が0件。
 
 **ロールバック**: 切替前に取得する全件スナップショットから active フラグだけを戻す UPDATE。追加列は使わなければ無害なので DROP しない。
+
+### 実施記録（2026-09-12）
+
+`jobs/core_stocks_migrate.py --apply` で 14 文（`ALTER TABLE ... ADD COLUMN` 12 +
+`CREATE INDEX` 2）を発行。**値の充填は行っていない**（後述の理由で P4a の範囲外）。
+
+適用前後の実測:
+
+| | 適用前 | 適用後 |
+|---|---|---|
+| 列数 | 9 | 21 |
+| 索引 | `core_stocks_code_unique` のみ | + `idx_core_stocks_active_market` / `idx_core_stocks_edinet` |
+| total / active / sector NULL | 3,818 / 3,715 / 62 | 3,818 / 3,715 / 62（不変） |
+| `sqlite_sequence.seq` | 14,455 | 14,455（不変） |
+| 15表の孤児 | 0 | 0 |
+| 追加12列が非 NULL の行 | — | 0 |
+
+全 3,818 行のスナップショット（`id/code/name/market/sector/is_active/is_yutai`）を
+適用前後で取得し、**完全一致**を確認（G-core-2 / G-core-3）。
+kabulab-cf は `pnpm typecheck` 通過、本番 11 経路がすべて 200。
+
+**先に実測で確かめたこと**（本番と同一 DDL のローカル複製）:
+- SQLite の `ALTER TABLE ADD COLUMN` は既定値の無い `NOT NULL` も `UNIQUE` も
+  付けられない。したがって**追加12列は全て nullable 必須**
+- `core_stocks.name` / `market` が NOT NULL で既定値が無いため、
+  「code と新列だけを渡す部分 upsert」は**既存行が相手でも失敗する**
+  (`NOT NULL constraint failed`)。よって**充填は `UPDATE` 一択**で、
+  `D1Store.upsert()` は使えない（`cloud_store/core_stocks.build_column_update`）
+- 列追加後も kabulab-cf の `universe.ts` と等価の upsert（新規 INSERT / 既存 UPDATE）
+  は通る
+
+**D1 固有の制約（本番実測）**: compound SELECT（`UNION ALL` 等）の項数上限は
+**5**。6 項目から `too many terms in compound SELECT: SQLITE_ERROR` を返す
+（素の SQLite の既定は 500）。15 表の孤児検査を 1 文にまとめると必ず失敗するので
+3 文に分割している（`cloud_store/d1.MAX_COMPOUND_SELECT_TERMS`）。
+
+**P4a の範囲外にしたもの**: `instrument_type` / `sector33` / `sector17` の値の充填。
+供給源の JPX data_j.xls が 2026-09-12 時点で **HTTP 404**（旧 URL
+`.../tvdivq0000001vg2-att/data_j.xls`）で、一次データを正規に取得できない。
+`core_stocks.MAX(updated_at)` は 2026-08-10 で、9 月の月次 universe sync は
+この 404 で失敗している。**URL の特定が充填の前提条件**。
 
 ---
 
@@ -2795,7 +2860,14 @@ kabulab-cf の日次 cron は断面テーブルと同時に RSI パーセンタ�
 
 ---
 
-## P4b — ①母集団拡張（+627行）
+## P4b — ①母集団拡張（+707行。設計当初の「+627」は誤り）
+
+> 2026-09-12 実測で訂正: 「+627」は `4,445 − 3,818` の単純引き算で、集合差では
+> ない。data_j の4文字コード 4,445 のうち `core_stocks` に無いのが **707**、
+> 逆に core 側に data_j 4文字集合外の行が **80**（5桁種類株 6 + data_j 不在 74。
+> うち active 9）ある。したがって INSERT 後の総行数は **4,525** であって
+> 4,445 ではない。80 行の扱い（残す / `is_active=0` にする / 最新 data_j で
+> 自然解消を待つ）は P4b の設計時に決める。
 
 P5 完了後、P6 の直前に実施する（§2.1）。
 
