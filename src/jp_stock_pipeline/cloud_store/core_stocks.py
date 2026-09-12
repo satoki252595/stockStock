@@ -132,9 +132,19 @@ def build_column_update(code: str, values: dict[str, object]) -> tuple[str, list
 # --- 読み取り（検証用。すべて SELECT / PRAGMA）-------------------------------
 
 TABLE_INFO_SQL = f"PRAGMA table_info({TABLE})"
+# `sql` も取る。名前だけ見ていると「同名で別定義の索引が既にある」を
+# 素通りさせてしまう（CREATE INDEX IF NOT EXISTS は no-op になる）。
 INDEX_LIST_SQL = (
-    f"SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='{TABLE}'"
+    f"SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='{TABLE}'"
 )
+
+
+def normalize_sql(sql: str | None) -> str:
+    """索引定義の比較用。空白の揺れと引用符・IF NOT EXISTS を落とす。"""
+    text = " ".join(str(sql or "").split())
+    for ch in ("`", '"', "[", "]"):
+        text = text.replace(ch, "")
+    return text.replace("IF NOT EXISTS ", "").replace(" (", "(").upper()
 SNAPSHOT_SQL = (
     f"SELECT id, code, name, market, sector, is_active, is_yutai FROM {TABLE}"
     " ORDER BY id"
@@ -146,7 +156,7 @@ COUNTS_SQL = (
 SEQ_SQL = f"SELECT seq FROM sqlite_sequence WHERE name='{TABLE}'"
 
 # `core_stocks.id` を参照する子表（2026-09-12 実測で14表。設計書の12は誤り）。
-# `jss_financials` は FK 宣言の無い soft 参照だが、孤児検査には含める。
+# FK 宣言があるものは `stock_id` が NOT NULL。
 CHILD_TABLES: tuple[str, ...] = (
     "core_stock_annual_financials",
     "core_stock_financials",
@@ -162,8 +172,25 @@ CHILD_TABLES: tuple[str, ...] = (
     "yuho_order_facts",
     "yuho_overseas_facts",
     "yutai_benefits",
-    "jss_financials",
 )
+
+# FK 宣言が無い soft 参照。`stock_id` が **nullable** なので、NULL 行を孤児として
+# 数えないこと（NULL は「まだ解決していない」であって、実在しない id を指す孤児
+# とは別物。混ぜると P5 で jss_financials に行が入った途端に G-core-5 が
+# 恒常的に赤くなり、本物の孤児検出が信用されなくなる）。
+SOFT_CHILD_TABLES: tuple[str, ...] = ("jss_financials",)
+
+ALL_CHECKED_TABLES: tuple[str, ...] = CHILD_TABLES + SOFT_CHILD_TABLES
+
+
+def _orphan_term(table: str) -> str:
+    """1表ぶんの孤児カウント。soft 参照だけ `stock_id IS NULL` を除外する。"""
+    null_guard = " c.stock_id IS NOT NULL AND" if table in SOFT_CHILD_TABLES else ""
+    return (
+        f"SELECT '{table}' AS t, COUNT(*) AS n FROM {table} c"
+        f" LEFT JOIN {TABLE} s ON s.id = c.stock_id"
+        f" WHERE{null_guard} s.id IS NULL"
+    )
 
 
 def orphan_check_statements() -> list[str]:
@@ -175,12 +202,9 @@ def orphan_check_statements() -> list[str]:
     上限ちょうどで分割する。
     """
     chunk = MAX_COMPOUND_SELECT_TERMS
-    statements: list[str] = []
-    for start in range(0, len(CHILD_TABLES), chunk):
-        parts = [
-            f"SELECT '{t}' AS t, COUNT(*) AS n FROM {t} c"
-            f" LEFT JOIN {TABLE} s ON s.id = c.stock_id WHERE s.id IS NULL"
-            for t in CHILD_TABLES[start : start + chunk]
-        ]
-        statements.append(" UNION ALL ".join(parts))
-    return statements
+    return [
+        " UNION ALL ".join(
+            _orphan_term(t) for t in ALL_CHECKED_TABLES[start : start + chunk]
+        )
+        for start in range(0, len(ALL_CHECKED_TABLES), chunk)
+    ]

@@ -19,7 +19,12 @@ from jp_stock_pipeline.cloud_store import core_stocks as cs
 from jp_stock_pipeline.cloud_store.d1 import D1Error, D1Store
 from jp_stock_pipeline.config import CloudStoreSettings
 
-# 本番 D1 の実 DDL（2026-09-12 に sqlite_master から取得したもの）
+# core_stocks は本番 D1 の実 DDL（2026-09-12 に sqlite_master から取得）。
+# 子表は最小再現用で、**FK の ON DELETE は本番と異なる**（本番の yutai_benefits は
+# `ON UPDATE no action ON DELETE no action` で、genre_id への 2 本目の FK も持つ）。
+# 本番 14 本の内訳は cascade 11 / no action 3
+# （otakara_stock_financials / otakara_stock_scores / yutai_benefits）。
+# ここで cascade にしているのは「子表があっても ALTER が壊さない」ことの確認用。
 PROD_DDL = """
 CREATE TABLE `core_stocks` (
     `id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -93,7 +98,21 @@ class TestBuildColumnUpdate:
         assert "id" not in set_targets(sql)
         assert set_targets(sql) == set(cs.NEW_COLUMNS) | {"updated_at"}
 
-    @pytest.mark.parametrize("column", sorted(cs.PROTECTED_COLUMNS))
+    # 実装定数ではなくリテラルで列挙する。cs.PROTECTED_COLUMNS を parametrize に
+    # 使うと、定数から要素を削る変異をテストが追随してしまい検出できない。
+    @pytest.mark.parametrize(
+        "column",
+        [
+            "id",
+            "code",
+            "name",
+            "market",
+            "sector",
+            "is_active",
+            "is_yutai",
+            "created_at",
+        ],
+    )
     def test_既存列は書けない(self, column: str) -> None:
         with pytest.raises(D1Error, match="既存列は stockStock から書かない"):
             cs.build_column_update("7203", {column: "x"})
@@ -252,11 +271,49 @@ class TestAgainstRealSchema:
 
 class TestOrphanCheck:
     def test_14子表と_soft_参照1表を数える(self) -> None:
-        assert len(cs.CHILD_TABLES) == 15  # FK 14 + jss_financials の soft 参照
+        assert len(cs.CHILD_TABLES) == 14  # FK 宣言のある子表
+        assert cs.SOFT_CHILD_TABLES == ("jss_financials",)
+        assert len(cs.ALL_CHECKED_TABLES) == 15
         joined = " ".join(cs.orphan_check_statements())
-        for table in cs.CHILD_TABLES:
+        for table in cs.ALL_CHECKED_TABLES:
             assert f"FROM {table} c" in joined
         assert not _FORBIDDEN_RE.search(joined)
+
+    def test_soft参照だけ_stock_id_NULL_を除外する(self) -> None:
+        joined = " ".join(cs.orphan_check_statements())
+        assert "FROM jss_financials c LEFT JOIN core_stocks s ON s.id = c.stock_id" in joined
+        assert (
+            "FROM jss_financials c LEFT JOIN core_stocks s ON s.id = c.stock_id"
+            " WHERE c.stock_id IS NOT NULL AND s.id IS NULL" in joined
+        )
+        # FK 宣言のある表は stock_id が NOT NULL なので余計な条件を付けない
+        assert (
+            "FROM yutai_benefits c LEFT JOIN core_stocks s ON s.id = c.stock_id"
+            " WHERE s.id IS NULL" in joined
+        )
+
+    def test_孤児判定の意味を_sqlite_で確かめる(self) -> None:
+        """NULL は「未解決」であって孤児ではない。実在しない id だけを数える。"""
+        con = sqlite3.connect(":memory:")
+        con.executescript(PROD_DDL)
+        con.execute("CREATE TABLE jss_financials (id INTEGER PRIMARY KEY, stock_id INTEGER)")
+        con.execute(
+            "INSERT INTO core_stocks (code,name,market) VALUES ('7203','ト','プライム')"
+        )
+        con.executemany(
+            "INSERT INTO jss_financials (stock_id) VALUES (?)",
+            [(1,), (None,), (None,), (999,)],  # 正常1 / 未解決2 / 本物の孤児1
+        )
+        con.commit()
+        counts: dict[str, int] = {}
+        for sql in cs.orphan_check_statements():
+            if "jss_financials" not in sql:
+                continue
+            # 他の子表は存在しないので jss_financials の項だけ取り出して実行する
+            term = next(p for p in sql.split(" UNION ALL ") if "jss_financials" in p)
+            for name, n in con.execute(term):
+                counts[name] = n
+        assert counts == {"jss_financials": 1}, counts
 
     def test_D1_の_compound_SELECT_上限を超えない(self) -> None:
         """D1 は UNION ALL 5 項までで、6 項目から SQLITE_ERROR を返す（本番実測）。"""
