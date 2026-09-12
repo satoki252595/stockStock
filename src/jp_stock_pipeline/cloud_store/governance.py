@@ -149,6 +149,13 @@ TABLE_LICENSE: dict[str, TableLicense] = {
     "swing_entry_signals": _uniform(LicenseTag.PERSONAL_ONLY, _YAHOO, _CHILD),
     "swing_stock_screening": _uniform(LicenseTag.PERSONAL_ONLY, _YAHOO, _CHILD),
     "rsi_percentile": _uniform(LicenseTag.PERSONAL_ONLY, _YAHOO, _CHILD),
+    # L2 投影（kabulab-cf PR #23 / 0011 で 2026-09-13 に本番作成）。swing_daily_ohlcv の
+    # 終値列を銘柄ごとに 1 行へ畳んだもので、値の出所は Yahoo 日足のまま。
+    "p_momentum": _uniform(
+        LicenseTag.PERSONAL_ONLY,
+        _YAHOO,
+        "kabulab-cf src/shared/db/projection-schema.ts（2026-09-13 本番 sqlite_master で作成を確認）",
+    ),
     "otakara_stock_financials": _uniform(LicenseTag.PERSONAL_ONLY, _YAHOO, _CHILD),
     "otakara_stock_scores": _uniform(LicenseTag.PERSONAL_ONLY, _YAHOO, _CHILD),
     "finmath_price_snapshot": _uniform(LicenseTag.PERSONAL_ONLY, _YAHOO, _AUDIT),
@@ -245,8 +252,8 @@ TABLE_LICENSE: dict[str, TableLicense] = {
 ROW_TAG_COLUMN = "license_tag"
 
 # 本番（`_cf_KV` を除く）の表数。2026-09-13 の実測で 30 表 375 列あり、
-# `TABLE_LICENSE` はその 30 表すべてを登録している。
-OBSERVED_TABLE_COUNT = 30
+# `TABLE_LICENSE` はその 31 表すべてを登録している。
+OBSERVED_TABLE_COUNT = 31
 
 # 本番 `sqlite_master` から除く名前。SQLite と D1 の内部表。
 _INTERNAL_PREFIXES = ("sqlite_", "_cf_", "d1_", "__drizzle")
