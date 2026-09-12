@@ -1,0 +1,203 @@
+"""license_map: 列単位ライセンス地図と参照表の**実行主体**。
+
+## なぜこのジョブが必要だったか
+
+`cloud_store/schema.py` の `seed_reference_tables()` / `apply_schema()` は
+定義と `__all__` とテストはあるのに、**`jobs/*.py` からの呼び出しが 0 件**
+だった（`grep -rn "apply_schema\\|seed_reference" src scripts deploy tests`）。
+本番 `jss_column_license` の 7 行と `jss_index_symbols` の 6 行は、この経路の
+外で一度だけ手で投入されたものである。
+
+結果として次が成立していた:
+
+- 宣言（コード）を直しても実表は変わらない。`sector33` のタグ誤りは
+  コードとテストを直しただけでは本番に届かない
+- 逆に実表を手で直しても宣言は変わらない。どちらが正か決める手段が無い
+- `docs/TARGET-ARCHITECTURE.md` §8.1 が言う「2 つの真実が乖離しても誰も
+  検知しない」状態そのもの
+
+このジョブが**唯一の投入口**になる。`seed_reference_tables` を他から呼ばない
+（投入口が複数あると、どれが最後に走ったかで実表の内容が変わる）。
+
+## upsert は孤児宣言を消さない
+
+`seed_reference_tables` の upsert は `conflict=(table_name, column_name)` で
+DELETE を伴わない。**宣言から外した列の行は実表に残り続ける。** 残るのが
+personal-only なら害は無いが、`commercial-ok` の孤児が残ると「公開してよい」と
+宣言したまま誰も管理していない列ができる。投入のあとに実表を読み直して
+突き合わせ、孤児は削除する。
+
+`jss_index_symbols` の孤児は**削除しない**。`r2_key` が R2 の実オブジェクトを
+指しており、行を消すと参照されないオブジェクトが残る（`r2.py` に削除 API が
+無いので回収もできない）。報告だけにして、消すかどうかは R2 側の掃除と同じ
+変更で決める。
+
+## `apply_schema` を毎日は呼ばない
+
+`apply_schema` は `CREATE TABLE/INDEX IF NOT EXISTS` を 24 文発行する。本番には
+10 表すべてが既に存在するので、日次で呼んでも 24 往復ぶんの実行時間を使って
+必ず no-op になる。代わりに `sqlite_master` 1 文（**行を走査しない**）で存在を
+確かめ、欠けていたら「`apply_schema` を手で流せ」と報告する。ブートストラップ
+（表が無い環境）は 1 回きりの操作なので、日次 cron の仕事ではない。
+
+## 走査行数（D1 は走査行課金）
+
+1 回の実行で読むのは `sqlite_master` 1 文と、`jss_column_license` /
+`jss_index_symbols` の全行（宣言の件数と同じオーダー = 合計 14 行）だけ。
+実データの表は 1 行も読まない。
+"""
+
+from __future__ import annotations
+
+import logging
+
+from ..cloud_store import schema as S
+from ..cloud_store.d1 import D1Error, D1Store
+from .runner import JobContext, build_parser, main_exit, run_job
+
+logger = logging.getLogger(__name__)
+
+JOB_NAME = "license_map"
+
+
+def _store(ctx: JobContext) -> D1Store | None:
+    """正本 D1 を直接組む。
+
+    `ctx.cloud` は `runner` が `if not settings.dry_run:` の中でしか作らないので、
+    参照すると `--dry-run` が必ず即失敗する（`ops_check` / `freshness_probe` が
+    踏んだのと同じ穴）。`jss_*` は必ず正本 DB にあるので `KABULAB_D1_DATABASE_ID`
+    は見ない。
+    """
+    settings = ctx.settings.cloud_store
+    if not settings.d1_enabled():
+        ctx.add_failure(
+            "d1",
+            "D1 が未設定 (CF_ACCOUNT_ID / CF_API_TOKEN / CF_D1_DATABASE_ID)。"
+            " 地図を投入・照合できない",
+        )
+        return None
+    return D1Store(settings, writer=JOB_NAME)
+
+
+def _check_tables_exist(store: D1Store, ctx: JobContext) -> bool:
+    """`jss_*` が本番にあるか（sqlite_master のみ・行は走査しない）。"""
+    try:
+        rows = store.query(S.JSS_TABLES_SQL)
+    except D1Error as exc:
+        ctx.add_failure("tables", f"sqlite_master を読めない: {exc}")
+        return False
+    observed = {str(r.get("name") or "") for r in rows}
+    missing = sorted(S.declared_tables() - observed)
+    if missing:
+        ctx.add_failure(
+            "tables",
+            f"宣言した jss_ 表が本番に無い: {missing}"
+            "（ブートストラップは日次ジョブの仕事ではない。"
+            " `cloud_store.schema.apply_schema` を手で 1 回流すこと）",
+        )
+        return False
+    return True
+
+
+def _describe(diff: S.ReferenceDiff, table: str) -> list[str]:
+    problems: list[str] = []
+    if diff.missing:
+        problems.append(f"{table}: 宣言にあって実表に無い {list(diff.missing)}")
+    for key, got, want in diff.mismatched:
+        problems.append(f"{table}: {key} のタグが実表 {got!r} / 宣言 {want!r} で食い違う")
+    return problems
+
+
+def _sync_column_license(store: D1Store, ctx: JobContext) -> None:
+    """投入 → 読み直し → 孤児を削除 → それでも残る差分を失敗にする。"""
+    try:
+        rows = store.query(S.COLUMN_LICENSE_SQL)
+    except D1Error as exc:
+        ctx.add_failure("jss_column_license", f"実表を読めない: {exc}")
+        return
+
+    diff = S.column_license_diff(rows)
+    for orphan in diff.orphan:
+        table_name, column_name = orphan
+        try:
+            store.query(S.COLUMN_LICENSE_DELETE_SQL, [table_name, column_name])
+        except D1Error as exc:
+            ctx.add_failure("jss_column_license", f"孤児宣言 {orphan} を消せない: {exc}")
+            return
+        # 消したことを黙らせない。「公開してよい」と宣言していた列が
+        # 地図から外れた事実はレビューできる形で残す必要がある。
+        logger.warning(
+            "孤児宣言を削除: %s.%s（宣言から外れた列。upsert では消えないので明示削除）",
+            table_name, column_name,
+        )
+
+    problems = _describe(diff, "jss_column_license")
+    if problems:
+        # 投入直後に食い違う = upsert が届いていない。黙って次回に期待しない。
+        for p in problems:
+            ctx.add_failure("jss_column_license", p)
+        return
+    logger.info(
+        "列ライセンス地図: 宣言 %d 行と一致（孤児 %d 行を削除）",
+        len(S.column_license_rows()), len(diff.orphan),
+    )
+    ctx.add_success()
+
+
+def _check_index_symbols(store: D1Store, ctx: JobContext) -> None:
+    """指数シンボルの照合。孤児は**削除せず報告する**（R2 オブジェクトが残る）。"""
+    try:
+        rows = store.query(S.INDEX_SYMBOLS_SQL)
+    except D1Error as exc:
+        ctx.add_failure("jss_index_symbols", f"実表を読めない: {exc}")
+        return
+    diff = S.index_symbol_diff(rows)
+    problems = _describe(diff, "jss_index_symbols")
+    if diff.orphan:
+        # 失敗にはしない。R2 の掃除と同じ変更で消すべきもので、日次で鳴らすと
+        # 「毎日鳴る通知」になり見なくなる（設計書 §7.6 の原則を自分にも適用）。
+        logger.warning(
+            "jss_index_symbols に宣言外の slug がある: %s"
+            "（r2_key が実オブジェクトを指すので自動削除しない。R2 の掃除と同時に決める）",
+            [k[0] for k in diff.orphan],
+        )
+    if problems:
+        for p in problems:
+            ctx.add_failure("jss_index_symbols", p)
+        return
+    ctx.add_success()
+
+
+def execute(ctx: JobContext) -> None:
+    store = _store(ctx)
+    if store is None:
+        return
+    if not _check_tables_exist(store, ctx):
+        return
+
+    if ctx.settings.dry_run:
+        # 1 バイトも書かない。代わりに投入しようとした内容を全部出す。
+        for row in S.column_license_rows():
+            logger.info("dry-run: jss_column_license へ投入しない行 %s", row)
+        for row in S.index_symbol_rows():
+            logger.info("dry-run: jss_index_symbols へ投入しない行 %s", row)
+        ctx.add_success()
+        return
+
+    try:
+        S.seed_reference_tables(store)
+    except D1Error as exc:
+        ctx.add_failure("seed", f"参照表を投入できない: {exc}")
+        return
+
+    _sync_column_license(store, ctx)
+    _check_index_symbols(store, ctx)
+
+
+def main(argv: list[str] | None = None, *, env: dict[str, str] | None = None) -> int:
+    parser = build_parser("列単位ライセンス地図と参照表を D1 へ投入し、実表と照合する")
+    return run_job(JOB_NAME, execute, argv, parser=parser, env=env)
+
+
+if __name__ == "__main__":
+    main_exit(main())

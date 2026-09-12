@@ -1,5 +1,6 @@
 # 鮮度を観測して記録し（freshness_probe）、そのあと SLO を判定する（ops_check）。
-# 最後に core_stocks の列定義ドリフトを検出する（core_stocks_migrate --verify / E7）。
+# 続いて core_stocks の列定義ドリフトを検出し（core_stocks_migrate --verify / E7）、
+# 最後に列単位ライセンス地図を投入して実表と照合する（license_map）。
 # 異常があれば Issue を 1 本立てる。正常なら何も出さない。
 #
 # 「壊れても音が鳴らない」を塞ぐための層。実測で次が誰にも気づかれなかった:
@@ -137,9 +138,46 @@ jobs:
           KABULAB_D1_DATABASE_ID: ${{ secrets.KABULAB_D1_DATABASE_ID }}
         run: nix develop -c uv run python -m jp_stock_pipeline.jobs.core_stocks_migrate --verify
 
-      # どの層で落ちたかが分かるように3ステップの outcome を本文へ入れる
+      # 投入・照合層: 列単位ライセンス地図 (jss_column_license) と参照表。
+      #
+      # `cloud_store/schema.seed_reference_tables()` は定義とテストだけがあって
+      # **`jobs/*.py` からの呼び出しが 0 件**で、本番の 7 行は経路外で一度だけ
+      # 手で入れられたものだった。宣言を直しても実表に届かず、実表を手で直しても
+      # 宣言に戻らない = 2 つの真実が乖離しても誰も検知しない状態。
+      #
+      # ## 新しい cron を足さずここへ相乗りさせた理由
+      #
+      # `cloud_check.yml` は `workflow_dispatch` のみで cron が無いので、そこに
+      # 足しても CI では走らない。別 workflow に cron を付ける案も採らない
+      # （通知経路を増やすと見なくなる。この workflow は既に Issue を 1 本だけ
+      # 立てる経路を持っている）。列定義ドリフト検出 (E7) を第3ステップへ
+      # 相乗りさせたのと同じ判断である。
+      #
+      # ## 実行時間の帳尻
+      #
+      # ステップが 1 つ増えるぶんの実行時間は、同じ PR で第3ステップから
+      # `core_stocks` の全行走査 2 本（3,818 行 × 2 = 7,636 行と、その JSON 転送
+      # と sha256 計算）を外して相殺している。nix devShell は同一 job 内で
+      # 温まっているので、増えるのは `uv run` の起動と D1 への数往復だけ。
+      #
+      # ## 上3層と同じく `if: always()`
+      #
+      # 観測や判定が落ちた日に地図の照合だけ静かになると、「壊れているのに緑」と
+      # 区別できなくなる。
+      - name: Seed and verify the column license map
+        id: license
+        if: always()
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DB_JOB_LOG: ${{ secrets.NOTION_DB_JOB_LOG }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
+        run: nix develop -c uv run python -m jp_stock_pipeline.jobs.license_map
+
+      # どの層で落ちたかが分かるように4ステップの outcome を本文へ入れる
       # （観測が落ちたのか、観測はできたが SLO を割ったのか、列定義がドリフトした
-      # のかで対処がまったく違う）。
+      # のか、ライセンス地図が実表と乖離したのかで対処がまったく違う）。
       - name: SLO 違反を Issue に出す
         if: failure()
         env:
@@ -148,11 +186,12 @@ jobs:
           PROBE_OUTCOME: ${{ steps.probe.outcome }}
           JUDGE_OUTCOME: ${{ steps.judge.outcome }}
           DRIFT_OUTCOME: ${{ steps.drift.outcome }}
+          LICENSE_OUTCOME: ${{ steps.license.outcome }}
         run: |
           TITLE="[SLO違反] データの鮮度またはジョブ結果"
           EXISTING=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
-          BODY=$(printf '観測・判定・列定義ドリフト検出のいずれかが失敗しました。\n\n- 観測 (freshness_probe): %s\n- 判定 (ops_check): %s\n- 列定義ドリフト (core_stocks_migrate --verify / E7): %s\n\n実行ログ: %s\n検知: %s' \
-            "$PROBE_OUTCOME" "$JUDGE_OUTCOME" "$DRIFT_OUTCOME" "$RUN_URL" "$(date -u '+%Y-%m-%d %H:%M UTC')")
+          BODY=$(printf '観測・判定・列定義ドリフト検出・ライセンス地図の照合のいずれかが失敗しました。\n\n- 観測 (freshness_probe): %s\n- 判定 (ops_check): %s\n- 列定義ドリフト (core_stocks_migrate --verify / E7): %s\n- ライセンス地図 (license_map): %s\n\n実行ログ: %s\n検知: %s' \
+            "$PROBE_OUTCOME" "$JUDGE_OUTCOME" "$DRIFT_OUTCOME" "$LICENSE_OUTCOME" "$RUN_URL" "$(date -u '+%Y-%m-%d %H:%M UTC')")
           if [ -n "$EXISTING" ]; then
             gh issue comment "$EXISTING" --body "$BODY"
           else

@@ -14,6 +14,8 @@ finmath_/yuho_/ir_ と同居するため、接頭辞で所有を明示する。
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
+from dataclasses import dataclass
 
 from ..licensing import LicenseTag
 
@@ -296,6 +298,90 @@ def column_license_rows() -> list[list[str]]:
     return rows
 
 
+def index_symbol_rows() -> list[list[str]]:
+    """jss_index_symbols へ投入する行。Yahoo シンボル未確認のものは含めない。"""
+    return [
+        [slug, sym, name, f"index/{slug}.json", LicenseTag.PERSONAL_ONLY.value]
+        for slug, sym, name in INDEX_SYMBOLS
+        if sym
+    ]
+
+
+@dataclass(frozen=True)
+class ReferenceDiff:
+    """宣言（コード）と実表（D1）の差分。I/O を持たない純粋な比較結果。
+
+    - `missing`: 宣言にあって実表に無い行。投入が届いていない
+    - `mismatched`: キーは一致するが値が違う行。`(キー, 実表の値, 宣言の値)`
+    - `orphan`: 実表にあって宣言に無い行。**upsert では消えない**ので溜まる
+    """
+
+    missing: tuple[tuple[str, ...], ...] = ()
+    mismatched: tuple[tuple[tuple[str, ...], str, str], ...] = ()
+    orphan: tuple[tuple[str, ...], ...] = ()
+
+    @property
+    def clean(self) -> bool:
+        return not (self.missing or self.mismatched or self.orphan)
+
+
+def _diff(declared: dict[tuple[str, ...], str], observed: dict[tuple[str, ...], str]) -> ReferenceDiff:
+    return ReferenceDiff(
+        missing=tuple(sorted(k for k in declared if k not in observed)),
+        mismatched=tuple(
+            (k, observed[k], declared[k])
+            for k in sorted(declared)
+            if k in observed and observed[k] != declared[k]
+        ),
+        orphan=tuple(sorted(k for k in observed if k not in declared)),
+    )
+
+
+COLUMN_LICENSE_SQL = "SELECT table_name, column_name, license_tag FROM jss_column_license"
+INDEX_SYMBOLS_SQL = "SELECT slug, yahoo_symbol FROM jss_index_symbols"
+
+# 孤児宣言の削除。キーを明示して 1 行ずつ消す。
+# `NOT IN (...)` の 1 文にまとめない理由: D1 のバインドパラメータ上限は 100 で、
+# 宣言が増えると静かに上限へ当たる（`d1.MAX_BOUND_PARAMS`）。孤児は稀なので
+# 往復回数より上限の安全側を採る。
+COLUMN_LICENSE_DELETE_SQL = (
+    "DELETE FROM jss_column_license WHERE table_name = ? AND column_name = ?"
+)
+
+
+def column_license_diff(observed_rows: Iterable[dict]) -> ReferenceDiff:
+    """`jss_column_license` の実表と宣言を突き合わせる。
+
+    **upsert は `conflict=(table_name, column_name)` なので DELETE を伴わない。**
+    宣言から外した列の行はそのまま残り続ける。残った行が personal-only なら
+    害は無いが、**commercial-ok の孤児が残ると「公開してよい」と宣言したまま
+    誰も管理していない列**ができる。地図が実体と一致していることを別途
+    確かめる必要がある。
+    """
+    declared = {(t, c): tag for t, c, tag in column_license_rows()}
+    observed = {
+        (str(r.get("table_name") or ""), str(r.get("column_name") or "")): str(
+            r.get("license_tag") or ""
+        )
+        for r in observed_rows
+    }
+    return _diff(declared, observed)
+
+
+def index_symbol_diff(observed_rows: Iterable[dict]) -> ReferenceDiff:
+    """`jss_index_symbols` の実表と宣言を突き合わせる（slug → yahoo_symbol）。
+
+    `nkvi` は Yahoo シンボルが未確認で投入しないので、**実表に無いのが正常**。
+    `index_symbol_rows()` に入っていない slug は宣言に無い扱いになるため、
+    未確認のものが `missing` に出ることはない。
+    """
+    declared = {(row[0],): str(row[1]) for row in index_symbol_rows()}
+    observed = {
+        (str(r.get("slug") or ""),): str(r.get("yahoo_symbol") or "") for r in observed_rows
+    }
+    return _diff(declared, observed)
+
+
 def apply_schema(store) -> int:
     """jss_* を冪等に作成する。作成した文の数を返す。
 
@@ -308,15 +394,17 @@ def apply_schema(store) -> int:
 
 
 def seed_reference_tables(store) -> None:
-    """参照表（指数シンボル・列ライセンス）を投入する。"""
-    known = [(slug, sym, name) for slug, sym, name in INDEX_SYMBOLS if sym]
+    """参照表（指数シンボル・列ライセンス）を投入する。
+
+    **呼び出し元は `jobs/license_map.py` だけ**。ここを直接呼ぶ新しい経路を
+    増やさないこと（宣言の投入口が複数あると、どれが最後に走ったかで実表の
+    内容が変わる）。
+    """
+    symbols = index_symbol_rows()
     store.upsert(
         "jss_index_symbols",
         ["slug", "yahoo_symbol", "name_ja", "r2_key", "license_tag"],
-        [
-            [slug, sym, name, f"index/{slug}.json", LicenseTag.PERSONAL_ONLY.value]
-            for slug, sym, name in known
-        ],
+        symbols,
         conflict=["slug"],
     )
     rows = column_license_rows()
@@ -328,15 +416,41 @@ def seed_reference_tables(store) -> None:
     )
     logger.info(
         "参照表を投入: 指数 %d 件(未確認 %d 件はスキップ) / 列ライセンス %d 件",
-        len(known), len(INDEX_SYMBOLS) - len(known), len(rows),
+        len(symbols), len(INDEX_SYMBOLS) - len(symbols), len(rows),
     )
 
 
+# `jss_*` が本番に存在するかを sqlite_master で確かめる 1 文。
+# **行を走査しない**（sqlite_master はスキーマのカタログ）。
+JSS_TABLES_SQL = (
+    "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'jss_%' ORDER BY name"
+)
+
+
+def declared_tables() -> frozenset[str]:
+    """`SCHEMA_STATEMENTS` の CREATE TABLE から表名を取り出す。"""
+    names = set()
+    for statement in SCHEMA_STATEMENTS:
+        head = statement.strip()
+        if head.upper().startswith("CREATE TABLE"):
+            names.add(head.split("(", 1)[0].split()[-1])
+    return frozenset(names)
+
+
 __all__ = [
+    "COLUMN_LICENSE_DELETE_SQL",
+    "COLUMN_LICENSE_SQL",
     "INDEX_SYMBOLS",
+    "INDEX_SYMBOLS_SQL",
+    "JSS_TABLES_SQL",
     "MIXED_LICENSE_COLUMNS",
     "SCHEMA_STATEMENTS",
+    "ReferenceDiff",
     "apply_schema",
+    "column_license_diff",
     "column_license_rows",
+    "declared_tables",
+    "index_symbol_diff",
+    "index_symbol_rows",
     "seed_reference_tables",
 ]
