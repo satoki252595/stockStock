@@ -119,8 +119,11 @@ equity 件数が 500 のまま P4b を通すと:
 
 from __future__ import annotations
 
-import re
-
+from ..contracts.stock_code import (
+    STOCK_CODE_RE,
+    is_valid_stock_code,
+    normalize_stock_code,
+)
 from .guards import GuardError
 
 # --- 移植元の定数（universe.ts の行番号を併記。変更時は両方を見ること）---------
@@ -141,29 +144,24 @@ INSTRUMENT_TYPE_EQUITY = "equity"
 # この下限が無いと **(c) が黙って空虚になる**（下の「部分充填」の節）。
 MIN_BACKFILLED_EQUITY_ROWS = MIN_EQUITY_ROWS
 
-# JPX の4文字コード契約（英字入り新方式コード "130A" を含む）。
-# kabulab-cf の src/shared/jpx/stock-code.ts:31 と同じ。
-STOCK_CODE_RE = re.compile(r"^\d{3}[0-9A-Z]$")
-
-
-def normalize_stock_code(code: str | None) -> str:
-    """移植元 `src/shared/jpx/stock-code.ts:56-63` の `normalizeStockCode` と同じ。
-
-    trim → **全角英数字を半角へ** → 大文字化。全角化は data_j 以外の入力
-    （手入力・別ソース）が混ざったときに判定が割れないようにするためで、
-    移植元にある以上こちらでも落とさない。
-    """
-    text = str(code or "").strip()
-    # 全角英数字 U+FF10-FF19 / U+FF21-FF3A / U+FF41-FF5A を半角へ (-0xFEE0)
-    half = "".join(
-        chr(ord(ch) - 0xFEE0) if "\uff10" <= ch <= "\uff5a" else ch for ch in text
-    )
-    return half.upper()
-
-
-def is_valid_stock_code(code: str | None) -> bool:
-    """4文字コード契約に合格するか。5桁の種類株はここで落ちる。"""
-    return bool(STOCK_CODE_RE.match(normalize_stock_code(code)))
+# JPX の4文字コード契約は `contracts/stock_code.py` が正準実装を持つ。
+# ここに同じ正規表現と正規化を写経していたため、TDnet/EDINET/reconcile の各
+# 実装と少しずつ答えが割れていた（実測で 13 入力のうち 7 入力が不一致）。
+# 後方互換のため名前はここからも見えるようにしておく（既存の import 元を壊さない）。
+__all__ = [
+    "INSTRUMENT_TYPE_EQUITY",
+    "MIN_BACKFILLED_EQUITY_ROWS",
+    "STOCK_CODE_RE",
+    "normalize_stock_code",
+    "is_valid_stock_code",
+    "MIN_JPX_ROWS",
+    "MIN_EQUITY_ROWS",
+    "MIN_EXISTING_COVERAGE",
+    "MAX_DEACTIVATION_RATIO",
+    "assert_universe_coverage",
+    "should_deactivate_universe_code",
+    "assert_population_sane",
+]
 
 
 def instrument_type_backfilled(existing_equity_active_count: int | None) -> bool:
@@ -217,8 +215,15 @@ def assert_universe_coverage(
 ) -> None:
     """母集団の条件。1つでも破れたら書込ゼロで止める（universe.ts:82-120 + D4）。
 
-    :param raw_count: JPX data_j の**全行数**。ETF/REIT/PRO/外国株を含む
-        （内国株に絞る前の値）。universe.ts:159 の第1引数。
+    :param raw_count: JPX data_j の**全行数**。ETF/REIT/PRO/外国株を含み、
+        5文字の種類株行も含む（内国株にも4文字コード契約にも絞る**前**の値）。
+        universe.ts:159 の第1引数 = `downloadJpxListing()` が返した配列の長さ。
+
+        **パーサ側で非正準コードの行を落としてはならない。** 落とすと
+        raw_count が「正準コード行数」に変質し、MIN_JPX_ROWS=4000 が
+        「部分取得・列崩れの検知器」として機能しなくなる（ETF/REIT が
+        丸ごと消えても 4,000 を割らなければ通ってしまう）。母集団の
+        絞り込みは equity_count 側（`isListedEquity` 相当）の責務。
     :param equity_count: `isListedEquity` 相当を通った行数。「内国株式」かつ
         プライム|スタンダード|グロース かつ4文字コード契約、の3条件すべて。
     :param existing_active_count: `core_stocks` の **is_active=1 の行数のみ**。
@@ -298,6 +303,11 @@ def should_deactivate_universe_code(code: str, raw_codes: frozenset[str]) -> boo
 
     `raw_codes` は `isListedEquity` で絞る**前**の data_j 全行のコード集合。
     ここを内国株だけに絞ると ETF や REIT が毎回対象外化されて (d1) が発火する。
+
+    **5文字コードも raw_codes に残っていること**が前提。パーサ側で落とすと
+    `code not in raw_codes` 節が種類株について到達不能になる（今日は後段の
+    `not is_valid_stock_code` 節が先に効くので結果は変わらないが、片方の節が
+    死んでいることに気づけなくなる）。
     """
     return code not in raw_codes or not is_valid_stock_code(code)
 

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from ..contracts.stock_code import parse_stock_code, source_code_to_ticker
 from ..models import DataQuality, PriceTechnicalRecord, Source
 
 logger = logging.getLogger(__name__)
@@ -34,16 +35,25 @@ class Discrepancy:
     deviation_pct: float
 
 
-def normalize_code(raw: str) -> str:
-    """銘柄コードを 4 桁基準へ正規化する。
+class ReconcileDataError(Exception):
+    """② 側が正準でない銘柄コードを持っていた（突合検証が見つけるべきデータ破損）。"""
 
-    JPX 系ソース（J-Quants 等）は 5 桁（例 '72030'）で返すため先頭4桁へ。
-    既に 4 桁（stooq 等）の場合はそのまま返す。
+
+def normalize_code(raw: str | None) -> str | None:
+    """第2ソースの銘柄コードを 4 文字基準へ正規化する。妥当でなければ None。
+
+    判定と正規化は `contracts/stock_code.py` の `source_code_to_ticker` に委譲する。
+
+    旧実装は「5 文字なら先頭4文字、それ以外は入力をそのまま返す」だったため、
+    妥当性を一切見ずに突合辞書のキーを作っていた:
+
+    - `"25935"`（伊藤園 第1種優先株式）を `"2593"`（同社 普通株）のキーにしていた。
+      第2ソースに種類株の終値が混ざっていれば、普通株の終値と比べて偽の乖離を
+      報告する（あるいは本物の乖離を優先株の値で塗り潰す）。
+    - `str(raw)` を通していたため `None` が文字列 `"None"` というキーになっていた。
+    - `"0720"` / `"A130"` / `"7203.T"` のような実在しないコードも素通りしていた。
     """
-    text = str(raw).strip()
-    if len(text) == 5:
-        return text[:4]
-    return text
+    return source_code_to_ticker(raw)
 
 
 def reconcile_prices(
@@ -62,16 +72,42 @@ def reconcile_prices(
     if other_df.empty:
         return []
     theirs_by_code: dict[str, float] = {}
+    unparsable = 0
     for _, row in other_df.iterrows():
         close = row.get(close_col)
         if close is None or pd.isna(close):
             continue
-        theirs_by_code[normalize_code(row[code_col])] = float(close)
+        # 第2ソース（外部）のコードは 5 文字形式で来ることも 4 文字のこともある。
+        # 正準形にできないものは突合対象から外す（勝手に丸めると別銘柄と
+        # 突き合わせる。旧実装は "25935" を "2593" のキーにしていた）。
+        their_code = normalize_code(row[code_col])
+        if their_code is None:
+            unparsable += 1
+            continue
+        theirs_by_code[their_code] = float(close)
+    if unparsable:
+        # 黙って捨てない。第2ソースの仕様変更や列ズレはここに現れる。
+        logger.warning(
+            "突合: 第2ソースの %d 行を正準コードにできず突合対象から除外した"
+            "（列 %s の形式を確認すること）",
+            unparsable,
+            code_col,
+        )
 
     discrepancies: list[Discrepancy] = []
     for record in current_records:
-        # 両側を同じ正規化で突き合わせる（② が将来 5 桁を持っても取りこぼさない）
-        theirs = theirs_by_code.get(normalize_code(record.code))
+        # ② 側のコードは**既に正準4文字**である前提（①銘柄マスタが正本）。
+        # ここで None が出るのは「② 自体が非正準コードを持っている」＝突合検証が
+        # 見つけるべきデータ破損なので、第2ソース側と同じようにスキップして
+        # しまうと検証の目的そのものを取り落とす。§3-1 の「欠損は欠損」は
+        # **取得できなかった値**の話で、破損データを黙って飛ばす許可ではない。
+        our_code = parse_stock_code(record.code)
+        if our_code is None:
+            raise ReconcileDataError(
+                f"② の銘柄コードが正準形でない: {record.code!r}。"
+                "①銘柄マスタとの整合を確認すること（突合は中断した）。"
+            )
+        theirs = theirs_by_code.get(our_code)
         if theirs is None or theirs == 0 or record.close is None:
             continue
         deviation = abs(record.close - theirs) / theirs * 100.0

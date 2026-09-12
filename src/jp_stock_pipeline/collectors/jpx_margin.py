@@ -127,6 +127,13 @@ def parse_margin_text(text: str) -> MarginData:
     )
     rows = [
         MarginRow(
+            # 既知例外 (docs/CONTRACTS.md 不変条件9): ここは
+            # `contracts.stock_code.source_code_to_ticker` を通していない。
+            # 5 文字を無条件に先頭 4 文字へ切る＝種類株を普通株へ取り違える規則
+            # そのものだが、末尾 "0" 限定にすると信用銘柄の ETF/REIT
+            # (検査文字が "0" でない見込み) を大量に落とす恐れがある。
+            # 実 PDF で検査文字の分布を測るまで触らない。フィクスチャは規約上
+            # コミットできず本ファイルのテストは常時 skip = 回帰検知ゼロ。
             code=mm.group(1)[:4],
             sell=to_int(mm.group(3)),
             sell_chg=to_int(mm.group(4)),

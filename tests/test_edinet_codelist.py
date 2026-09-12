@@ -42,6 +42,31 @@ class TestNormalizeSecCode:
         assert mod.normalize_sec_code("") is None
         assert mod.normalize_sec_code("  ") is None
 
+    def test_不正な形式を素通しせずNoneにする(self):
+        """仕様変更（厳格化）。
+
+        旧実装は「末尾0の5桁だけ4桁化し、それ以外は**入力をそのまま返す**」
+        だったため、妥当性を一切検証しない素通しになっていた。呼び出し側
+        (`edinet.py:209` の scope / `:246` の code 列) は不正なコードを
+        正常値として受け取っていた。
+        """
+        assert mod.normalize_sec_code("720") is None  # 桁不足
+        assert mod.normalize_sec_code("7203.T") is None  # サフィックス付き
+        assert mod.normalize_sec_code("A130") is None  # 1桁目英字
+        assert mod.normalize_sec_code("1234567") is None  # 桁過多
+
+    def test_種類株コードを普通株に丸めない(self):
+        # 伊藤園第1種優先株式。末尾非0なので4桁化しない。
+        # 旧実装はここも素通しで "25935" を返しており、呼び出し側で
+        # 5文字コードのまま core_stocks を引いて不一致になっていた。
+        assert mod.normalize_sec_code("25935") is None
+
+    def test_表記揺れは吸収する(self):
+        # 旧実装は大文字化・全角半角化をしておらず、同じ銘柄が表記違いで
+        # 別コードになりうる（TDnet 側の実装とも割れていた）。
+        assert mod.normalize_sec_code("409a0") == "409A"
+        assert mod.normalize_sec_code("７２０３") == "7203"
+
 
 class TestParseCodelist:
     def test_parses_listed_companies(self):
