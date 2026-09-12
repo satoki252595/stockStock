@@ -109,6 +109,10 @@
       "kind": "uniform",
       "tag": "personal-only"
     },
+    "p_momentum": {
+      "kind": "uniform",
+      "tag": "personal-only"
+    },
     "rsi_percentile": {
       "kind": "uniform",
       "tag": "personal-only"
