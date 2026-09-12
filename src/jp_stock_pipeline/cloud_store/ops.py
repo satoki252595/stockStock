@@ -74,7 +74,18 @@ def record_freshness(
     license_tag: str | None,
     updated_at: int,
 ) -> None:
-    """データセットの鮮度断面を上書きする（1 データセット 1 行）。"""
+    """データセットの鮮度断面を上書きする（1 データセット 1 行）。
+
+    **`updated_at` は「記録した時刻」ではなく「観測した実表の取得 epoch」**
+    （= データ自身の as_of）を渡すこと。ここに `now` を入れると、実表が凍結して
+    いても記録のたびに更新時刻が進み、**翌日から恒久的に緑**になる。それは
+    「鮮度表があるのに何も検知しない」という、writer 不在より悪い状態になる
+    （空なら少なくとも「空だ」と分かる）。
+
+    `latest_data_date` も同様にデータ基準日であり、判定はこちらを優先する
+    （`slo.judge_observation` の (c)）。`updated_at` は基準日の列が無い表の
+    フォールバックにしか使わない。
+    """
     latest = (
         latest_data_date.isoformat()
         if isinstance(latest_data_date, date)
@@ -117,5 +128,26 @@ def safe_record_job_run(store: D1Store | None, **kwargs) -> bool:
         record_job_run(store, **kwargs)
     except D1Error as exc:
         logger.warning("jss_job_runs へ記録できず: %s", exc)
+        return False
+    return True
+
+
+def safe_record_freshness(store: D1Store | None, **kwargs) -> bool:
+    """鮮度の記録に失敗してもジョブを落とさない。記録できたかを返す。
+
+    `safe_record_job_run` と同形。ここで例外を投げると「1 表の欠損で 7 件全滅」に
+    なるため、呼び出し側が返り値で当該データセットだけを失敗扱いにできるようにする
+    （`jobs/freshness_probe.py` はそれを受けてジョブ全体を失敗させる）。
+
+    なお `record_freshness` に `license_tag` の None 拒否は**入れない**。検証は
+    マニフェスト（`datasets.py`）側とそのテストで行う。記録層で弾くと、
+    ライセンスタグを持たない呼び出しが「記録できない」に化けて原因が分からなくなる。
+    """
+    if store is None:
+        return False
+    try:
+        record_freshness(store, **kwargs)
+    except D1Error as exc:
+        logger.warning("jss_dataset_freshness へ記録できず: %s", exc)
         return False
     return True

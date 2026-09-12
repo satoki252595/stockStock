@@ -1,16 +1,38 @@
-# 鮮度とジョブ結果の SLO 判定。何も書かず、違反があれば Issue を立てる。
+# 鮮度を観測して記録し（freshness_probe）、そのあと SLO を判定する（ops_check）。
+# 異常があれば Issue を 1 本立てる。正常なら何も出さない。
 #
 # 「壊れても音が鳴らない」を塞ぐための層。実測で次が誰にも気づかれなかった:
 #   EDINET 11 営業日連続 processed=0 で「成功」/ JPX 404 で銘柄マスタ 33 日停止
 #   優待 81.5 日停止 / 14 workflow に失敗通知 0 行
 #
-# 正常なら何も出さない。異常時だけ Issue が 1 本立つ。
+# ## cron を 10:00 UTC から動かした理由（前提が逆だった）
+#
+# 旧版のコメントは「日次ジョブが出揃った後。10:00 UTC」と書いていたが、
+# **prices_daily は 10:30 UTC 開始（timeout 150分）、edinet_daily は 12:00 UTC 開始
+# （timeout 120分）で ops_check より後**だった。つまり毎日「まだ走っていない
+# ジョブの鮮度」を測って赤にしていた。日次ジョブが全部終わり得る 14:00 UTC の
+# 後ろへ移す（14:30 UTC = 23:30 JST。JST の暦日を跨がない時刻に置くことで、
+# データ基準日ベースの加齢が 1 日ずれないようにしてある）。
+#
+# ## 2 ステップに分けてあり、判定は `if: always()`
+#
+# 観測が落ちても判定は必ず走らせる。観測失敗で判定をスキップすると
+# 「前日の凍結した行が加齢して赤」という**正しい判定が消えて静かになる**のが
+# 最悪の失敗モードで、それは壊れているのに緑と区別できない。
+#
+# ## トークンの権限分離ができていない点
+#
+# 観測（freshness_probe）は D1 への**書き込み**権限が必要で、判定（ops_check）は
+# 読み取りだけで足りる。しかし現在の secret 構成は CF_API_TOKEN 1 本しかなく、
+# 両ステップが同じトークンを使う。判定側を読み取り専用トークンに分けるには
+# Cloudflare 側でトークンを 2 本発行して secret を増やす必要がある（未実施）。
 name: ops_check
 
 on:
   schedule:
-    # 日次ジョブが出揃った後。10:00 UTC = 19:00 JST
-    - cron: "0 10 * * *"
+    # 日次ジョブ（prices_daily 10:30 / edinet_daily 12:00 UTC）が出揃った後。
+    # 14:30 UTC = 23:30 JST
+    - cron: "30 14 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -31,7 +53,22 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Sync dependencies
         run: nix develop -c uv sync
-      - name: Run ops_check
+
+      # 観測層: 実表を測って jss_dataset_freshness へ書く（判定も通知もしない）。
+      - name: Record freshness
+        id: probe
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DB_JOB_LOG: ${{ secrets.NOTION_DB_JOB_LOG }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
+        run: nix develop -c uv run python -m jp_stock_pipeline.jobs.freshness_probe
+
+      # 判定層: 何も書かない。観測が落ちても必ず走らせる（上のコメント参照）。
+      - name: Judge SLO
+        id: judge
+        if: always()
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DB_JOB_LOG: ${{ secrets.NOTION_DB_JOB_LOG }}
@@ -40,15 +77,20 @@ jobs:
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
         run: nix develop -c uv run python -m jp_stock_pipeline.jobs.ops_check
 
+      # どちらの層で落ちたかが分かるように両ステップの outcome を本文へ入れる
+      # （観測が落ちたのか、観測はできたが SLO を割ったのかで対処が違う）。
       - name: SLO 違反を Issue に出す
         if: failure()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PROBE_OUTCOME: ${{ steps.probe.outcome }}
+          JUDGE_OUTCOME: ${{ steps.judge.outcome }}
         run: |
           TITLE="[SLO違反] データの鮮度またはジョブ結果"
           EXISTING=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
-          BODY=$(printf 'SLO 違反を検知しました。\n\n実行ログ: %s\n検知: %s' "$RUN_URL" "$(date -u '+%Y-%m-%d %H:%M UTC')")
+          BODY=$(printf '観測または判定が失敗しました。\n\n- 観測 (freshness_probe): %s\n- 判定 (ops_check): %s\n\n実行ログ: %s\n検知: %s' \
+            "$PROBE_OUTCOME" "$JUDGE_OUTCOME" "$RUN_URL" "$(date -u '+%Y-%m-%d %H:%M UTC')")
           if [ -n "$EXISTING" ]; then
             gh issue comment "$EXISTING" --body "$BODY"
           else
