@@ -1040,11 +1040,17 @@ CREATE TABLE jss_dataset_freshness (
   row_or_object_count INTEGER,
   bytes               INTEGER,
   license_tag         TEXT,
-  updated_at          INTEGER NOT NULL
+  updated_at          INTEGER NOT NULL  -- **データ自身の as_of**（記録時刻ではない）
 );
 ```
 
 行数: 約20。現行の `MAX(data_date) FROM core_stock_financials`（3,764行走査）と `MAX(pubdate) FROM ir_disclosures`（37,338行走査）を **1クエリ20行走査**に置換でき、D1 の走査行課金を桁で下げられる。
+
+**`updated_at` の意味（間違えると監視が恒久的に緑になる）**: この列には「観測した実表の取得 epoch」＝ **データ自身の as_of** を入れる。行を書いた時刻（`now`）を入れてはいけない。`now` を入れると、実表が凍結していても記録のたびに値が進み、**翌日から永久に緑**になる（鮮度表があるのに何も検知しない状態で、writer 不在より悪い。空なら少なくとも「空だ」と分かる）。
+
+測れなかった場合は `0` を入れる（列が NOT NULL なので NULL を書けない）。`0` は「不明」の約束で、`cloud_store/slo.py:age_hours` は `0` を `None` と同じく unknown に倒す。
+
+**判定は `latest_data_date` を優先する。** `updated_at` は日付列を持たない表（`core_stocks` / `yutai_benefits`）のフォールバックにしか使わない。取得時刻で判定すると偽の緑が出る実例: `jss_supply_latest` は `data_date=2026-09-10` なのに `fetched_at` は `2026-09-11T14:58Z` で、`supply_daily` が `fetched_at = now_jst()` を全行に塗り直すため、日証金が同じスナップショットを返し続けても取得時刻基準では永遠に緑になる。
 
 #### B-9. `jss_writer_claims` — 列単位の writer 排他
 
