@@ -188,7 +188,10 @@ class TestDoesNotScanRows:
         assert license_map.main([], env=dict(_D1_ENV)) == 0
         selects = [s for s in store.sql_log if s.lstrip().upper().startswith("SELECT")]
         # 参照表（宣言の件数と同じオーダー）と sqlite_master 以外は読まない。
-        allowed = ("jss_column_license", "jss_index_symbols", "sqlite_master")
+        allowed = (
+            "jss_column_license", "jss_index_symbols", "jss_writer_claims",
+            "sqlite_master",
+        )
         for sql in selects:
             assert any(name in sql for name in allowed), sql
 
@@ -241,3 +244,135 @@ class TestReferenceDiff:
     @pytest.mark.parametrize("rows", [[], None])
     def test_空でも落ちない(self, rows) -> None:
         assert not S.column_license_diff(rows or []).clean
+
+
+class TestWriterClaims:
+    """writer の排他宣言。本番 4 行に対して照合コードが両リポジトリに 0 行だった。"""
+
+    def _claims(self, store: _FakeStore) -> set[tuple[str, str, str]]:
+        return {
+            (r["dataset"], r["column_group"], r["writer"])
+            for r in store.query(G.WRITER_CLAIMS_SQL)
+        }
+
+    def test_実行すると宣言が実表へ届く(self, monkeypatch) -> None:
+        store = _FakeStore()
+        _wire(monkeypatch, store)
+        assert self._claims(store) == set()
+        assert license_map.main([], env=dict(_D1_ENV)) == 0
+        assert self._claims(store) == {
+            (c.dataset, c.column_group, c.writer) for c in G.WRITER_CLAIMS
+        }
+
+    def test_core_stocks_は_kabulab_cf_から始める(self, monkeypatch) -> None:
+        """`writer='stockStock'` で入れると universe.ts の照合が毎回 throw して
+
+        JPX 母集団同期が止まる。`core_stocks` の行を今日書いているのは
+        kabulab-cf の universe.ts だけで、stockStock 側は
+        `build_column_update` が「組み立てて返す（実行しない）」設計である。
+        """
+        store = _FakeStore()
+        _wire(monkeypatch, store)
+        assert license_map.main([], env=dict(_D1_ENV)) == 0
+        assert ("core_stocks", "base", "kabulab-cf") in self._claims(store)
+        assert not [c for c in self._claims(store)
+                    if c[0] == "core_stocks" and c[2] == "stockStock"]
+
+    def test_writer_が居ない列群は宣言しない(self) -> None:
+        """`core_stocks` の enrich 群（P4a の 12 列）は今日どのジョブも書かない。
+
+        writer が居ない群を宣言すると「列を足したが writer を入れ忘れて黙って
+        死ぬ」を検出できなくなる（`estimate_source_url` は 8,314 行すべて NULL
+        なのに `estimated_value` は 5,333 行ある、という状態が実在した）。
+        """
+        groups = {(c.dataset, c.column_group) for c in G.WRITER_CLAIMS}
+        assert ("core_stocks", "enrich") not in groups
+
+    def test_all_を使わず_base_で始める(self) -> None:
+        """PK が `(dataset, column_group)` なので後からの改名は破壊的書換になる。
+
+        `core_stocks` を `all` で入れると、P4b で `base` / `enrich` へ割るときに
+        `all` 行の DELETE が必要になる。
+        """
+        for claim in G.WRITER_CLAIMS:
+            if claim.column_group == G.COLUMN_GROUP_ALL:
+                assert claim.dataset.startswith("jss_"), claim
+        assert set(G.COLUMN_GROUPS) == {"all", "base", "enrich"}
+
+    def test_再実行で_updated_at_が動かない(self, monkeypatch) -> None:
+        """宣言日を入れる列に実行時刻を入れない（B-8 と同じ間違いを繰り返さない）。"""
+        store = _FakeStore()
+        _wire(monkeypatch, store)
+        assert license_map.main([], env=dict(_D1_ENV)) == 0
+        first = store.query("SELECT dataset, column_group, updated_at FROM jss_writer_claims")
+        assert license_map.main([], env=dict(_D1_ENV)) == 0
+        assert store.query(
+            "SELECT dataset, column_group, updated_at FROM jss_writer_claims"
+        ) == first
+
+    def test_照合は_1_段目では失敗させない(self, monkeypatch) -> None:
+        """claim 行の無い DB への最初の実行を異常終了させない（鶏と卵）。
+
+        投入する側も書込ジョブなので、「claim が無ければ例外」を先に入れると
+        ブートストラップ不能になる。
+        """
+        store = _FakeStore()
+        _wire(monkeypatch, store)
+        store.query(
+            "INSERT INTO jss_writer_claims (dataset, column_group, writer, updated_at)"
+            " VALUES ('core_stocks', 'all', 'stockStock', 0)"
+        )
+        assert license_map.main([], env=dict(_D1_ENV)) == 0
+
+    def test_宣言に無い_claim_は消さずに報告する(self, monkeypatch, caplog) -> None:
+        """本番の既存 4 行の中身は本レーンから読めない。推測で消さない。"""
+        store = _FakeStore()
+        _wire(monkeypatch, store)
+        store.query(
+            "INSERT INTO jss_writer_claims (dataset, column_group, writer, updated_at)"
+            " VALUES ('unknown_dataset', 'all', 'stockStock', 0)"
+        )
+        with caplog.at_level("WARNING"):
+            assert license_map.main([], env=dict(_D1_ENV)) == 0
+        assert ("unknown_dataset", "all", "stockStock") in self._claims(store)
+        assert "unknown_dataset" in caplog.text
+
+    def test_列群を分けた表への_all_行は整理が必要だと言う(self, monkeypatch, caplog) -> None:
+        """`core_stocks/all` と `core_stocks/base` が同居すると主張が矛盾する。"""
+        store = _FakeStore()
+        _wire(monkeypatch, store)
+        store.query(
+            "INSERT INTO jss_writer_claims (dataset, column_group, writer, updated_at)"
+            " VALUES ('core_stocks', 'all', 'stockStock', 0)"
+        )
+        with caplog.at_level("WARNING"):
+            assert license_map.main([], env=dict(_D1_ENV)) == 0
+        assert "整理が必要" in caplog.text
+
+    def test_2_段目では宣言外の_claim_で落ちる(self, monkeypatch) -> None:
+        """切替が飾りでないこと（2 段目へ進めば実際に CI が赤くなる）。
+
+        投入のあとに読み直す形なので、writer の食い違いは upsert が届いた時点で
+        消える（届かなければ差分として残る = 書き込みが落ちたことの検出になる）。
+        実表に残り続けるのは**宣言に無い claim** なので、2 段目の効果はそこで
+        確かめる。
+        """
+        store = _FakeStore()
+        _wire(monkeypatch, store)
+        monkeypatch.setattr(G, "CLAIM_MISMATCH_IS_FAILURE", True)
+        store.query(
+            "INSERT INTO jss_writer_claims (dataset, column_group, writer, updated_at)"
+            " VALUES ('core_stocks', 'all', 'stockStock', 0)"
+        )
+        assert license_map.main([], env=dict(_D1_ENV)) == 1
+
+    @pytest.mark.parametrize("as_failure", [False, True])
+    def test_段階で_failure_と_warning_が入れ替わる(self, monkeypatch, as_failure) -> None:
+        """純粋関数として固定する（I/O を挟まないので両段を直接比べられる）。"""
+        monkeypatch.setattr(G, "CLAIM_MISMATCH_IS_FAILURE", as_failure)
+        rows = [{"dataset": "core_stocks", "column_group": "base", "writer": "stockStock"}]
+        failures, warnings = G.writer_claim_problems(rows)
+        assert bool(failures) is as_failure
+        assert bool(warnings) is not as_failure
+        messages = failures or warnings
+        assert any("食い違う" in m for m in messages), messages

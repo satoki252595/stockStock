@@ -52,11 +52,22 @@ personal-only なら害は無いが、`commercial-ok` の孤児が残ると「�
 **約 6 万行の走査**になり、設計書がまさにその規模の走査を「桁で下げる」対象と
 して挙げているのと正面衝突する。
 
+## writer の排他宣言も同じ扱いにする
+
+`jss_writer_claims` も本番 4 行に対して**照合コードが両リポジトリに 0 行**
+だった。投入と照合をここで行うが、**照合は warning から始める**。claim を投入
+するのも書込ジョブなので、「claim が無ければ例外」を先に入れると claim 行の
+無い DB への最初の実行が必ず異常終了してブートストラップ不能になる
+（`governance.CLAIM_MISMATCH_IS_FAILURE` に fail へ上げる条件を書いてある）。
+
+`jss_writer_claims` の孤児も **prune しない**。本番の既存 4 行がどの dataset を
+指しているかは本レーンからは読めず、推測で消すと読めない情報を壊す。
+
 ## 走査行数（D1 は走査行課金）
 
 1 回の実行で読むのは `sqlite_master` 2 文（`jss_` の存在確認と全表 DDL）と、
-`jss_column_license` / `jss_index_symbols` の全行（宣言の件数と同じオーダー =
-合計 22 行）だけ。実データの表は 1 行も読まない。
+`jss_column_license` / `jss_index_symbols` / `jss_writer_claims` の全行（宣言の
+件数と同じオーダー = 合計 39 行）だけ。実データの表は 1 行も読まない。
 """
 
 from __future__ import annotations
@@ -71,6 +82,17 @@ from .runner import JobContext, build_parser, main_exit, run_job
 logger = logging.getLogger(__name__)
 
 JOB_NAME = "license_map"
+
+
+class LicenseMapIncomplete(RuntimeError):
+    """1 つでも照合できなかった（runner に STATUS_FAILURE を出させるため）。
+
+    `runner._status` は failed>0 かつ processed>0 を「一部失敗」= **exit 0** に
+    する。素直に書くと、4 つの検査のうち 1 つが落ちても他が成功していれば
+    `ops_check.yml` が緑になり Issue が立たない。地図の乖離は「一部失敗」で
+    済ませてよい種類のものではないので、最後に例外を投げて落とす
+    （`jobs/freshness_probe.py` の `ProbeIncomplete` と同じ理由）。
+    """
 
 
 def _store(ctx: JobContext) -> D1Store | None:
@@ -143,6 +165,44 @@ def _check_coverage(store: D1Store, ctx: JobContext) -> None:
         for failure in report.failures:
             ctx.add_failure("coverage", failure)
         return
+    ctx.add_success()
+
+
+def _sync_writer_claims(store: D1Store, ctx: JobContext) -> None:
+    """writer の排他宣言を投入して照合する（warn → fail の 2 段リリースの 1 段目）。
+
+    本番の既存 4 行はすべて `column_group='all'` / `writer='stockStock'` で、
+    照合コードは**両リポジトリに 0 行**だった。しかも両方が書く `core_stocks` は
+    誰の所有でもなかった。
+
+    **claim が無いときに例外で落とす検査を先に入れてはいけない。** claim を
+    投入するのも書込ジョブなので、claim 行の無い DB に対する最初の実行が必ず
+    異常終了しブートストラップ不能になる。だから 1 段目は投入と warning だけで、
+    fail へ上げる条件は `governance.CLAIM_MISMATCH_IS_FAILURE` のコメントにある。
+    """
+    try:
+        store.upsert(
+            "jss_writer_claims",
+            ["dataset", "column_group", "writer", "updated_at"],
+            G.writer_claim_rows(),
+            conflict=["dataset", "column_group"],
+        )
+        rows = store.query(G.WRITER_CLAIMS_SQL)
+    except D1Error as exc:
+        ctx.add_failure("jss_writer_claims", f"claim を投入・照合できない: {exc}")
+        return
+    failures, warnings = G.writer_claim_problems(rows)
+    for warning in warnings:
+        logger.warning("writer claim: %s", warning)
+    if failures:
+        for failure in failures:
+            ctx.add_failure("jss_writer_claims", failure)
+        return
+    logger.info(
+        "writer claim: 宣言 %d 件を投入（照合は %s）",
+        len(G.WRITER_CLAIMS),
+        "失敗にする" if G.CLAIM_MISMATCH_IS_FAILURE else "warning のみ（2 段リリースの1段目）",
+    )
     ctx.add_success()
 
 
@@ -228,6 +288,8 @@ def execute(ctx: JobContext) -> None:
             logger.info("dry-run: jss_column_license へ投入しない行 %s", row)
         for row in S.index_symbol_rows():
             logger.info("dry-run: jss_index_symbols へ投入しない行 %s", row)
+        for claim in G.WRITER_CLAIMS:
+            logger.info("dry-run: jss_writer_claims へ投入しない行 %s", claim)
         # 網羅性の検査は読み取りだけなので dry-run でも回す
         # （本番へ触る前に「地図に無い表」を一覧できる唯一の手段）。
         _check_coverage(store, ctx)
@@ -241,7 +303,13 @@ def execute(ctx: JobContext) -> None:
 
     _sync_column_license(store, ctx)
     _check_index_symbols(store, ctx)
+    _sync_writer_claims(store, ctx)
     _check_coverage(store, ctx)
+
+    if ctx.failed:
+        raise LicenseMapIncomplete(
+            f"{ctx.failed} 件の照合に失敗した: {ctx.failed_codes}"
+        )
 
 
 def main(argv: list[str] | None = None, *, env: dict[str, str] | None = None) -> int:

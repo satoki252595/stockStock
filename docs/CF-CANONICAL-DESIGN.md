@@ -1226,6 +1226,40 @@ CREATE TABLE jss_writer_claims (
 
 行数: 約20。
 
+##### `column_group` の語彙（2026-09-13 確定）
+
+本番の既存 4 行はすべて `column_group='all'` / `writer='stockStock'` で、**`'base'` / `'enrich'` という値の定義が設計書に無かった**。PK が `(dataset, column_group)` なので後からの改名は DELETE + INSERT の破壊的書換になる。値を先に固定する。正本は `cloud_store/governance.COLUMN_GROUPS` と共有契約 `tests/fixtures/contracts/d1-license-map.json`。
+
+| 値 | 意味 |
+|---|---|
+| `all` | その表の全列を 1 writer が書く（分割の必要が無い表） |
+| `base` | 行の作成 + 基本列（INSERT / UPDATE の両方） |
+| `enrich` | 既存行の UPDATE のみ（INSERT / DELETE を発行しない列集合） |
+
+`base` / `enrich` の意味は上の §1.4 の表と 1:1 である。
+
+##### 宣言する条件 — 今日 writer が居る (dataset, column_group) だけ
+
+writer の居ない列群には行を作らない。「列を足したが writer を入れ忘れて黙って死ぬ」（`estimate_source_url` は 8,314 行すべて NULL なのに `estimated_value` は 5,333 行ある）を検出可能にしておくためである。したがって `core_stocks` の `enrich` 群（P4a で足した 12 列）は**宣言しない**。
+
+##### `core_stocks` を `kabulab-cf` から始める（順序の罠）
+
+`core_stocks` の行を今日書いているのは kabulab-cf の `src/cron/universe.ts` **だけ**である。stockStock 側は `jobs/core_stocks_migrate.py` が ALTER と CREATE INDEX しか出さず、値の充填は `cloud_store/core_stocks.build_column_update` が「組み立てて返す（実行しない）」設計になっている。
+
+ここで `writer='stockStock'` と宣言すると、kabulab-cf 側に同じ照合を入れた瞬間に `universe.ts` が毎回 throw して **JPX 母集団同期が止まる**。P4b の writer 交代までは `kabulab-cf` とし、交代は同一 PR で (1) `core_stocks/enrich` を `stockStock` で足す (2) 充填を有効にする の順に行う。`base` 群の writer は交代後も kabulab-cf のままである。
+
+`all` ではなく最初から `base` にしてあるのは、後で `base` / `enrich` へ割るときに `all` 行の DELETE が必要になるのを避けるため。
+
+##### 照合は warn → fail の 2 段リリース
+
+**claim が無いときに例外で落とす検査を先に入れてはいけない。** claim を投入するのも書込ジョブなので、claim 行の無い DB に対する最初の実行が必ず異常終了してブートストラップ不能になる（鶏と卵）。1 段目は `jobs/license_map.py` が投入して差分を warning に出すだけ。fail へ上げる条件は `governance.CLAIM_MISMATCH_IS_FAILURE` のコメントにある: (1) 最初の本番実行のログで既存 4 行の中身が判明し、(2) 食い違う行を整理する PR が入り、(3) kabulab-cf 側にも同じ照合が入ったとき（§1.3-2 の「片側だけの規律にしない」）。
+
+`jss_writer_claims` の孤児は **prune しない**（本番の既存 4 行がどの dataset を指しているかは読めないので、推測で消すと読めない情報を壊す）。名前つきで報告する。
+
+##### `jss_dataset_freshness.writer` との突合（§1.3-3）
+
+`cloud_store/datasets.py` は `core_stocks` の writer を `master_sync`、`yutai_benefits` を `yutai_backup` と宣言していたが、**どちらも誤り**だった。`master_sync` は D1 の `core_stocks` へ 1 行も書かず（充填は組み立てるだけ）、`yutai_backup` は `yutai_benefits` を**読んで R2 へ退避する**だけである。claim と食い違ったままでは §1.3-3 の突合が成立しないので、両方を `kabulab-cf` に直した。
+
 #### B-10. `jss_column_license` — 列単位のライセンス地図
 
 ```sql

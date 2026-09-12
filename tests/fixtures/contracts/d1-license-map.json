@@ -145,5 +145,115 @@
       "kind": "uniform",
       "tag": "personal-only"
     }
-  }
+  },
+  "$writer_claim_note": "jss_writer_claims の column_group の語彙をここで固定する。PK が (dataset, column_group) なので、後から値を改名すると DELETE + INSERT の破壊的書換になる。宣言するのは「今日実際に writer が居る (dataset, column_group)」だけで、writer の居ない列群（例: core_stocks の enrich = P4a で足した 12 列）には行を作らない。core_stocks は P4b の writer 交代まで kabulab-cf とする（stockStock と宣言すると universe.ts の照合が毎回 throw して JPX 母集団同期が止まる）。照合は warn → fail の 2 段リリースで、1 段目では食い違いを warning にする（claim を投入するのも書込ジョブなので、claim 行の無い DB への最初の実行を異常終了させるとブートストラップ不能）。",
+  "column_groups": {
+    "all": "その表の全列を 1 writer が書く（分割の必要が無い表）",
+    "base": "行の作成 + 基本列（INSERT / UPDATE の両方）",
+    "enrich": "既存行の UPDATE のみ（INSERT / DELETE を発行しない列集合）"
+  },
+  "writer_claims": [
+    {
+      "dataset": "jss_column_license",
+      "column_group": "all",
+      "writer": "stockStock",
+      "declared": "2026-09-13"
+    },
+    {
+      "dataset": "jss_dataset_freshness",
+      "column_group": "all",
+      "writer": "stockStock",
+      "declared": "2026-09-13"
+    },
+    {
+      "dataset": "jss_financials",
+      "column_group": "all",
+      "writer": "stockStock",
+      "declared": "2026-09-13"
+    },
+    {
+      "dataset": "jss_index_symbols",
+      "column_group": "all",
+      "writer": "stockStock",
+      "declared": "2026-09-13"
+    },
+    {
+      "dataset": "jss_job_runs",
+      "column_group": "all",
+      "writer": "stockStock",
+      "declared": "2026-09-13"
+    },
+    {
+      "dataset": "jss_raw_files",
+      "column_group": "all",
+      "writer": "stockStock",
+      "declared": "2026-09-13"
+    },
+    {
+      "dataset": "jss_supply_latest",
+      "column_group": "all",
+      "writer": "stockStock",
+      "declared": "2026-09-13"
+    },
+    {
+      "dataset": "jss_writer_claims",
+      "column_group": "all",
+      "writer": "stockStock",
+      "declared": "2026-09-13"
+    },
+    {
+      "dataset": "jss_xbrl_documents",
+      "column_group": "all",
+      "writer": "stockStock",
+      "declared": "2026-09-13"
+    },
+    {
+      "dataset": "jss_xbrl_elements",
+      "column_group": "all",
+      "writer": "stockStock",
+      "declared": "2026-09-13"
+    },
+    {
+      "dataset": "core_stocks",
+      "column_group": "base",
+      "writer": "kabulab-cf",
+      "declared": "2026-09-13"
+    },
+    {
+      "dataset": "core_stock_financials",
+      "column_group": "base",
+      "writer": "kabulab-cf",
+      "declared": "2026-09-13"
+    },
+    {
+      "dataset": "swing_stock_indicators",
+      "column_group": "base",
+      "writer": "kabulab-cf",
+      "declared": "2026-09-13"
+    },
+    {
+      "dataset": "ir_disclosures",
+      "column_group": "base",
+      "writer": "kabulab-cf",
+      "declared": "2026-09-13"
+    },
+    {
+      "dataset": "ir_disclosures",
+      "column_group": "enrich",
+      "writer": "kabulab-cf",
+      "declared": "2026-09-13"
+    },
+    {
+      "dataset": "yutai_benefits",
+      "column_group": "base",
+      "writer": "kabulab-cf",
+      "declared": "2026-09-13"
+    },
+    {
+      "dataset": "yutai_benefits",
+      "column_group": "enrich",
+      "writer": "kabulab-cf",
+      "declared": "2026-09-13"
+    }
+  ]
 }

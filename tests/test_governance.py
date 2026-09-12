@@ -229,3 +229,55 @@ class TestSharedContract:
         """「宣言が無い = 公開しない」を読み手（TypeScript 側）へ渡す。"""
         contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
         assert contract["$undeclared_policy"]
+
+
+class TestWriterClaimContract:
+    def test_column_group_の語彙が契約ファイルと一致する(self) -> None:
+        """PK が `(dataset, column_group)` なので後からの改名は破壊的書換になる。
+
+        設計書には `base` / `enrich` の**定義が無く**、本番の既存 4 行は `all`
+        だった。値を先に固定しないと、両リポジトリが別の語彙で書き始める。
+        """
+        contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
+        assert contract["column_groups"] == G.COLUMN_GROUPS
+
+    def test_claim_が契約ファイルと一致する(self) -> None:
+        contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
+        declared = [
+            {
+                "dataset": c.dataset,
+                "column_group": c.column_group,
+                "writer": c.writer,
+                "declared": c.declared,
+            }
+            for c in G.WRITER_CLAIMS
+        ]
+        assert contract["writer_claims"] == declared
+
+    def test_claim_の_dataset_は区分の宣言に存在する(self) -> None:
+        """存在しない表への claim は、誰も守らない宣言になる。"""
+        for claim in G.WRITER_CLAIMS:
+            assert claim.dataset in G.TABLE_LICENSE, claim.dataset
+
+    def test_語彙外の_column_group_を宣言していない(self) -> None:
+        for claim in G.WRITER_CLAIMS:
+            assert claim.column_group in G.COLUMN_GROUPS, claim
+
+    def test_宣言日が_UTC_固定で決定的(self) -> None:
+        """ローカルタイムゾーン依存だと CI (UTC) と手元 (JST) で値が変わり、
+
+        投入が毎回 UPDATE を打って冪等でなくなる。
+        """
+        assert G.declared_epoch("2026-09-13") == 1789257600
+
+    def test_鮮度表の_writer_が_claim_と食い違わない(self) -> None:
+        """`jss_dataset_freshness.writer` と `jss_writer_claims` の突合（§1.3-3）。
+
+        `core_stocks` / `yutai_benefits` はどちらも stockStock のジョブ名
+        （`master_sync` / `yutai_backup`）を書いていたが、実際に行を書いている
+        のは kabulab-cf で、`yutai_backup` はこの表を読むだけである。
+        """
+        from jp_stock_pipeline.cloud_store.datasets import DATASET_SOURCE_BY_NAME
+
+        for dataset in ("core_stocks", "yutai_benefits"):
+            assert "kabulab-cf" in DATASET_SOURCE_BY_NAME[dataset].writer, dataset

@@ -66,6 +66,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 
 from ..licensing import LicenseTag
@@ -277,6 +278,222 @@ def ddl_columns(sql: str | None) -> list[str]:
     return columns
 
 
+# --- writer の排他宣言 (jss_writer_claims) ---------------------------------
+#
+# ## `column_group` の語彙を先に固定する理由
+#
+# 本番の既存 4 行はすべて `column_group='all'` / `writer='stockStock'` で、
+# 設計書には `'base'` / `'enrich'` という値の**定義が無い**。PK が
+# `(dataset, column_group)` なので、後から値を改名すると DELETE + INSERT の
+# 破壊的書換になる。だから値を先に決めて契約ファイルへ書く。
+#
+# | 値 | 意味 |
+# |---|---|
+# | `all` | その表の全列を 1 writer が書く（分割の必要が無い表） |
+# | `base` | 行の作成 + 基本列（INSERT / UPDATE の両方） |
+# | `enrich` | 既存行の UPDATE のみ（INSERT / DELETE を発行しない列集合） |
+#
+# `base` / `enrich` の意味は設計書 §1.4「同一テーブルの複数 writer は列集合が
+# 互いに素のときだけ許す」の表と 1:1 である。
+#
+# ## 宣言する条件 — 今日実際に writer がいる (dataset, column_group) だけ
+#
+# 「列を足したが writer を入れ忘れて黙って死ぬ」（`estimate_source_url` が
+# 8,314 行すべて NULL なのに `estimated_value` は 5,333 行ある）を検出可能に
+# しておくため、**writer がいない群は宣言しない**。`core_stocks` の `enrich`
+# 群（P4a で足した 12 列）は今日どのジョブも書いていないので行を作らない。
+#
+# ## `core_stocks` を `kabulab-cf` から始める理由（順序の罠）
+#
+# `core_stocks` の行を今日書いているのは kabulab-cf の `src/cron/universe.ts`
+# だけである。stockStock 側は `jobs/core_stocks_migrate.py` が ALTER と
+# CREATE INDEX しか出さず、値の充填は `cloud_store/core_stocks.build_column_update`
+# が「組み立てて返す（実行しない）」設計になっている。
+#
+# ここで `writer='stockStock'` と宣言すると、kabulab-cf 側に同じ照合を入れた
+# 瞬間に `universe.ts` が毎回 throw して **JPX 母集団同期が止まる**。だから
+# P4b の writer 交代までは `kabulab-cf` とし、交代は同一 PR で
+# (1) `core_stocks/enrich` を `stockStock` で足す (2) 充填ジョブを有効にする
+# の順に行う。`base` 群の writer は交代後も kabulab-cf のままである。
+#
+# `all` を使わず最初から `base` にしてあるのは、後で `base` / `enrich` へ割る
+# ときに `all` 行の DELETE が必要になるのを避けるためである（PK が
+# `(dataset, column_group)` なので改名は破壊的書換になる）。
+
+COLUMN_GROUP_ALL = "all"
+COLUMN_GROUP_BASE = "base"
+COLUMN_GROUP_ENRICH = "enrich"
+
+COLUMN_GROUPS: dict[str, str] = {
+    COLUMN_GROUP_ALL: "その表の全列を 1 writer が書く（分割の必要が無い表）",
+    COLUMN_GROUP_BASE: "行の作成 + 基本列（INSERT / UPDATE の両方）",
+    COLUMN_GROUP_ENRICH: "既存行の UPDATE のみ（INSERT / DELETE を発行しない列集合）",
+}
+
+WRITER_STOCKSTOCK = "stockStock"
+WRITER_KABULAB = "kabulab-cf"
+
+# 宣言した日。`jss_writer_claims.updated_at` に入れる。
+# **実行時刻 (`now`) を入れない。** 入れると再実行のたびに値が進み、
+# 「いつ決めた宣言か」が読めなくなる（`jss_dataset_freshness.updated_at` で
+# 同じ間違いをすると監視が恒久的に緑になる。設計書 B-8）。
+# 宣言を変える PR はこの日付も同時に進めること。
+CLAIM_DECLARED_AT = "2026-09-13"
+
+
+@dataclass(frozen=True)
+class WriterClaim:
+    """1 つの (dataset, column_group) を誰が書くか。"""
+
+    dataset: str
+    column_group: str
+    writer: str
+    declared: str  # ISO 日付
+    note: str
+
+
+def _claim(dataset: str, group: str, writer: str, note: str) -> WriterClaim:
+    return WriterClaim(
+        dataset=dataset,
+        column_group=group,
+        writer=writer,
+        declared=CLAIM_DECLARED_AT,
+        note=note,
+    )
+
+
+_JSS_NOTE = "stockStock が単独で書く jss_ 表。分割の必要が無い"
+
+WRITER_CLAIMS: tuple[WriterClaim, ...] = tuple(
+    [
+        _claim(table, COLUMN_GROUP_ALL, WRITER_STOCKSTOCK, _JSS_NOTE)
+        for table in sorted(t for t in TABLE_LICENSE if t.startswith("jss_"))
+    ]
+    + [
+        _claim(
+            "core_stocks",
+            COLUMN_GROUP_BASE,
+            WRITER_KABULAB,
+            "kabulab-cf src/cron/universe.ts。P4b の writer 交代までここは動かさない"
+            "（stockStock 側の build_column_update は組み立てるだけで実行しない）",
+        ),
+        _claim(
+            "core_stock_financials",
+            COLUMN_GROUP_BASE,
+            WRITER_KABULAB,
+            "kabulab-cf daily.ts。②断面の交代は P5（G-fin-1 の判定後）",
+        ),
+        _claim(
+            "swing_stock_indicators",
+            COLUMN_GROUP_BASE,
+            WRITER_KABULAB,
+            "kabulab-cf daily.ts。テクニカル断面の交代は P7",
+        ),
+        _claim(
+            "ir_disclosures",
+            COLUMN_GROUP_BASE,
+            WRITER_KABULAB,
+            "行の作成は今日 kabulab-cf。設計書 §1.4 は第6波以降 stockStock へ交代",
+        ),
+        _claim(
+            "ir_disclosures",
+            COLUMN_GROUP_ENRICH,
+            WRITER_KABULAB,
+            "classify.ts の 20 タグと pdf_sentiment*。交代後も kabulab-cf が持つ",
+        ),
+        _claim(
+            "yutai_benefits",
+            COLUMN_GROUP_BASE,
+            WRITER_KABULAB,
+            "行の作成は今日 kabulab-cf（2026-06-22 で更新停止中）",
+        ),
+        _claim(
+            "yutai_benefits",
+            COLUMN_GROUP_ENRICH,
+            WRITER_KABULAB,
+            "estimated_value / short_summary / estimate_*。LLM 推定値を消さないため分割",
+        ),
+    ]
+)
+
+# 照合を warn で始める（fail へ上げる条件はこの定数のコメントに書く）。
+#
+# **claim が無いときに例外で落とす検査を先に入れてはいけない。** claim を投入する
+# のも書込ジョブなので、claim 行の無い DB に対する最初の実行が必ず異常終了し、
+# ブートストラップ不能になる（鶏と卵）。加えて本番の既存 4 行の中身
+# （どの dataset が `all` / `stockStock` で入っているか）は本レーンからは読めず、
+# 推測で prune すると読めない情報を壊す。
+#
+# **fail へ上げる条件**: (1) 最初の本番実行のログで既存 4 行の (dataset,
+# column_group, writer) が判明し、(2) この宣言と食い違う行を整理する PR が入り、
+# (3) kabulab-cf 側にも同じ照合が入ったとき（片側だけの規律にしない。設計書
+# §1.3-2）。そのとき `CLAIM_MISMATCH_IS_FAILURE = True` にする。
+CLAIM_MISMATCH_IS_FAILURE = False
+
+WRITER_CLAIMS_SQL = "SELECT dataset, column_group, writer FROM jss_writer_claims"
+
+
+def declared_epoch(iso_date: str) -> int:
+    """宣言日を epoch 秒にする。**UTC 固定で決定的にする。**
+
+    ローカルタイムゾーンに依存させると、同じ宣言が実行環境（CI は UTC、手元は
+    JST）によって別の値になり、投入が毎回 UPDATE を打つ = 冪等でなくなる。
+    claim の `updated_at` は「いつ決めた宣言か」の粗い記録で、日付の境界で
+    何かを判定する列ではないので時刻は 00:00 UTC で足りる。
+    """
+    year, month, day = (int(x) for x in iso_date.split("-"))
+    return int(datetime(year, month, day, tzinfo=UTC).timestamp())
+
+
+def writer_claim_rows() -> list[list[object]]:
+    """`jss_writer_claims` へ投入する行。"""
+    return [
+        [c.dataset, c.column_group, c.writer, declared_epoch(c.declared)]
+        for c in WRITER_CLAIMS
+    ]
+
+
+def writer_claim_problems(observed_rows: list[dict]) -> tuple[list[str], list[str]]:
+    """実表の claim を宣言と突き合わせる。`(failures, warnings)` を返す。
+
+    `CLAIM_MISMATCH_IS_FAILURE` が False の間はすべて warning になる
+    （2 段リリースの 1 段目。上の定数のコメントに fail へ上げる条件がある）。
+    """
+    declared = {(c.dataset, c.column_group): c.writer for c in WRITER_CLAIMS}
+    observed = {
+        (str(r.get("dataset") or ""), str(r.get("column_group") or "")): str(
+            r.get("writer") or ""
+        )
+        for r in observed_rows
+    }
+    messages: list[str] = []
+    for key in sorted(declared):
+        if key not in observed:
+            messages.append(f"claim が実表に無い: {key} -> {declared[key]}")
+        elif observed[key] != declared[key]:
+            messages.append(
+                f"claim の writer が食い違う: {key} 実表 {observed[key]!r} /"
+                f" 宣言 {declared[key]!r}"
+            )
+    for key in sorted(set(observed) - set(declared)):
+        # **prune しない。** 本番の既存 4 行は本レーンからは読めず、推測で消すと
+        # 読めない情報を壊す。名前を出して整理 PR を促す。
+        message = f"宣言に無い claim が実表にある: {key} -> {observed[key]!r}（prune しない）"
+        dataset = key[0]
+        if key[1] == COLUMN_GROUP_ALL and any(
+            d == dataset and g != COLUMN_GROUP_ALL for d, g in declared
+        ):
+            message += (
+                f"。{dataset} は列群を分けて宣言しているので、この 'all' 行は"
+                " 同じ列を別 writer が持つと主張していることになる（整理が必要）"
+            )
+        messages.append(message)
+
+    if CLAIM_MISMATCH_IS_FAILURE:
+        return messages, []
+    return [], messages
+
+
 @dataclass(frozen=True)
 class CoverageReport:
     """地図の網羅性の検査結果。行を 1 行も走査せずに作れるものだけを持つ。"""
@@ -395,6 +612,15 @@ def coverage(observed: dict[str, str | None]) -> CoverageReport:
 
 __all__ = [
     "ALL_TABLES_SQL",
+    "CLAIM_DECLARED_AT",
+    "CLAIM_MISMATCH_IS_FAILURE",
+    "COLUMN_GROUPS",
+    "WRITER_CLAIMS",
+    "WRITER_CLAIMS_SQL",
+    "WriterClaim",
+    "declared_epoch",
+    "writer_claim_problems",
+    "writer_claim_rows",
     "OBSERVED_TABLE_COUNT",
     "ROW_TAG_COLUMN",
     "TABLE_LICENSE",

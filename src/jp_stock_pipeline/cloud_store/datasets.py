@@ -147,7 +147,16 @@ DATASET_SOURCES: tuple[DatasetSource, ...] = (
         dataset="core_stocks",
         store="D1",
         location="core_stocks",
-        writer="master_sync",
+        # **stockStock のジョブ名を書かない。** この表の行を今日書いているのは
+        # kabulab-cf の `src/cron/universe.ts` だけで、stockStock 側は
+        # `core_stocks_migrate` が ALTER / CREATE INDEX しか出さず、値の充填は
+        # `cloud_store/core_stocks.build_column_update` が「組み立てて返す
+        # （実行しない）」設計である。ここに `master_sync` と書いていたので、
+        # `jss_dataset_freshness.writer` と `jss_writer_claims` の突合
+        # （設計書 §1.3-3）が食い違う状態だった。claim は
+        # `governance.WRITER_CLAIMS` の `core_stocks/base` が正で、P4b の
+        # writer 交代のときに両方を同じ PR で動かす。
+        writer="kabulab-cf universe.ts",
         sql=(
             "SELECT NULL AS latest_date, MAX(updated_at) AS source_epoch,"
             " COUNT(*) AS n FROM core_stocks"
@@ -187,7 +196,11 @@ DATASET_SOURCES: tuple[DatasetSource, ...] = (
         dataset="yutai_benefits",
         store="D1",
         location="yutai_benefits",
-        writer="yutai_backup",
+        # ここも `core_stocks` と同じ取り違え。`jobs/yutai_backup.py` はこの表を
+        # **読んで R2 へ退避する**だけで 1 行も書かない（`cloud_store/yutai.py`
+        # の SQL は SELECT のみ）。行を書いているのは kabulab-cf で、
+        # claim は `governance.WRITER_CLAIMS` の `yutai_benefits/base`。
+        writer="kabulab-cf",
         sql=(
             "SELECT NULL AS latest_date, MAX(updated_at) AS source_epoch,"
             " COUNT(*) AS n FROM yutai_benefits"
