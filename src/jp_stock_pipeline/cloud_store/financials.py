@@ -37,6 +37,36 @@
 （実表を測る `jobs/freshness_probe.py` が唯一の観測者。writer の自己申告を
 鮮度にしない理由は `cloud_store/datasets.py` の冒頭にある）。
 
+## この表に行が入ると日次で **2 経路**が行数ぶん走査する
+
+この writer が動き出した後の継続コストは「表にデータが入ったことの帰結」だが、
+走る経路は 1 本ではない。**両方とも `.github/workflows/ops_check.yml` の
+同じ日次 cron（`30 14 * * *`）の中**にある。
+
+1. 観測（第1ステップ）: `jobs/freshness_probe.py` が `datasets.py` の
+   `SELECT MAX(data_date), MAX(fetched_at), COUNT(*) FROM jss_financials` を撃つ。
+   `MAX(data_date)` は無索引なので `EXPLAIN QUERY PLAN` = `SCAN jss_financials`。
+2. 孤児検査 G-core-5（第3ステップ、`if: always()`）: `jss_financials` は
+   `cloud_store/core_stocks.SOFT_CHILD_TABLES` の唯一の要素なので、
+   `core_stocks_migrate --verify` が毎日
+   `FROM jss_financials c LEFT JOIN core_stocks s ON s.id = c.stock_id`
+   `WHERE c.stock_id IS NOT NULL AND s.id IS NULL` を撃つ。
+   `EXPLAIN QUERY PLAN` = `SEARCH c USING COVERING INDEX idx_jss_fin_stock (stock_id>?)`
+   および `SEARCH s USING INTEGER PRIMARY KEY (rowid=?)` で、表行ではなく索引エントリだが
+   **行数に比例する**。
+
+**この 2 番目を「cron が無いので継続コストではない」と書かないこと。** PR #39 の
+初版のコスト申告はそう書いて誤っていた（`jobs/core_stocks_migrate.py` の docstring
+自体が「`ops_check.yml` の第3ステップが呼ぶ」と書いてある）。日次の走査は
+**行数 × 2** で見積もる。設計上限 100,000 行でも 2 × 100,000 × 30 = 600 万行/月 =
+25B rows read/月 allowance の 0.024%。
+
+**索引を足しても減らない。** D1 は被覆されない列のテーブル行フェッチを rows_read に
+計上しないので（本リポジトリで対照実験済み）、被覆索引の追加は rows_read の削減に
+ならない。減らせるのは「走査そのものを撃たない」形に変えたときだけで、それは
+鮮度を開示時刻で測る（= 実表の基準日を見ない）ことになり `cloud_store/slo.py` の
+原則に反するため採らない。
+
 ## 1 行に 1 つしか持てない来歴
 
 `source` / `fetched_at` / `quality` は NOT NULL なので必ず上書きになる。
