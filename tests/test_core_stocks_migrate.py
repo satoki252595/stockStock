@@ -18,6 +18,7 @@ import pytest
 from jp_stock_pipeline.cloud_store import core_stocks as cs
 from jp_stock_pipeline.cloud_store.d1 import D1Error, D1Store
 from jp_stock_pipeline.config import CloudStoreSettings
+from jp_stock_pipeline.jobs import core_stocks_migrate as csm
 
 # core_stocks は本番 D1 の実 DDL（2026-09-12 に sqlite_master から取得）。
 # 子表は最小再現用で、**FK の ON DELETE は本番と異なる**（本番の yutai_benefits は
@@ -415,6 +416,53 @@ class _RecordingD1Store(D1Store):
     def query(self, sql: str, params: list | None = None) -> list:  # type: ignore[override]
         self.sqls.append(sql)
         return []
+
+
+class TestObserveDoesNotScanRowsWithoutABaseline:
+    """比較相手が無いとき `core_stocks` の行を 1 行も走査しないこと（D1 は走査行課金）。
+
+    G-core-2（件数・sqlite_sequence）と G-core-3（既存行の sha256）は適用前の
+    状態と突き合わせて初めて意味を持つ判定で、`_verify` は `before is None` で
+    早期 return する。それでも `_observe` は `SNAPSHOT_SQL`（全 3,818 行）と
+    `COUNTS_SQL`（同）を毎回投げており、**`ops_check.yml` の日次実行が毎日
+    7,636 行を走査してハッシュを捨てていた**。
+
+    孤児検査（G-core-5）は `before` なしでも判定に使うので、消えていないことを
+    同時に固定する（走査を減らす変更が本物の検査を一緒に削っていないこと）。
+    """
+
+    def test_verify_単独では断面を読まない(self) -> None:
+        store = _RecordingD1Store()
+        state = csm._observe(store, baseline=False)
+        joined = " | ".join(store.sqls)
+        assert cs.SNAPSHOT_SQL not in store.sqls
+        assert cs.COUNTS_SQL not in store.sqls
+        assert cs.SEQ_SQL not in store.sqls
+        assert cs.TABLE_INFO_SQL in store.sqls
+        assert cs.INDEX_LIST_SQL in store.sqls
+        assert "LEFT JOIN core_stocks" in joined  # 孤児検査は残っている
+        # 未観測は 0 ではなく None。0 だと「件数が 0 に変わった」と誤報告しうる。
+        assert state["rows"] is None
+        assert state["rows_sha256"] is None
+        assert state["counts"] is None
+
+    def test_比較相手があるときは断面を読む(self) -> None:
+        store = _RecordingD1Store()
+        csm._observe(store, baseline=True)
+        assert cs.SNAPSHOT_SQL in store.sqls
+        assert cs.COUNTS_SQL in store.sqls
+        assert cs.SEQ_SQL in store.sqls
+
+    def test_未観測の断面は_G_core_2_の差分として報告されない(self) -> None:
+        """未観測(None)を値として比べると「3,818 -> None」という嘘の差分が出る。"""
+        before = {
+            "columns": {}, "indexes": {}, "orphans": {},
+            "counts": {"total": 3818}, "sqlite_sequence": 4000,
+            "rows": 3818, "rows_sha256": "a" * 64,
+        }
+        after = dict(before, counts=None, sqlite_sequence=None, rows=None, rows_sha256=None)
+        problems = csm._verify(after, before)
+        assert not [p for p in problems if "G-core-2" in p or "G-core-3" in p], problems
 
 
 class TestD1StoreUpsertIsNotUsable:
