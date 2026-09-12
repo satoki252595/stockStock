@@ -104,6 +104,18 @@ unit           : str  単位（原文のまま 例 JPY, shares。無ければ空
 value          : str  値（**原文の文字列をそのまま**。数値化は transform 側で行う）
 ```
 
+## 移行の切替判定 (G-fin-1) は「値一致」ではない
+
+`cloud_store/fin_parity.py` が正本。③断面の writer 交代 (P5) の判定は
+**項目ごとに閾値が違う**。`per` / `pbr` だけ相対誤差 ≤ 1e-6（実測 worst
+1.4e-07）で、`eps` / `bps` / `roe` / `price` には**値一致の閾値を置かない**
+（Yahoo が TTM を改訂するので原理的に一致しない。実測 eps 1,611 行中
+1e-6 での一致は 76 行）。代わりに導出整合・符号・欠損パターンで見る。
+
+**「G-fin-1 が通った」を「値が一致した」と読み替えないこと。** 閾値なしの項目は
+レポートに「値一致は判定していない（観測のみ）」と出る。詳細と実測値は
+`fin_parity.py` の docstring と `docs/CF-CANONICAL-DESIGN.md` の P5 節。
+
 ## transform → upsert の受け渡し
 
 `models.py` の `*Record` dataclass のみを使う。数値が取れない項目は None のまま。

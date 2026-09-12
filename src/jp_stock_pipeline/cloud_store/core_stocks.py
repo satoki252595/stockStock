@@ -30,6 +30,9 @@ TABLE = "core_stocks"
 
 # 移行元 kabulab-cf が所有する既存列。stockStock は**読むだけ**で書かない。
 # `id` はサロゲートキーで 14 子表が参照しており、SET 句に入れたら破滅する。
+#
+# `updated_at` は意図的に入れていない。`build_column_update` が明示的に進める
+# 唯一の既存列なので、ここに入れると自分の UPDATE が自分で弾かれる。
 PROTECTED_COLUMNS: frozenset[str] = frozenset(
     {
         "id",
@@ -41,6 +44,25 @@ PROTECTED_COLUMNS: frozenset[str] = frozenset(
         "is_yutai",
         "created_at",
     }
+)
+
+# P4a より前から本番 `core_stocks` にある 9 列（2026-09-12 の PRAGMA table_info
+# 実測）。`PROTECTED_COLUMNS` + `updated_at` と同じ集合だが、**導出にせず両方を
+# リテラルで持つ**。片方を導出にすると、定数から 1 要素を削る変異が両方に同時に
+# 効いてテストが追随してしまい検出できない（`tests/test_core_stocks_migrate.py`
+# の「実装定数ではなくリテラルで列挙する」と同じ理由）。
+# 2 本のリテラルが食い違ったら `tests/test_core_stocks_migrate.py` の
+# 突き合わせテストが落ちる。
+BASE_COLUMNS: tuple[str, ...] = (
+    "id",
+    "code",
+    "name",
+    "market",
+    "sector",
+    "is_active",
+    "is_yutai",
+    "created_at",
+    "updated_at",
 )
 
 # P4a で追加する列。すべて nullable（SQLite の ALTER は既定値の無い NOT NULL も
@@ -73,6 +95,48 @@ NEW_INDEXES: dict[str, str] = {
         f" ON {TABLE} (edinet_code) WHERE edinet_code IS NOT NULL"
     ),
 }
+
+
+# --- ドリフト検出の期待値（E7）----------------------------------------------
+#
+# `core_stocks` の列定義は両リポジトリに散っており、**本番の PRAGMA が正**。
+# 2026-09-12 実測で 21 列。他の「地図」はすべて古い:
+#
+#   本番 PRAGMA                                   21 列 ← 正
+#   kabulab-cf `src/shared/db/core-schema.ts`      9 列（P4a の 12 列を知らない）
+#   kabulab-cf drizzle `0008_snapshot.json`        9 列（同上）
+#   stockStock `BASE_COLUMNS` + `NEW_COLUMNS`     21 列 ← ここ
+#
+# `EXPECTED_COLUMNS` は「stockStock が知っている全列」であり、
+# `jobs/core_stocks_migrate.py --verify` が本番 PRAGMA と**両方向**で突き合わせる。
+# 片方向（`NEW_COLUMNS ⊆ 本番`）しか見ていなかったため、**本番にあって定義に無い
+# 列**（= kabulab-cf 側が勝手に足した列）は検出できていなかった。それが E7 の穴。
+EXPECTED_COLUMNS: frozenset[str] = frozenset(BASE_COLUMNS) | frozenset(NEW_COLUMNS)
+
+# P4a より前から本番にある索引（2026-09-12 の sqlite_master 実測）。
+BASE_INDEXES: tuple[str, ...] = ("core_stocks_code_unique",)
+
+EXPECTED_INDEXES: frozenset[str] = frozenset(BASE_INDEXES) | frozenset(NEW_INDEXES)
+
+# SQLite が UNIQUE / PRIMARY KEY 制約に対して自動生成する索引。sqlite_master に
+# 出るが `sql` が NULL で、こちらが宣言する対象ではない。ドリフト検出の
+# 「定義に無い索引」から除く（現行の core_stocks には無いが、kabulab-cf 側が
+# 列に UNIQUE を足した瞬間に湧いて誤検知になる）。
+AUTOINDEX_PREFIX = "sqlite_autoindex_"
+
+
+def unexpected_columns(observed: set[str]) -> list[str]:
+    """本番にあって stockStock の定義に無い列（E7 の superset 方向）。"""
+    return sorted(observed - EXPECTED_COLUMNS)
+
+
+def unexpected_indexes(observed: set[str]) -> list[str]:
+    """本番にあって stockStock の定義に無い索引（自動生成索引は除く）。"""
+    return sorted(
+        name
+        for name in observed - EXPECTED_INDEXES
+        if not name.startswith(AUTOINDEX_PREFIX)
+    )
 
 
 def add_column_sql(column: str) -> str:

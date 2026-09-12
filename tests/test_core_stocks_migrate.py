@@ -136,6 +136,81 @@ class TestBuildColumnUpdate:
         assert sql.endswith("WHERE code = ?")
 
 
+class TestExpectedColumns:
+    """E7: `core_stocks` の列定義の地図。本番 PRAGMA が正で 21 列。
+
+    地図は両リポジトリに散っている（本番 PRAGMA 21 列 / kabulab-cf の
+    `core-schema.ts` 9 列 / drizzle `0008_snapshot.json` 9 列 / ここ 21 列）。
+    ここが古くなると `--verify` の superset 方向が意味を失うので、
+    **実装定数ではなくリテラルで列挙する**（`test_既存列は書けない` と同じ理由。
+    定数から要素を削る変異をテストが追随してしまうと検出できない）。
+    """
+
+    # 2026-09-12 に本番 D1 の PRAGMA table_info(core_stocks) から取得した 21 列。
+    PROD_COLUMNS = {
+        # P4a より前からある 9 列
+        "id",
+        "code",
+        "name",
+        "market",
+        "sector",
+        "is_active",
+        "is_yutai",
+        "created_at",
+        "updated_at",
+        # P4a で足した 12 列
+        "instrument_type",
+        "sector33",
+        "sector17",
+        "edinet_code",
+        "listing_status",
+        "listing_date",
+        "delisting_date",
+        "license_tag",
+        "src_source",
+        "src_data_date",
+        "src_fetched_at",
+        "quality",
+    }
+
+    def test_期待する列集合は本番の_21_列と一致する(self) -> None:
+        assert len(self.PROD_COLUMNS) == 21
+        assert cs.EXPECTED_COLUMNS == self.PROD_COLUMNS
+
+    def test_BASE_COLUMNS_と_PROTECTED_COLUMNS_が食い違わない(self) -> None:
+        """2 本のリテラルを持っている理由の突き合わせ。
+
+        `updated_at` だけは PROTECTED から外す。`build_column_update` が明示的に
+        進める唯一の既存列で、PROTECTED に入れると自分の UPDATE が自分で弾かれる。
+        """
+        assert set(cs.BASE_COLUMNS) - {"updated_at"} == cs.PROTECTED_COLUMNS
+        assert "updated_at" not in cs.PROTECTED_COLUMNS
+
+    def test_本番の_DDL_から読んだ列と一致する(self) -> None:
+        """テスト内の PROD_DDL（本番の sqlite_master 由来）とも突き合わせる。"""
+        con = sqlite3.connect(":memory:")
+        con.executescript(PROD_DDL)
+        observed = {r[1] for r in con.execute("PRAGMA table_info(core_stocks)")}
+        assert observed == set(cs.BASE_COLUMNS)
+
+    def test_定義に無い列を検出する(self) -> None:
+        """E7 の穴だった向き。kabulab-cf が勝手に足した列を見つける。"""
+        assert cs.unexpected_columns(self.PROD_COLUMNS) == []
+        assert cs.unexpected_columns(self.PROD_COLUMNS | {"shares_outstanding"}) == [
+            "shares_outstanding"
+        ]
+
+    def test_定義に無い索引を検出する(self) -> None:
+        assert cs.unexpected_indexes(set(cs.EXPECTED_INDEXES)) == []
+        assert cs.unexpected_indexes({"idx_core_stocks_sector"}) == [
+            "idx_core_stocks_sector"
+        ]
+
+    def test_自動生成索引は誤検知しない(self) -> None:
+        """列に UNIQUE が足されると sqlite_autoindex_* が湧く。宣言対象ではない。"""
+        assert cs.unexpected_indexes({"sqlite_autoindex_core_stocks_1"}) == []
+
+
 class TestDdlShape:
     def test_発行するのは_ALTER_と_CREATE_INDEX_だけ(self) -> None:
         for sql in cs.plan_ddl(set(), set()):

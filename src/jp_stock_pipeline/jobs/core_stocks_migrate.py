@@ -14,7 +14,12 @@
 - `--check-only`（既定）: 何も書かず、現状と発行予定の差分だけを報告する
 - `--sql-dump PATH`: 発行予定の全文をファイルへ出す（G-core-1 の静的検査用）
 - `--apply`: DDL を実際に発行する。**唯一の書込モード**
-- `--verify`: 適用後の検証（G-core-2 / G-core-3 / G-core-5）だけを実行する
+- `--verify`: 適用後の検証（G-core-2 / G-core-3 / G-core-5 / E7）だけを実行する。
+  **`core_stocks` へは SELECT / PRAGMA しか発行しないので CI から毎日回せる。**
+  `.github/workflows/ops_check.yml` の第3ステップが `--compare-to` なしで呼ぶ。
+  なお「1 文も書かない」ではない: 他の全ジョブと同じく `jobs.runner.run_job` が
+  終了時に ⑦ `jss_job_runs` へ 1 行 INSERT する（移行対象表には触らないが、
+  読み取り専用トークンでは動かない）
 
 `--snapshot PATH` を付けると、既存 3,818 行のスナップショットを JSON で保存する
 （ロールバックの原本）。
@@ -110,7 +115,14 @@ def _report(state: dict, pending: list[str]) -> None:
 
 
 def _verify(state: dict, before: dict | None) -> list[str]:
-    """G-core-2 / G-core-3 / G-core-5 を突き合わせる。差分の説明を返す。"""
+    """G-core-2 / G-core-3 / G-core-5 / E7 を突き合わせる。差分の説明を返す。
+
+    列と索引は **両方向**で見る。`NEW_COLUMNS ⊆ 本番`（subset 方向）だけを
+    見ていた頃は「本番にあって stockStock の定義に無い列」を素通りさせていた。
+    `core_stocks` の列定義は両リポジトリに散っていて本番の PRAGMA が正なので、
+    kabulab-cf 側が列を足した瞬間に stockStock の地図が古くなる。それを
+    気づけるのはこの向きの検査だけ（E7）。
+    """
     problems: list[str] = []
     bad = {t: n for t, n in state["orphans"].items() if n}
     if bad:
@@ -118,6 +130,21 @@ def _verify(state: dict, before: dict | None) -> list[str]:
     missing = [c for c in cs.NEW_COLUMNS if c not in state["columns"]]
     if missing:
         problems.append(f"追加列が入っていない: {missing}")
+    # E7 superset 方向: 本番にあって定義に無い列 / 索引。
+    extra_columns = cs.unexpected_columns(set(state["columns"]))
+    if extra_columns:
+        problems.append(
+            f"E7: 本番 core_stocks に stockStock の定義に無い列がある {extra_columns}"
+            "（列定義のドリフト。本番 PRAGMA が正なので cloud_store/core_stocks.py の"
+            " BASE_COLUMNS / NEW_COLUMNS を追随させ、kabulab-cf 側の"
+            " core-schema.ts / drizzle snapshot も同時に直す）"
+        )
+    extra_indexes = cs.unexpected_indexes(set(state["indexes"]))
+    if extra_indexes:
+        problems.append(
+            f"E7: 本番 core_stocks に stockStock の定義に無い索引がある {extra_indexes}"
+            "（cloud_store/core_stocks.py の BASE_INDEXES / NEW_INDEXES を追随させる）"
+        )
     # 型と nullability まで見る。ALTER は NOT NULL / UNIQUE を付けられないので、
     # notnull=1 の同名列があるなら別物が既に居る。
     for name, want_type in cs.NEW_COLUMNS.items():
@@ -233,7 +260,7 @@ def execute(ctx: JobContext) -> None:
             for p in problems:
                 ctx.add_failure("verify", p)
             return
-        logger.info("検証 OK: G-core-2 / G-core-3 / G-core-5 をすべて満たす")
+        logger.info("検証 OK: G-core-2 / G-core-3 / G-core-5 / E7 をすべて満たす")
         ctx.add_success()
         return
 
@@ -296,7 +323,9 @@ def main(argv: list[str] | None = None, *, env: dict[str, str] | None = None) ->
         "--apply", action="store_true", help="DDL を実際に発行する（唯一の書込モード）"
     )
     parser.add_argument(
-        "--verify", action="store_true", help="検証だけ実行する (G-core-2/3/5)"
+        "--verify",
+        action="store_true",
+        help="検証だけ実行する (G-core-2/3/5 と E7 の列定義ドリフト)",
     )
     parser.add_argument(
         "--sql-dump", metavar="PATH", help="発行予定 SQL を実行せずファイルへ出す"
