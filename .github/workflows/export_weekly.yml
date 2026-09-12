@@ -12,6 +12,7 @@ concurrency:
 
 permissions:
   contents: read
+  issues: write  # 失敗時に Issue を立てるため
 
 jobs:
   run:
@@ -23,15 +24,6 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Sync dependencies
         run: nix develop -c uv sync
-      # dual-write 先サーバ(tailnet)へ到達するため runner を tailnet に参加させる。
-      # OAuth Secrets 未設定なら失敗するが収集は継続(Notion のみ=dual-write degrade)。
-      - name: Join tailnet
-        uses: tailscale/github-action@v3
-        continue-on-error: true
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:ci
       - name: Run export_weekly
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
@@ -49,12 +41,25 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
-          # クラウド → 端末B PostgreSQL への dual-write (未設定なら Notion のみ)。
-          # 直公開は危険なため VPN(Tailscale 等)経由を推奨。sslmode 既定は require。
-          LOCAL_DB_HOST: ${{ secrets.LOCAL_DB_HOST }}
-          LOCAL_DB_PORT: ${{ secrets.LOCAL_DB_PORT }}
-          LOCAL_DB_NAME: ${{ secrets.LOCAL_DB_NAME }}
-          LOCAL_DB_USER: ${{ secrets.LOCAL_DB_USER }}
-          LOCAL_DB_PASSWORD: ${{ secrets.LOCAL_DB_PASSWORD }}
-          LOCAL_DB_SSLMODE: ${{ secrets.LOCAL_DB_SSLMODE }}
         run: nix develop -c uv run python -m jp_stock_pipeline.jobs.export_weekly
+
+      # 失敗に気づく唯一の経路。これまで 14 workflow に `if: failure()` も
+      # webhook も 0 行で、EDINET が 11 営業日空振りしても、JPX の 404 で
+      # 銘柄マスタが 33 日止まっても誰も気づかなかった。
+      # 通知先を増やすと見なくなるので GitHub Issue を 1 本だけ立てる
+      # （既に open があれば重複させずコメントを足す）。
+      - name: 失敗したら Issue を立てる
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WF: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          TITLE="[ジョブ失敗] $WF"
+          EXISTING=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          BODY=$(printf '%s が失敗しました。\n\n実行: %s\n検知: %s' "$WF" "$RUN_URL" "$(date -u '+%Y-%m-%d %H:%M UTC')")
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "$BODY"
+          else
+            gh issue create --title "$TITLE" --body "$BODY"
+          fi

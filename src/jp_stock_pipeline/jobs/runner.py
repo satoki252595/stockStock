@@ -340,6 +340,25 @@ def run_job(
     except Exception as exc:
         logger.error("⑦ ジョブログ記録失敗: %s", exc)
 
+    # D1 ⑦ への記録。器 (jss_job_runs) はあったが writer が存在せず 0 行のままで、
+    # EDINET が 11 営業日連続 processed=0 で「成功」していたことを誰も検知
+    # できなかった。ここが唯一の機械可読な実行履歴になる。
+    if ctx.cloud is not None and ctx.cloud.settings.d1_enabled():
+        from ..cloud_store.d1 import D1Store  # noqa: PLC0415 - 任意依存
+        from ..cloud_store.ops import safe_record_job_run  # noqa: PLC0415
+
+        safe_record_job_run(
+            D1Store(ctx.cloud.settings, writer=job_name),
+            job_name=job_name,
+            status=status,
+            processed=ctx.processed,
+            failed=ctx.failed,
+            failed_codes=ctx.failed_codes,
+            run_url=github_run_url(resolved_env),
+            duration_secs=round(duration, 1),
+            finished_at=int(time.time()),
+        )
+
     # ローカル ⑦ への記録 + 接続クローズ（失敗してもジョブ結果に影響させない）
     if ctx.local is not None:
         try:
