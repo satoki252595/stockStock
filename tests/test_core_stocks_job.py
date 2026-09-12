@@ -195,6 +195,68 @@ class TestVerifyDetectsDamage:
         assert not any("G-core-5" in p for p in problems), problems
 
 
+class TestColumnDriftDetection:
+    """E7: 列定義のドリフトを `--verify` で捕まえる。
+
+    既存実装は `NEW_COLUMNS ⊆ 本番`（subset 方向）しか見ていなかったので、
+    **本番にあって stockStock の定義に無い列**を素通りさせていた。`core_stocks`
+    の列定義は両リポジトリに散っていて本番 PRAGMA が正なので、kabulab-cf 側が
+    列を足した瞬間に stockStock の地図が古くなる。気づけるのはこの向きだけ。
+    """
+
+    def _applied(self, store: FakeStore) -> dict:
+        job.execute(FakeCtx(store, apply=True))
+        return job._observe(store)  # noqa: SLF001
+
+    def test_適用直後は何も検出しない(self, store: FakeStore) -> None:
+        before = self._applied(store)
+        assert job._verify(before, None) == []  # noqa: SLF001
+
+    def test_定義に無い列が足されたら検出する(self, store: FakeStore) -> None:
+        """対向リポジトリが勝手に列を足す = 本番が正で定義が古い状態。"""
+        self._applied(store)
+        store.con.execute("ALTER TABLE core_stocks ADD COLUMN shares_outstanding INTEGER")
+        store.con.commit()
+        problems = job._verify(job._observe(store), None)  # noqa: SLF001
+        assert any("E7" in p for p in problems), problems
+        assert any("shares_outstanding" in p for p in problems), problems
+
+    def test_定義に無い索引が足されたら検出する(self, store: FakeStore) -> None:
+        self._applied(store)
+        store.con.execute("CREATE INDEX idx_core_stocks_sector ON core_stocks (sector)")
+        store.con.commit()
+        problems = job._verify(job._observe(store), None)  # noqa: SLF001
+        assert any("定義に無い索引" in p for p in problems), problems
+
+    def test_追加列の欠落は従来どおり検出する(self, store: FakeStore) -> None:
+        """superset 方向を足しても subset 方向を壊していないこと。"""
+        state = job._observe(store)  # noqa: SLF001 - P4a 未適用の状態
+        problems = job._verify(state, None)  # noqa: SLF001
+        assert any("追加列が入っていない" in p for p in problems), problems
+
+    def test_verify_は読み取りだけで_CI_から回せる(self, store: FakeStore) -> None:
+        """ops_check の cron から毎日呼ぶ前提。1 文でも書いたら本番で事故になる。"""
+        self._applied(store)
+        store.sqls.clear()
+        ctx = FakeCtx(store, verify=True)
+        job.execute(ctx)
+        assert ctx.failures == [], ctx.failures
+        assert ctx.successes == 1
+        assert store.sqls, "1 文も発行していない（観測していない）"
+        for sql in store.sqls:
+            assert sql.split()[0].upper() in ("SELECT", "PRAGMA"), sql
+
+    def test_ドリフトがあれば_verify_が失敗して_CI_が赤くなる(self, store: FakeStore) -> None:
+        self._applied(store)
+        store.con.execute("ALTER TABLE core_stocks ADD COLUMN shares_outstanding INTEGER")
+        store.con.commit()
+        ctx = FakeCtx(store, verify=True)
+        job.execute(ctx)
+        assert ctx.failures, "ドリフトを検出しても失敗として記録していない"
+        assert ctx.successes == 0
+        assert any("E7" in reason for _, reason in ctx.failures), ctx.failures
+
+
 class TestAlreadyApplied:
     @pytest.mark.parametrize(
         "message",

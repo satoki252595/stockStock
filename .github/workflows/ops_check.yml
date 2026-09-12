@@ -1,4 +1,5 @@
 # 鮮度を観測して記録し（freshness_probe）、そのあと SLO を判定する（ops_check）。
+# 最後に core_stocks の列定義ドリフトを検出する（core_stocks_migrate --verify / E7）。
 # 異常があれば Issue を 1 本立てる。正常なら何も出さない。
 #
 # 「壊れても音が鳴らない」を塞ぐための層。実測で次が誰にも気づかれなかった:
@@ -19,6 +20,25 @@
 # 観測が落ちても判定は必ず走らせる。観測失敗で判定をスキップすると
 # 「前日の凍結した行が加齢して赤」という**正しい判定が消えて静かになる**のが
 # 最悪の失敗モードで、それは壊れているのに緑と区別できない。
+#
+# ## 第3層に列定義ドリフトの検出（E7）を相乗りさせた理由
+#
+# `core_stocks` の列定義は両リポジトリに散っており **本番 PRAGMA が正で 21 列**
+# （kabulab-cf の `src/shared/db/core-schema.ts` と drizzle `0008_snapshot.json` は
+# 9 列のまま）。読み取り専用の検出実装は `core_stocks_migrate --verify` に既にあった
+# が、**`.github/workflows/` のどこからも呼ばれていなかった**（grep 0 件）ので、
+# 対向リポジトリが列を足しても誰も気づかない状態だった。
+#
+# `cloud_check.yml` に足しても CI では走らない（1 行目のとおり workflow_dispatch
+# のみで cron が無い）。別 workflow に cron を付ける案も採らなかった。理由は
+# **通知経路を増やすと見なくなる**ことで、これは `cloud_check.yml` のコメントが
+# 既に書いている失敗（14 workflow に失敗通知 0 行）と同じ穴の裏側である。
+# 自動で走る口が既にあり、Issue を 1 本だけ立てる経路も既にある ops_check に
+# 相乗りさせ、どの層で落ちたかは Issue 本文の outcome で切り分ける。
+#
+# 引き換えに、Issue のタイトルが「[SLO違反]」のままドリフトも入る点は不正確。
+# タイトルを分けると open 中の Issue スレッドが分断されるので、本文の
+# outcome 行で読み分ける側に倒した。
 #
 # ## トークンの権限分離ができていない点
 #
@@ -84,8 +104,30 @@ jobs:
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
         run: nix develop -c uv run python -m jp_stock_pipeline.jobs.ops_check
 
-      # どちらの層で落ちたかが分かるように両ステップの outcome を本文へ入れる
-      # （観測が落ちたのか、観測はできたが SLO を割ったのかで対処が違う）。
+      # 検出層: core_stocks の列定義ドリフト (E7)。読み取りだけ（SELECT / PRAGMA）で
+      # 1 文も書かない。`--compare-to` を渡さないので G-core-2/3（適用前後の差分）は
+      # 見ず、列・索引の定義と孤児だけを見る。
+      #
+      # KABULAB_D1_DATABASE_ID を渡す理由は上の観測層と同じ。core_stocks は移行元
+      # kabulab-cf 所有の表で、正本 DB に同居しているとは限らない。
+      #
+      # 上2層と同じく `if: always()`。観測や判定が落ちた日にドリフト検出だけが
+      # 静かになると、「壊れているのに緑」と区別できなくなる。
+      - name: Detect core_stocks schema drift
+        id: drift
+        if: always()
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DB_JOB_LOG: ${{ secrets.NOTION_DB_JOB_LOG }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
+          KABULAB_D1_DATABASE_ID: ${{ secrets.KABULAB_D1_DATABASE_ID }}
+        run: nix develop -c uv run python -m jp_stock_pipeline.jobs.core_stocks_migrate --verify
+
+      # どの層で落ちたかが分かるように3ステップの outcome を本文へ入れる
+      # （観測が落ちたのか、観測はできたが SLO を割ったのか、列定義がドリフトした
+      # のかで対処がまったく違う）。
       - name: SLO 違反を Issue に出す
         if: failure()
         env:
@@ -93,11 +135,12 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           PROBE_OUTCOME: ${{ steps.probe.outcome }}
           JUDGE_OUTCOME: ${{ steps.judge.outcome }}
+          DRIFT_OUTCOME: ${{ steps.drift.outcome }}
         run: |
           TITLE="[SLO違反] データの鮮度またはジョブ結果"
           EXISTING=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
-          BODY=$(printf '観測または判定が失敗しました。\n\n- 観測 (freshness_probe): %s\n- 判定 (ops_check): %s\n\n実行ログ: %s\n検知: %s' \
-            "$PROBE_OUTCOME" "$JUDGE_OUTCOME" "$RUN_URL" "$(date -u '+%Y-%m-%d %H:%M UTC')")
+          BODY=$(printf '観測・判定・列定義ドリフト検出のいずれかが失敗しました。\n\n- 観測 (freshness_probe): %s\n- 判定 (ops_check): %s\n- 列定義ドリフト (core_stocks_migrate --verify / E7): %s\n\n実行ログ: %s\n検知: %s' \
+            "$PROBE_OUTCOME" "$JUDGE_OUTCOME" "$DRIFT_OUTCOME" "$RUN_URL" "$(date -u '+%Y-%m-%d %H:%M UTC')")
           if [ -n "$EXISTING" ]; then
             gh issue comment "$EXISTING" --body "$BODY"
           else

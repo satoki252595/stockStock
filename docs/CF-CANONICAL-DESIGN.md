@@ -782,6 +782,49 @@ D4 はその手動同期を 1 回ぶん増やしている。契約ファイル�
 
 行数: 4,445（増分はほぼ0）。
 
+#### E7. `core_stocks` の列定義の地図はどれが正か（2026-09-12 確定）
+
+**本番 D1 の `PRAGMA table_info(core_stocks)` が正で 21 列。** 同じ表の列定義が
+両リポジトリに散っており、そのうち 2 つは P4a を知らないまま 9 列で止まっている。
+
+| 地図 | 列数 | 状態 |
+|---|---:|---|
+| 本番 D1 の PRAGMA | **21** | **正** |
+| stockStock `cloud_store/core_stocks.py` の `BASE_COLUMNS` + `NEW_COLUMNS` | 21 | 本番と一致（stockStock 側の正本） |
+| stockStock `tests/test_core_stocks_migrate.py` の `PROD_COLUMNS` | 21 | リテラル列挙。定数からの導出にしないこと（下記） |
+| kabulab-cf `src/shared/db/core-schema.ts` | 9 | **古い**（P4a の 12 列を知らない） |
+| kabulab-cf drizzle `0008_snapshot.json` | 9 | **古い**（同上） |
+
+**検出の口**: `core_stocks_migrate --verify` が本番 PRAGMA と
+`BASE_COLUMNS`/`NEW_COLUMNS` を**両方向**で突き合わせる。もともと
+`NEW_COLUMNS ⊆ 本番`（subset 方向）しか見ておらず、**本番にあって定義に無い列**
+= 対向リポジトリが勝手に足した列を素通りさせていた。これが E7 の穴だった。
+索引も同じ向きで見る（`sqlite_autoindex_*` は SQLite の自動生成なので除外）。
+
+**自動で走る口**: `.github/workflows/ops_check.yml` の第3ステップ（cron
+`30 14 * * *`）。`cloud_check.yml` は `workflow_dispatch` のみで cron が無いので
+そこに足しても CI では走らない。別 workflow に cron を付ける案も採らなかった
+（通知経路を増やすと見なくなる。ops_check は既に Issue を 1 本だけ立てる経路を
+持っている）。引き換えに Issue タイトルが「[SLO違反]」のままになる点は不正確で、
+本文の outcome 行で層を読み分ける側に倒した。
+
+**リテラル列挙を導出に変えないこと。** `tests/test_core_stocks_migrate.py` は
+列集合を実装定数からではなく**リテラルで**列挙している。定数から要素を削る変異を
+テストが追随してしまうと検出できないため（`PROTECTED_COLUMNS` の parametrize と
+同じ理由）。`BASE_COLUMNS` と `PROTECTED_COLUMNS` も片方を他方から導出せず、
+**2 本のリテラル + 突き合わせテスト**で持つ。差は `updated_at` 1 列だけで、
+これは `build_column_update` が明示的に進める唯一の既存列なので PROTECTED から
+外してある。
+
+**`sector` を `MIXED_LICENSE_COLUMNS` に足すと地図が 3 枚目になる。** 本節の上と
+:150 / :1078 は「JPX 由来列 = `market` / `sector33` / `sector17` /
+`instrument_type`」と宣言しており、`sector` はそこに入っていない。一方で本番
+`core_stocks.sector` は JPX 33業種区分と**不一致 0 件**で、stockStock の
+`edinet_codelist.py` は EDINET 提出者業種を入れる実装である（= 出自が未決）。
+`cloud_store/schema.py` の `MIXED_LICENSE_COLUMNS` に `sector` を足すなら、
+**同時にこの 3 箇所の宣言と `jss_column_license` の投入行も直すこと。**
+出自が決まっていない現状では足さないのが正しい。
+
 #### A-2. `core_stock_financials`（拡張）— ②価格・バリュエーション・テクニカルの唯一の断面
 
 | 追加列 | 型 | 由来 |
