@@ -147,7 +147,7 @@
 
 | # | データ | 粒度 | 年間量（確定値） | 格納先 | 形式 | 正本か | ライセンス区分 |
 |---|---|---|---:|---|---|---|---|
-| **①** | 銘柄マスタ | 銘柄 | 4,445行（増分ほぼ0） | **D1** `core_stocks`（列追加） | 行 | **○正本** | EDINETコードリスト由来列=commercial-ok ／ JPX data_j.xls 由来列（`market`/`sector33`/`sector17`/`instrument_type`）=**personal-only**（列単位で混在） |
+| **①** | 銘柄マスタ | 銘柄 | 4,445行（増分ほぼ0） | **D1** `core_stocks`（列追加） | 行 | **○正本** | EDINETコードリスト由来列（`code`/`name`/`edinet_code`/**`sector33`**）=commercial-ok ／ JPX data_j.xlsx 由来列（`market`/**`sector`**/`sector17`/`instrument_type`）=**personal-only**（列単位で混在） |
 | **②** | 株価 日足OHLCV（10年） | 銘柄×営業日 | 約95.5万行 / +0.07 GB | **R2** `vwap-data/daily/{code}.json` | JSON（per-code） | **○正本** | personal-only（yfinance） |
 | **②** | 株価 指数・為替・先物 | シンボル×営業日 | **7シンボル**×245 | **R2** `vwap-data/index/{slug}.json` | JSON（per-slug） | **○正本** | personal-only |
 | **②** | 株価 5分足 | 銘柄×5分 | （**未実測**・仮2 GB/5年） | **R2** `vwap-data/intra/{code}.json` | JSON（per-code） | ○正本 | personal-only |
@@ -792,7 +792,7 @@ D4 はその手動同期を 1 回ぶん増やしている。契約ファイル�
 | 追加列 | 型 | 説明 | ライセンス |
 |---|---|---|---|
 | `instrument_type` | TEXT | `equity/etf/etn/reit/pro/foreign/preferred`。母集団を 3,818 → 4,445 へ拡張するために必須 | **personal-only**（JPX data_j.xls 由来） |
-| `sector33` | TEXT | 33業種 | **personal-only**（同上） |
+| `sector33` | TEXT | 33業種（EDINET コードリストの「提出者業種」） | **commercial-ok**（EDINET 由来。既存 `sector` と出所が違う → E7） |
 | `sector17` | TEXT | 17業種 | **personal-only**（同上） |
 | `edinet_code` | TEXT | EDINETコード | commercial-ok |
 | `listing_status` | TEXT | 上場/監理/整理/上場廃止 | commercial-ok |
@@ -806,7 +806,7 @@ D4 はその手動同期を 1 回ぶん増やしている。契約ファイル�
 
 追加索引: `idx_core_stocks_active_market (is_active, market)` / `idx_core_stocks_edinet (edinet_code)`。既存の `code` UNIQUE は維持。
 
-**既存 `sector` 列との関係（未解消）**: 既存 `core_stocks.sector` と新設 `sector33` は同一の事実を指す可能性が高いが、本仕様は「**既存 `sector` を触らない・`sector33` を別列として足す**」に留める。統合・廃止の計画は立てていない（同一行に同値2列が残る状態を許容している）。統合するなら既存 consumer（001 のスクリーニング、`株ラボ-Youtube/data/d1.py` の `stocks()`）の洗い出しが先。
+**既存 `sector` 列との関係（出所は 2026-09-13 に確定、統合は未着手）**: 値はほぼ同じだが**出所が違う別の列**である。`sector` は kabulab-cf `src/cron/universe.ts` が JPX `data_j.xlsx` の33業種を書く既存列（**personal-only**）、`sector33` は stockStock `collectors/edinet_codelist.py` が EDINET コードリストの「提出者業種」を書く新設列（**commercial-ok**）。本仕様は「**既存 `sector` を触らない・`sector33` を別列として足す**」に留める。**タグが違うので統合してはいけない**（1列にまとめた瞬間に、公開してよい EDINET 由来の値と公開できない JPX 由来の値が同じ列に同居し、列単位の地図で区別できなくなる）。公開面で業種を出すなら `sector33` を使う（ただし充填は P4b 以降。それまで全行 NULL）。既存 consumer（001 のスクリーニング、`株ラボ-Youtube/data/d1.py` の `stocks()`）は `sector` を読み続けるので私用面に留める。
 
 **ライセンスが列単位で混在する点の帰結**: ① は「EDINETコードリスト由来=commercial-ok / JPX由来=personal-only」で1行に混在するため、**行の `license_tag` 1列では公開可否を表現できない**。判定は列単位の地図（`jss_column_license`）に従う必要がある。
 
@@ -846,16 +846,35 @@ D4 はその手動同期を 1 回ぶん増やしている。契約ファイル�
 これは `build_column_update` が明示的に進める唯一の既存列なので PROTECTED から
 外してある。
 
-**`sector` を `MIXED_LICENSE_COLUMNS` に足すと地図が 3 枚目になる。** 本節の上と
-:150（①の行）／B-10 `jss_column_license` の「新設の根拠」の段は「JPX 由来列 =
-`market` / `sector33` / `sector17` / `instrument_type`」と宣言しており、
-`sector` はそこに入っていない
-（当初ここに書いていた `:1078` は誤り。その行は B-5 `jss_supply_latest` で無関係）。一方で本番
-`core_stocks.sector` は JPX 33業種区分と**不一致 0 件**で、stockStock の
-`edinet_codelist.py` は EDINET 提出者業種を入れる実装である（= 出自が未決）。
-`cloud_store/schema.py` の `MIXED_LICENSE_COLUMNS` に `sector` を足すなら、
-**同時にこの 3 箇所の宣言と `jss_column_license` の投入行も直すこと。**
-出自が決まっていない現状では足さないのが正しい。
+**2026-09-13 決着: `sector33` のタグが誤っていた。`sector` を地図に足した。**
+
+当初この節は「`sector` の出自が未決なので `MIXED_LICENSE_COLUMNS` に足さないのが
+正しい」と書いていた。**結論が逆だった。** 未決だったのは「`sector` と `sector33`
+が同じ事実か」ではなく、**2 列の writer が別々であること自体を見落としていた**点で、
+実装を読めばどちらの出所も確定していた。
+
+| 列 | 書く writer | 一次ソース | 正しいタグ |
+|---|---|---|---|
+| `sector` | kabulab-cf `src/cron/universe.ts:177`（`sector: r.sector33`） | JPX `data_j.xlsx` の33業種 | **personal-only** |
+| `sector33` | stockStock `collectors/edinet_codelist.py:151`（`_COL_SECTOR = "提出者業種"`） | EDINET コードリスト | **commercial-ok** |
+
+つまり従来の宣言は **(a) EDINET 由来の `sector33` を personal-only と誤って
+公開禁止にし、(b) 実際に JPX 由来である `sector` を地図に一度も載せていなかった**。
+(a) だけを直すと「JPX 由来の業種が commercial-ok として公開面に出る」へ反転する
+（`sector` を載せていないので地図が何も止めない）。**2 列は必ず同時に直す。**
+
+同時に直した宣言は 5 箇所:
+`cloud_store/schema.py` の `MIXED_LICENSE_COLUMNS` /
+`tests/fixtures/contracts/d1-governance.json`（両リポジトリ共有の契約） /
+`worker/src/shared/license.ts` の `RESTRICTED_COLUMNS` /
+本節の上の `:150`（①の行） / B-10 `jss_column_license` の「新設の根拠」。
+（当初ここに書いていた `:1078` は誤り。その行は B-5 `jss_supply_latest` で無関係。）
+
+**`core_stocks.sector33` は本番 3,818 行すべて NULL のまま**なので、タグが公開可に
+なっても今は 1 件も出ない。**公開面の業種を `sector` → `sector33` へ切り替えて
+よいのは P4b の充填が済んだ後**（切り替えだけ先に入れると業種が全件空欄になる）。
+統合（2 列を 1 列に寄せる）は**してはいけない**: タグが違う値が同じ列に同居すると
+列単位の地図で区別できなくなる。
 
 #### A-2. `core_stock_financials`（拡張）— ②価格・バリュエーション・テクニカルの唯一の断面
 
@@ -1218,7 +1237,7 @@ CREATE TABLE jss_column_license (
 );
 ```
 
-**新設の根拠**: `core_stocks` は「EDINETコードリスト由来=commercial-ok / JPX data_j.xls 由来（`market`/`sector33`/`sector17`/`instrument_type`）=personal-only」で**1行に混在**する。行の `license_tag` 1列では表現できないため、判定は列単位でなければならない。`licensing.py` から生成し、手書きの二重定義を作らない。
+**新設の根拠**: `core_stocks` は「EDINETコードリスト由来（`code`/`name`/`edinet_code`/`sector33`）=commercial-ok / JPX data_j.xlsx 由来（`market`/`sector`/`sector17`/`instrument_type`）=personal-only」で**1行に混在**する。行の `license_tag` 1列では表現できないため、判定は列単位でなければならない。`licensing.py` から生成し、手書きの二重定義を作らない。**`sector` と `sector33` は名前が似ているだけで writer も一次ソースも違う**（E7 を読むこと。取り違えると公開面へ JPX 由来の業種が出る）。
 
 行数: 約300。
 

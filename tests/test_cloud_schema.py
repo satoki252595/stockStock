@@ -91,7 +91,23 @@ class TestColumnLicense:
         by_column = {c: tag for t, c, tag in rows if t == "core_stocks"}
         assert by_column["edinet_code"] == LicenseTag.COMMERCIAL_OK.value
         assert by_column["market"] == LicenseTag.PERSONAL_ONLY.value
-        assert by_column["sector33"] == LicenseTag.PERSONAL_ONLY.value
+
+    def test_sector_and_sector33_are_tagged_by_provenance_not_by_name(self):
+        """`sector` と `sector33` は名前が似ているだけで writer も一次ソースも違う。
+
+        旧宣言は `sector33` を personal-only にしていたが、この列を書くのは
+        stockStock の `collectors/edinet_codelist.py`（EDINET コードリストの
+        「提出者業種」）で commercial-ok が正しい。実際に JPX `data_j.xlsx` 由来
+        なのは kabulab-cf `src/cron/universe.ts` が書く既存列 `sector` で、
+        そちらは地図に一度も載っていなかった。
+
+        **片方だけ直すと危険**なのでこの 2 本を 1 つのテストで固定する:
+        `sector33` だけ commercial-ok にして `sector` を載せ忘れると、JPX 由来の
+        業種が「地図に無い＝何も止めない」状態のまま公開面に出る。
+        """
+        by_column = {c: tag for t, c, tag in S.column_license_rows() if t == "core_stocks"}
+        assert by_column["sector33"] == LicenseTag.COMMERCIAL_OK.value  # EDINET 提出者業種
+        assert by_column["sector"] == LicenseTag.PERSONAL_ONLY.value  # JPX 33業種
 
     def test_rows_are_deterministic(self):
         assert S.column_license_rows() == S.column_license_rows()

@@ -69,7 +69,10 @@ BASE_COLUMNS: tuple[str, ...] = (
 # UNIQUE も付けられない。実測で両方エラーになることを確認済み）。
 NEW_COLUMNS: dict[str, str] = {
     "instrument_type": "TEXT",  # equity/etf/... JPX 由来 → personal-only
-    "sector33": "TEXT",  # 33業種 (出自は §8-2 で未決)
+    # EDINET コードリストの「提出者業種」(33業種相当) → commercial-ok。
+    # 既存の `sector` (JPX 33業種 / personal-only) とは出所が違う別の列である。
+    # 値の充填は P4b（理由は docs/CF-CANONICAL-DESIGN.md の P4a 実施記録）。
+    "sector33": "TEXT",
     "sector17": "TEXT",  # 17業種 JPX 由来 → personal-only
     "edinet_code": "TEXT",  # EDINETコード → commercial-ok
     "listing_status": "TEXT",  # 上場/監理/整理/上場廃止

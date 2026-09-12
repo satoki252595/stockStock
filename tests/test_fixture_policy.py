@@ -33,8 +33,11 @@ ALLOWED: frozenset[str] = frozenset(
         # 銘柄コード契約の言語横断テストベクタ（kabulab-cf と同一バイト列で共有）。
         # 取得物ではなく手書きの契約定義で、収録しているのは境界値のコード文字列
         # （大半は "07203" / "A130" / "1234567" のような合成値）と説明文だけ。
-        # personal-only 列（market / sector17 / sector33 / instrument_type /
-        # license_tag / src_source / quality）の値は 1 つも含まない。
+        # personal-only 列（market / sector / sector17 / instrument_type /
+        # license_tag / src_source / quality）の値は 1 つも含まない
+        # （`sector33` はここに挙げない。EDINET「提出者業種」由来の
+        #  commercial-ok 列である。`cloud_store/schema.py` の
+        #  MIXED_LICENSE_COLUMNS が正本）。
         # JPX/TDnet/日証金のデータセットの再配布にはあたらないので追跡してよい。
         "tests/fixtures/contracts/stock-code-vectors.json",
     }

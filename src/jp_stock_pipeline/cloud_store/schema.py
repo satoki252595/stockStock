@@ -247,14 +247,40 @@ INDEX_SYMBOLS: tuple[tuple[str, str | None, str], ...] = (
 
 # 列単位のライセンス。混在するテーブルだけを明示し、それ以外は行の
 # license_tag に従う（ここで全列を二重定義しない）。
+#
+# ## `sector` と `sector33` は**別の出所**である（取り違えると規約違反になる）
+#
+# 名前が似ているうえに値もほぼ同じなので、1 つの事実の別名だと読んでしまう。
+# 実際には writer が違い、したがってライセンスも違う。
+#
+# | 列 | 書く writer | 一次ソース | タグ |
+# |---|---|---|---|
+# | `sector`   | kabulab-cf `src/cron/universe.ts`（`sector: r.sector33`） | JPX `data_j.xlsx` の33業種 | **personal-only** |
+# | `sector33` | stockStock `master_sync`（値の充填は P4b）                 | EDINET コードリストの「提出者業種」 | **commercial-ok** |
+#
+# stockStock 側の根拠は `collectors/edinet_codelist.py` の
+# `sector33=row[idx[_COL_SECTOR]]`（`_COL_SECTOR = "提出者業種"`）で、レコードの
+# Provenance も `Source.EDINET` / `COMMERCIAL_OK` になっている。EDINET 由来の値に
+# JPX のタグを貼っていたのが従来の宣言（`sector33` = personal-only）で、これは
+# **公開してよい列を公開禁止と宣言していた**誤りである（逆向きの誤りなら漏洩に
+# なっていた）。同時に、実際に JPX 由来である `sector` が**地図に一度も載って
+# いなかった**。片方だけ直すと「JPX 由来の業種が commercial-ok として公開面に
+# 出る」に反転するので、2 列は必ず同時に扱う。
+#
+# `sector33` は 2026-09-13 時点で本番 3,818 行すべて NULL。タグが公開可に
+# なっても**中身が入るのは P4b の充填以降**なので、公開面の業種を
+# `sector` → `sector33` へ切り替えるのは充填の後でなければならない
+# （切り替えだけ先に入れると業種が全件空欄になる）。
 MIXED_LICENSE_COLUMNS: dict[str, dict[str, LicenseTag]] = {
-    # EDINETコードリスト由来は commercial-ok、JPX data_j.xls 由来は personal-only。
     "core_stocks": {
+        # EDINET コードリスト由来 → commercial-ok
         "code": LicenseTag.COMMERCIAL_OK,
         "name": LicenseTag.COMMERCIAL_OK,
         "edinet_code": LicenseTag.COMMERCIAL_OK,
+        "sector33": LicenseTag.COMMERCIAL_OK,  # EDINET「提出者業種」。`sector` と混同しない
+        # JPX data_j.xlsx 由来 → personal-only
         "market": LicenseTag.PERSONAL_ONLY,
-        "sector33": LicenseTag.PERSONAL_ONLY,
+        "sector": LicenseTag.PERSONAL_ONLY,  # kabulab-cf が JPX 33業種を書く既存列
         "sector17": LicenseTag.PERSONAL_ONLY,
         "instrument_type": LicenseTag.PERSONAL_ONLY,
     },
