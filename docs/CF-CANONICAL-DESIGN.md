@@ -3065,13 +3065,31 @@ kabulab-cf は `pnpm typecheck` 通過、本番 11 経路がすべて 200。
 充填を別フェーズに切ったまま据え置く理由:
 - 列追加（DDL・1回きり）と値の充填（UPDATE・繰り返し）で、承認とロールバックの
   単位が違う
-- `sector33` の正本ソースが未決（本番 `core_stocks.sector` は JPX 33業種区分と
-  **不一致 0 件**で、stockStock の `edinet_codelist.py` は EDINET 提出者業種を
-  入れる実装。どちらに寄せるかで `jss_column_license` のタグも変わる）
+- ~~`sector33` の正本ソースが未決~~ **2026-09-13 決着**: `sector33` は EDINET
+  コードリストの「提出者業種」で **commercial-ok**（`edinet_codelist.py:151`）。
+  既存 `sector` は kabulab-cf が JPX 33業種を書く別の列で **personal-only**。
+  値も出所も別なので寄せない（E7 / B-10 を読むこと）
 - `instrument_type` の語彙が data_j の「市場・商品区分」から 1:1 に導けない
   （`ETF・ETN` は 1 区分で etf/etn を分離不能、`REIT・ベンチャーファンド・
   カントリーファンド・インフラファンド` も同様、`出資証券` は 7 語彙のどれにも
   当たらない）。**A-1 の語彙表を先に直す必要がある**
+
+##### 新しい前提条件: 充填は鮮度監視を恒久的に緑にする（2026-09-13 追加）
+
+`sector33` の出所が決着した時点で「`master_sync` に UPDATE を 1 行足せば充填できる」状態になったが、**足してはいけない。**
+
+`cloud_store/datasets.py` は `core_stocks` に日付列が無いため鮮度を `MAX(updated_at)` で測っており、`cloud_store/core_stocks.build_column_update` は `updated_at = (unixepoch())` を明示的に進める。月次 `master_sync` が 3,818 行を充填すると **`MAX(updated_at)` が毎月必ず進む**ので、kabulab-cf の月次 universe sync が死んでいても `core_stocks` の SLO（33 日で黄・46 日で赤）が発火しなくなる。
+
+これは検知したかった事象そのもの（**JPX の 404 で銘柄マスタが 33 日止まったのに誰も気づかなかった**）を自分の書き込みで隠すことを意味する。B-8 が「`updated_at` に `now` を入れると翌日から永久に緑」「鮮度表があるのに何も検知しない状態は writer 不在より悪い」と書いているのと同型である。
+
+したがって P4b は充填の前に次のどちらかを先に済ませる必要がある:
+
+1. `src_data_date` / `src_fetched_at` を充填し、`core_stocks` の鮮度の基準をそちらへ移す（`datasets.py` のコメントが既に「`src_fetched_at` が埋まったらそちらへ寄せる」と予告している）
+2. 鮮度 SQL を「kabulab-cf が書く列だけ」で測る形にする（例: `is_active` の更新を伴う行だけを見る、など）
+
+この 2 つの事実（鮮度の基準が `updated_at` である / 充填が `updated_at` を進める）は `tests/test_core_stocks_migrate.py` の `TestFillWouldBlindTheFreshnessMonitor` が固定してあり、`build_column_update` を `jobs/` から呼び始めた時点で落ちる（AST の Call ノードで検出する）。
+
+なお `sector33` が全行 NULL のままなので、**kabulab-cf 側が公開面の業種を `sector` → `sector33` へ切り替えてよいのは充填の後**である（切り替えだけ先に入れると業種が全件空欄になる）。タグの修正（commercial-ok）と充填は別物であることに注意。
 
 ---
 

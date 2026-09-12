@@ -3,6 +3,24 @@
 フロー (§8.1): fetch → save raw → convert → ⑤UL(必須) → parse → ① upsert → ⑦記録。
 原本(⑤)を Notion・ローカルの両系統に保存できなかった取得単位のみ構造化を書かず中止する
 （片系統に原本が残れば構造化は書く。① upsert 自体も Notion/ローカル独立 §7.1/§3-3）。
+
+## D1 `core_stocks.sector33` をこのジョブで充填しない理由
+
+`parse_codelist` が返す `StockMasterRecord.sector33` は EDINET コードリストの
+「提出者業種」で、出所とライセンス（commercial-ok）は 2026-09-13 に決着した。
+Notion ① とローカル ① へは既にこの値を書いている。
+
+しかし **D1 `core_stocks.sector33` への UPDATE はここでは流さない**。
+`cloud_store/core_stocks.build_column_update` は `updated_at = (unixepoch())` を
+明示的に進めるので、月次でこのジョブが 3,818 行を充填すると
+`cloud_store/datasets.py` が `core_stocks` の鮮度に使っている `MAX(updated_at)`
+が**毎月必ず進む**。そうなると、kabulab-cf の月次 universe sync が死んでいても
+`core_stocks` の SLO（33 日で黄・46 日で赤）は発火しない。JPX の 404 で銘柄
+マスタが 33 日止まったのに誰も気づかなかった、という検知したかった事象を
+自分の書き込みで隠すことになる。
+
+詳細と P4b が先に解くべき前提は `cloud_store/core_stocks.py` の
+「充填を P4b に置く理由」に書いてある。
 """
 
 from __future__ import annotations

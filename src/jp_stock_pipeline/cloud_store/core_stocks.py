@@ -20,6 +20,37 @@
 設計書の G-core-1 は「書き込み SQL を実行せずダンプし、サロゲートキー列が
 SET 句に一度も現れないことを静的に検査する」ことを求めている。実行と生成が
 同じ関数に同居していると、その検査ができない。
+
+## 充填を P4b に置く理由（2026-09-13 追記。実行させる前に必ず読むこと）
+
+`sector33` の出所は決着した（EDINET コードリストの「提出者業種」= commercial-ok。
+`collectors/edinet_codelist.py:151`）。つまり `master_sync` はこの値を既に
+持っており、Notion ① とローカル ① へは書いている。残っているのは **D1
+`core_stocks.sector33` へ UPDATE を流すかどうか**だけである。
+
+本レーンでは流さない。理由は 3 つあり、1 つ目が決定的である。
+
+**(1) 鮮度監視を恒久的に緑にしてしまう。** `cloud_store/datasets.py` の
+`core_stocks` は日付列を持たないので、鮮度を `MAX(updated_at)` で測っている。
+`build_column_update` は `updated_at = (unixepoch())` を明示的に進めるので、
+月次 `master_sync` が 3,818 行を充填すると **`MAX(updated_at)` が毎月必ず
+進む**。すると `core_stocks` の SLO（33 日で黄・46 日で赤）は、kabulab-cf の
+月次 universe sync が死んでいても発火しない。これは検知したかった事象
+（JPX の 404 で銘柄マスタが **33 日**止まったのに誰も気づかなかった）を
+自分の書き込みで隠すことになる。設計書 B-8 が「`now` を入れると翌日から
+永久に緑」と書いているのと同じ失敗で、**writer 不在より悪い**。
+P4b はこれを先に解く必要がある（`src_data_date` / `src_fetched_at` を
+充填して鮮度の基準をそちらへ移すか、鮮度 SQL を「kabulab-cf が書いた列だけ」
+で測る形にするか）。
+
+**(2) writer 交代と同じ単位の変更になる。** UPDATE を流した瞬間に stockStock は
+`core_stocks` の writer になる。`governance.WRITER_CLAIMS` は P4b までこの表を
+`kabulab-cf` と宣言しており（そう宣言しないと `universe.ts` の照合が throw して
+JPX 母集団同期が止まる）、充填を先に入れると宣言と実態が食い違う。
+
+**(3) 承認とロールバックの単位が違う。** 列追加（DDL・1 回きり）と値の充填
+（UPDATE・毎月 3,818 行）で戻し方が違う。G-core-1 の静的検査も「実行しない」
+前提で書かれている。
 """
 
 from __future__ import annotations
