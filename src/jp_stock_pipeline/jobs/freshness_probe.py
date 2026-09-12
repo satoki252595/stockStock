@@ -30,6 +30,11 @@ processed=0 で「成功」していた）。だから**観測ジョブが実表
   STATUS_FAILURE へ落とす。
 - **`updated_at` に記録時刻を入れない。** 入れると翌日から恒久的に緑になる
   （`ops.record_freshness` の docstring 参照）。
+- **移行元所有の表は正本 DB に無いことがある。** `KABULAB_D1_DATABASE_ID` が
+  設定されていればそちらを読む（`yutai_backup` / `core_stocks_migrate` と同じ
+  解決）。正本 DB 固定にすると、表が別 DB にあった場合に 7 件中 4 件が
+  `no such table` で落ちて観測ジョブが毎日失敗する。未設定なら正本へ
+  フォールバックするので、統合済みの環境でも同じコードで動く。
 """
 
 from __future__ import annotations
@@ -39,8 +44,14 @@ from datetime import datetime
 from typing import Any
 
 from ..cloud_store.d1 import D1Error, D1Store
-from ..cloud_store.datasets import DATASET_SOURCES, DatasetSource
+from ..cloud_store.datasets import (
+    DATASET_SOURCES,
+    DB_CANONICAL,
+    DB_KABULAB,
+    DatasetSource,
+)
 from ..cloud_store.ops import safe_record_freshness
+from ..config import CloudStoreSettings
 from ..models import JST
 from .runner import JobContext, build_parser, main_exit, run_job
 
@@ -93,6 +104,26 @@ def _coerce_epoch(value: Any) -> int | None:
     return int(parsed.timestamp())
 
 
+def _stores(settings: CloudStoreSettings) -> dict[str, D1Store]:
+    """観測先 DB ごとに D1Store を1つだけ作る。
+
+    移行元 (kabulab-cf) 所有の表が正本 DB に同居しているかは環境依存なので、
+    `KABULAB_D1_DATABASE_ID` があればそちらを使い、無ければ正本へ倒す
+    （`jobs/core_stocks_migrate.py` の `kabulab_d1_database_id or d1_database_id`
+    と同じ解決。採らなかった案: 正本 DB 固定 → 別 DB 構成では毎日 4 件落ちる）。
+    """
+    canonical = D1Store(settings, writer=JOB_NAME)
+    legacy_id = settings.kabulab_d1_database_id
+    return {
+        DB_CANONICAL: canonical,
+        DB_KABULAB: (
+            D1Store(settings, writer=JOB_NAME, database_id=legacy_id)
+            if legacy_id
+            else canonical
+        ),
+    }
+
+
 def _observe(store: D1Store, source: DatasetSource) -> dict[str, Any]:
     """1 データセットを測る。D1Error はそのまま呼び出し側へ渡す。"""
     rows = store.query(source.sql)
@@ -120,15 +151,21 @@ def execute(ctx: JobContext) -> None:
             "d1", "D1 が未設定 (CF_ACCOUNT_ID / CF_API_TOKEN / CF_D1_DATABASE_ID)。実表を測れない"
         )
         return
-    store = D1Store(settings, writer=JOB_NAME)
+    stores = _stores(settings)
     dry_run = ctx.settings.dry_run
 
     for source in DATASET_SOURCES:
+        store = stores[source.db]
         try:
             observed = _observe(store, source)
         except D1Error as exc:
             # 1 表の欠損で 7 件全滅させない。ここは当該データセットだけ失敗にして次へ。
-            ctx.add_failure(source.dataset, f"実表を測れない ({source.location}): {exc}")
+            # DB 名を添える: `no such table` の原因が「表が無い」ではなく
+            # 「別 DB を見ている」ことが実際にあり、区別できないと調査が長引く。
+            ctx.add_failure(
+                source.dataset,
+                f"実表を測れない ({source.location} / db={source.db}): {exc}",
+            )
             continue
 
         if dry_run:
@@ -146,7 +183,8 @@ def execute(ctx: JobContext) -> None:
             ctx.add_success()
             continue
 
-        if not safe_record_freshness(store, **observed):
+        # 記録先は必ず正本（jss_dataset_freshness は stockStock 所有）。
+        if not safe_record_freshness(stores[DB_CANONICAL], **observed):
             ctx.add_failure(source.dataset, "鮮度を記録できない（D1 への書き込みが失敗）")
             continue
         logger.info(

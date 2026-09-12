@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import UTC, date, datetime, timedelta
 
@@ -28,7 +29,9 @@ from jp_stock_pipeline.jobs import freshness_probe, ops_check, runner
 _LEGACY_DDL: tuple[str, ...] = (
     "CREATE TABLE core_stock_financials"
     " (stock_id INTEGER, data_date TEXT, fetched_at INTEGER)",
-    "CREATE TABLE ir_disclosures (tdnet_id TEXT, pubdate INTEGER, ingested_at INTEGER)",
+    # 取得時刻の列は宣言しない。設計書にも既存コードにも出てこないので、
+    # マニフェストがそれを参照していたらここで `no such column` にして落とす。
+    "CREATE TABLE ir_disclosures (tdnet_id TEXT, pubdate INTEGER)",
     "CREATE TABLE core_stocks (id INTEGER PRIMARY KEY, code TEXT, updated_at INTEGER)",
     "CREATE TABLE yutai_benefits"
     " (id INTEGER PRIMARY KEY, stock_id INTEGER, updated_at INTEGER)",
@@ -264,6 +267,35 @@ class TestDatasetManifest:
         """core_stocks を commercial-ok にすると JPX 由来の断面メタが公開 API に出る。"""
         assert datasets.DATASET_SOURCE_BY_NAME["core_stocks"].license_tag == "personal-only"
 
+    def test_観測SQLは読み取りだけ(self) -> None:
+        """観測ジョブは移行元 (kabulab-cf) の本番 DB へのハンドルも持つ。
+
+        マニフェストに書き込み文が混ざると、そこが移行元の本番データを壊す唯一の
+        経路になる。SELECT 以外は構造的に禁止する。
+        """
+        # 単語境界で見る（`updated_at` の部分一致で誤検知しないため）。
+        forbidden = re.compile(
+            r"\b(INSERT|UPDATE|DELETE|REPLACE|DROP|ALTER|CREATE|ATTACH|PRAGMA|VACUUM)\b"
+        )
+        for src in datasets.DATASET_SOURCES:
+            upper = src.sql.upper()
+            assert upper.lstrip().startswith("SELECT"), src.dataset
+            assert ";" not in src.sql, f"{src.dataset}: 複文にしない"
+            hit = forbidden.search(upper)
+            assert hit is None, f"{src.dataset}: {hit.group(0) if hit else ''}"
+
+    def test_移行元所有の表はkabulabのDBとして宣言する(self) -> None:
+        """正本 DB 固定にすると、表が別 DB にあった場合に 4 件が毎日落ちる。
+
+        `KABULAB_D1_DATABASE_ID` という別 secret が現に存在し
+        （`jobs/yutai_backup.py` / `jobs/core_stocks_migrate.py` が使う）、
+        統合が終わるまでは 2 DB 構成でも動く必要がある。
+        """
+        legacy = {"prices_daily", "tdnet_disclosures", "core_stocks", "yutai_benefits"}
+        for name, src in datasets.DATASET_SOURCE_BY_NAME.items():
+            expected = datasets.DB_KABULAB if name in legacy else datasets.DB_CANONICAL
+            assert src.db == expected, name
+
     def test_epoch列の日付化はJSTへ寄せる(self) -> None:
         """UTC のままだと他データセットの JST 営業日文字列と 1 日ずれる。"""
         sql = datasets.DATASET_SOURCE_BY_NAME["tdnet_disclosures"].sql
@@ -414,8 +446,8 @@ class TestFreshnessProbe:
             [today, prices_fetched_at],
         )
         store.query(
-            "INSERT INTO ir_disclosures (tdnet_id, pubdate, ingested_at) VALUES ('t', ?, ?)",
-            [prices_fetched_at, prices_fetched_at],
+            "INSERT INTO ir_disclosures (tdnet_id, pubdate) VALUES ('t', ?)",
+            [prices_fetched_at],
         )
         store.query(
             "INSERT INTO core_stocks (code, updated_at) VALUES ('7203', ?)",
@@ -504,6 +536,59 @@ class TestFreshnessProbe:
         }
         assert recorded == set(slo.SLO_BY_DATASET) - {"core_stocks"}
         assert code == 1, "1 件でも測れなければジョブ全体を失敗にする"
+
+    def test_移行元の表は別DBから読み記録は正本へ書く(self, monkeypatch) -> None:
+        """`KABULAB_D1_DATABASE_ID` があれば移行元の表はそちらから測る。
+
+        正本 DB 固定にすると、移行元の 4 表
+        (core_stock_financials / ir_disclosures / core_stocks / yutai_benefits) が
+        別 DB にある構成で毎日 `no such table` で落ち、観測ジョブが恒久的に
+        失敗する（= 潰したかった「毎日鳴る」に自分で戻る）。
+        正本側からその 4 表を落として、経路を取り違えたら落ちるようにしてある。
+        """
+        canonical, legacy = _FakeStore(), _FakeStore()
+        for table in (
+            "core_stock_financials", "ir_disclosures", "core_stocks", "yutai_benefits",
+        ):
+            canonical.con.execute(f"DROP TABLE {table}")
+        canonical.con.commit()
+        self._seed_all(legacy, prices_fetched_at=_epoch_days_ago(0.1))
+
+        def factory(settings, *, writer, database_id=None):
+            return legacy if database_id == "legacy-db" else canonical
+
+        from jp_stock_pipeline.cloud_store import d1 as d1_module
+
+        monkeypatch.setattr(freshness_probe, "D1Store", factory)
+        monkeypatch.setattr(d1_module, "D1Store", factory)
+        monkeypatch.setattr(runner, "write_job_log", lambda *a, **k: "dummy")
+        monkeypatch.setattr(runner, "connect_local_store", lambda *a, **k: None)
+
+        code = freshness_probe.main(
+            [], env=dict(_D1_ENV, KABULAB_D1_DATABASE_ID="legacy-db")
+        )
+        assert code == 0, "移行元の表を別 DB から測れなければ毎日失敗する"
+        recorded = {
+            r["dataset"]
+            for r in canonical.query("SELECT dataset FROM jss_dataset_freshness")
+        }
+        assert recorded == set(slo.SLO_BY_DATASET), "記録先は正本 DB でなければならない"
+        assert legacy.query("SELECT COUNT(*) AS n FROM jss_dataset_freshness")[0]["n"] == 0
+
+    def test_移行元DBが未設定なら正本へフォールバックする(self) -> None:
+        """統合済みの環境（D1 が 1 個）でも同じコードで動く必要がある。"""
+        from jp_stock_pipeline.config import load_settings
+
+        settings = load_settings(env=dict(_D1_ENV)).cloud_store
+        stores = freshness_probe._stores(settings)
+        assert stores[datasets.DB_KABULAB] is stores[datasets.DB_CANONICAL]
+
+        with_legacy = load_settings(
+            env=dict(_D1_ENV, KABULAB_D1_DATABASE_ID="legacy-db")
+        ).cloud_store
+        stores = freshness_probe._stores(with_legacy)
+        assert stores[datasets.DB_KABULAB].database_id == "legacy-db"
+        assert stores[datasets.DB_CANONICAL].database_id == "db"
 
     def test_dry_runは1文も書き込まない(self, monkeypatch) -> None:
         """run_job 経由で確認する。fake store を直接注入するだけでは
