@@ -121,6 +121,14 @@
       "kind": "uniform",
       "tag": "personal-only"
     },
+    "swing_market_context": {
+      "kind": "uniform",
+      "tag": "personal-only"
+    },
+    "swing_sector_daily": {
+      "kind": "uniform",
+      "tag": "personal-only"
+    },
     "swing_stock_indicators": {
       "kind": "uniform",
       "tag": "personal-only"
@@ -144,6 +152,10 @@
     "yutai_benefits": {
       "kind": "uniform",
       "tag": "personal-only"
+    },
+    "yutai_genres": {
+      "kind": "unclassified",
+      "tag": null
     }
   },
   "$writer_claim_note": "jss_writer_claims の column_group の語彙をここで固定する。PK が (dataset, column_group) なので、後から値を改名すると DELETE + INSERT の破壊的書換になる。宣言するのは「今日実際に writer が居る (dataset, column_group)」だけで、writer の居ない列群（例: core_stocks の enrich = P4a で足した 12 列）には行を作らない。core_stocks は P4b の writer 交代まで kabulab-cf とする（stockStock と宣言すると universe.ts の照合が毎回 throw して JPX 母集団同期が止まる）。照合は warn → fail の 2 段リリースで、1 段目では食い違いを warning にする（claim を投入するのも書込ジョブなので、claim 行の無い DB への最初の実行を異常終了させるとブートストラップ不能）。",

@@ -865,7 +865,7 @@ D4 はその手動同期を 1 回ぶん増やしている。契約ファイル�
 
 同時に直した宣言は 5 箇所:
 `cloud_store/schema.py` の `MIXED_LICENSE_COLUMNS` /
-`tests/fixtures/contracts/d1-governance.json`（両リポジトリ共有の契約） /
+`tests/fixtures/contracts/d1-license-map.json`（両リポジトリ共有の契約） /
 `worker/src/shared/license.ts` の `RESTRICTED_COLUMNS` /
 本節の上の `:150`（①の行） / B-10 `jss_column_license` の「新設の根拠」。
 （当初ここに書いていた `:1078` は誤り。その行は B-5 `jss_supply_latest` で無関係。）
@@ -1281,11 +1281,11 @@ CREATE TABLE jss_column_license (
 
 **upsert は孤児宣言を消さない。** `conflict=(table_name, column_name)` なので宣言から外した列の行が残り続ける。`commercial-ok` の孤児は「公開してよい」と宣言したまま誰も管理していない列になるため、投入後に実表を読み直して孤児をキー指定で削除する。`jss_index_symbols` の孤児は削除しない（`r2_key` が実オブジェクトを指し、`r2.py` に削除 API が無いので回収できない）。
 
-**表の区分は `cloud_store/governance.TABLE_LICENSE`。** 本番 30 表 374 列のうち行タグも列地図も無いのが 22 表 / 256 列（68.4%）で、`license_tag` 列を持つ 8 表のうち行が入って機能していたのは 3 表だけ（`jss_index_symbols` 6 / `jss_raw_files` 150 / `jss_supply_latest` 4,351。`core_stocks.license_tag` は 3,818 行すべて NULL）だった。区分は `column-map` / `row-tag` / `uniform` / `operational` / `unclassified` の 5 つ。
+**表の区分は `cloud_store/governance.TABLE_LICENSE`。** 本番 30 表 375 列のうち行タグも列地図も無いのが 22 表 / 257 列（68.5%）で、`license_tag` 列を持つ 8 表のうち行が入って機能していたのは 3 表だけ（`jss_index_symbols` 6 / `jss_raw_files` 150 / `jss_supply_latest` 4,351。`core_stocks.license_tag` は 3,818 行すべて NULL）だった。区分は `column-map` / `row-tag` / `uniform` / `operational` / `unclassified` の 5 つ。
 
 **網羅性の検査は行を 1 行も走査しない。** `sqlite_master` 1 文で全表の DDL を取り、列名は DDL から読む（SQLite は `ALTER TABLE ADD COLUMN` で保存済みの CREATE TABLE 文を書き換えるので、P4a で足した 12 列も DDL に出る）。30 表へ `PRAGMA table_info` を投げる案は往復が 30 回になるので採らない。全表に `SUM(col IS NOT NULL)` を打って実際の充填を測る案は、`ir_disclosures`(37,641) と `yutai_benefits`(8,314) を含めて **1 実行あたり約 6 万行の走査**になり、:1047 が「桁で下げる」と言っている対象と正面衝突するので採らない。
 
-**スナップショットの所有と fail open / closed**: 区分の宣言は **stockStock が所有する**（kabulab-cf にはテストを回す CI が存在せず、乖離を検出できる場所が物理的にこちら側にしか無い）。「宣言に無い表が本番にある」は **warning**（対向リポジトリの migration ごとに毎日赤くなる検査は読まれなくなる。最初の本番実行が名前を出すので追随 PR で登録する）。「宣言にある表が本番から消えた」「行タグ前提の表に `license_tag` 列が無い」「列地図にある列が本番から消えた」「2 つの地図が食い違う」は **failure**。
+**スナップショットの所有と fail open / closed**: 区分の宣言は **stockStock が所有する**。理由は「kabulab-cf にテストを回す CI が無いから」**ではない**（当初そう書いていたが事実誤認。あちらには `.github/workflows/ci.yml` があり push / pull_request で `pnpm test` を回す）。本番 `sqlite_master` と突き合わせる実行主体 (`jobs/license_map.py`) がこちらにしか無いからである。「宣言に無い表が本番にある」は **warning**（対向リポジトリの migration ごとに毎日赤くなる検査は読まれなくなる）。2026-09-13 に読み取り専用の `sqlite_master` 照会で残り 3 表（`swing_market_context` / `swing_sector_daily` / `yutai_genres`）が判明したので 30 表すべてを登録済みで、今後この warning が出るのは kabulab-cf が表を足したときだけである。「宣言にある表が本番から消えた」「行タグ前提の表に `license_tag` 列が無い」「列地図にある列が本番から消えた」「2 つの地図が食い違う」は **failure**。
 
 **未宣言の列の扱い**: 地図は公開できるものの allowlist であって、公開できないものの denylist ではない。宣言が無い列は「公開してよいと決まっていない」= 公開投影に入らないので、報告が warning でも漏れる方向へは倒れない。現在未宣言なのは `core_stocks` の `id` / `is_active` / `is_yutai` / `created_at` / `updated_at` の 5 列で、いずれも kabulab-cf が書く既存列。タグを決めるには派生元の判断が要る（`is_active` は data_j に載っているかで決まるので継承すれば personal-only だが、「上場している」は EDINET 上場区分から独立に作れる公開の事実でもある）ので推測で埋めない（§3-1）。
 

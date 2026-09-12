@@ -1,6 +1,6 @@
 """D1 の表区分（ライセンス地図の網羅性）のテスト。
 
-本番 30 表 374 列のうち、行タグも列地図も無いのが 22 表 / 256 列（68.4%）
+本番 30 表 375 列のうち、行タグも列地図も無いのが 22 表 / 257 列（68.5%）
 だった。しかも `license_tag` 列を物理的に持つ 8 表のうち、行が入って実際に
 機能していたのは 3 表だけで、「行タグで判定する」という前提自体が大半の表で
 成立していなかった。
@@ -164,6 +164,60 @@ class TestFailOpenClosedBoundary:
         report = G.coverage(_observed())
         assert not report.clean
         assert any("食い違う" in f for f in report.failures)
+
+
+# 本番 D1 (`kabulab-cf`) の表名スナップショット。2026-09-13 に読み取り専用の
+# `SELECT name FROM sqlite_master WHERE type='table'` で取得した 31 件から、
+# 内部表 `_cf_KV` を除いた 30 件。`TABLE_LICENSE` の登録漏れを検出するために
+# **宣言とは独立した観測値**として置く（宣言から導くとテストが自明になる）。
+PROD_TABLE_NAMES: frozenset[str] = frozenset(
+    {
+        "core_stock_annual_financials", "core_stock_financials", "core_stocks",
+        "finmath_daily_ohlcv", "finmath_price_snapshot", "ir_disclosures",
+        "jss_column_license", "jss_dataset_freshness", "jss_financials",
+        "jss_index_symbols", "jss_job_runs", "jss_raw_files", "jss_supply_latest",
+        "jss_writer_claims", "jss_xbrl_documents", "jss_xbrl_elements",
+        "otakara_stock_financials", "otakara_stock_scores", "rsi_percentile",
+        "swing_daily_ohlcv", "swing_entry_signals", "swing_market_context",
+        "swing_sector_daily", "swing_stock_indicators", "swing_stock_screening",
+        "yuho_documents", "yuho_order_facts", "yuho_overseas_facts",
+        "yutai_benefits", "yutai_genres",
+    }
+)
+
+
+class TestProductionSnapshot:
+    """観測した本番 30 表すべてに区分があること。
+
+    当初は「本番 PRAGMA を読めないので 27 表しか登録できない」としていたが、
+    読み取り専用の `sqlite_master` 照会で残り 3 表（`swing_market_context` /
+    `swing_sector_daily` / `yutai_genres`）の名前と DDL が取れた。登録漏れを
+    残すと「地図に無い表」が恒久的に warning で出続け、未知の表を failure へ
+    上げる道（module docstring の「更新手順」）が塞がる。
+    """
+
+    def test_観測した本番の表がすべて登録されている(self) -> None:
+        missing = sorted(PROD_TABLE_NAMES - set(G.TABLE_LICENSE))
+        assert missing == [], missing
+        assert len(PROD_TABLE_NAMES) == G.OBSERVED_TABLE_COUNT
+
+    def test_本番の表一覧に対して未知の表の警告が出ない(self) -> None:
+        """`coverage()` を観測した表名で回して、warning が「未決」だけになること。"""
+        observed = dict(_observed())
+        for name in PROD_TABLE_NAMES:
+            observed.setdefault(name, f"CREATE TABLE {name} (id INTEGER PRIMARY KEY)")
+        report = G.coverage(observed)
+        assert report.clean, report.failures
+        assert not [w for w in report.warnings if "地図に無い表" in w], report.warnings
+
+    def test_JPX_の業種を持つ表を_personal_only_にしている(self) -> None:
+        """`swing_sector_daily.sector` は `core_stocks.sector` と同じ JPX 33業種。
+
+        Yahoo 派生だからではなく **JPX 由来の値を持つから** personal-only で
+        なければならない（commercial-ok に倒すと公開面へ JPX の業種が出る）。
+        """
+        assert G.TABLE_LICENSE["swing_sector_daily"].tag is LicenseTag.PERSONAL_ONLY
+        assert S.MIXED_LICENSE_COLUMNS["core_stocks"]["sector"] is LicenseTag.PERSONAL_ONLY
 
 
 class TestClassification:

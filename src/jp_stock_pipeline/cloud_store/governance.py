@@ -7,8 +7,9 @@
 
 ## 何が穴だったか
 
-本番 30 表 374 列のうち、行タグも列地図も無いのが **22 表 / 256 列（68.4%）**
-だった。`license_tag` 列を物理的に持つ表は 8 つあるが、**行が入って実際に
+本番 30 表 375 列のうち、行タグも列地図も無いのが **22 表 / 257 列（68.5%）**
+だった（2026-09-13 に `sqlite_master` を読み直した実測値。当初の「374 列 /
+256 列」は 1 列ぶん少なく数えていた）。`license_tag` 列を物理的に持つ表は 8 つあるが、**行が入って実際に
 機能しているのは 3 表だけ**（`jss_index_symbols` 6 行 / `jss_raw_files` 150 行 /
 `jss_supply_latest` 4,351 行。`core_stocks.license_tag` は 3,818 行すべて NULL）。
 
@@ -43,9 +44,14 @@
 `swing_*` / `otakara_*` / `finmath_*` / `yutai_*` / `ir_*` / `rsi_*` / `yuho_*` は
 **kabulab-cf の drizzle 管理下**にあり、あちらが表を足すとこの宣言は古くなる。
 
-- **所有**: この宣言は stockStock が持つ。理由は、kabulab-cf には**テストを回す
-  CI が存在しない**（3 workflow はすべて schedule/dispatch のデータ取込）ので、
-  乖離を検出できる場所が物理的にこちら側にしか無い。
+- **所有**: この宣言は stockStock が持つ。**「kabulab-cf にテストを回す CI が
+  無いから」ではない**（当初そう書いていたが事実誤認。あちらには
+  `.github/workflows/ci.yml` があり push / pull_request で `pnpm test` を回す。
+  commit 53d327a で追加済み）。持つ理由は、この宣言が **D1 の全表を横断する
+  1 枚の地図**であり、本番 `sqlite_master` と突き合わせる実行主体
+  (`jobs/license_map.py`) がこちらにしか無いことである。kabulab-cf 側は
+  共有契約 `tests/fixtures/contracts/d1-license-map.json` を同一バイト列で
+  持ち、自分のテストで読む（CI があるので実際に読ませられる）。
 - **更新手順**: `jobs/license_map.py` が本番 `sqlite_master` を読んで「宣言に
   無い表」を名前つきで報告する。報告された表を `TABLE_LICENSE` へ足す PR を
   出す。タグが分からなければ `UNCLASSIFIED` で登録してよい（「未分類だと
@@ -54,13 +60,15 @@
   open）。「宣言にある表が本番から消えた」「行タグ前提の表に `license_tag` 列が
   無い」「列地図にある列が本番から消えた」は **failure**（fail closed）。
 
-  未知の表を即 failure にしない理由は 2 つある。(1) この宣言は本番 PRAGMA を
-  読めない環境（レビュー時・移行期）で書き起こしたもので、30 表のうち名前まで
-  裏付けが取れたのは 27 表である。残りを推測で埋めれば「宣言にある表が本番に
-  無い」側で毎日赤くなる（`§3-1` 推測しない）。(2) 対向リポジトリの migration の
-  たびに毎日赤くなる検査は読まれなくなり、通知を殺すのと同じになる（設計書
-  §7.6 を自分自身に適用する）。**最初の本番実行が残り 3 表の名前を出す**ので、
-  それを登録する追随 PR で failure へ上げる。
+  未知の表を即 failure にしない理由は、対向リポジトリの migration のたびに
+  毎日赤くなる検査は読まれなくなり、通知を殺すのと同じになるからである
+  （設計書 §7.6 を自分自身に適用する）。
+
+  当初ここには「本番 PRAGMA を読めないので 30 表のうち 27 表しか裏付けが無い」
+  とも書いていたが、読み取り専用の `sqlite_master` 照会で残り 3 表
+  （`swing_market_context` / `swing_sector_daily` / `yutai_genres`）の名前と
+  DDL が取れたため 30 表すべてを登録した（2026-09-13 実測）。したがって
+  「宣言に無い表」は**今後 kabulab-cf が表を足したときだけ**出る。
 """
 
 from __future__ import annotations
@@ -198,13 +206,46 @@ TABLE_LICENSE: dict[str, TableLicense] = {
     ),
     "jss_writer_claims": _operational("列単位の writer 排他の宣言"),
     "jss_column_license": _operational("列単位ライセンス地図そのもの"),
+    # --- 2026-09-13 に `sqlite_master` の読み取りで名前と DDL が判明した 3 表 ---
+    # 当初「本番 PRAGMA を読めないので登録できない」としていたが、読み取り専用の
+    # カタログ照会で足りた。未登録のままだと「地図に無い表」が恒久的に warning で
+    # 出続け、未知の表を failure へ上げる道が塞がる。
+    #
+    # 2 つの swing_ は他の swing_ と同じ規則（Yahoo 日足の派生 = personal-only）を
+    # 当てる。`swing_sector_daily.sector` は JPX の33業種区分そのものなので、
+    # `core_stocks.sector` と同じく personal-only でなければならない。
+    "swing_market_context": _uniform(
+        LicenseTag.PERSONAL_ONLY,
+        _YAHOO,
+        "本番 DDL に nikkei_close / nikkei_vi / vix / sp500_pct がある"
+        "（2026-09-13 sqlite_master 実測）。judgment は kabulab-cf の自作だが"
+        "入力が Yahoo なので継承側へ倒す",
+    ),
+    "swing_sector_daily": _uniform(
+        LicenseTag.PERSONAL_ONLY,
+        "JPX data_j.xlsx の33業種 × Yahoo 日足の騰落率",
+        "本番 DDL に sector / pct_1d / pct_5d がある（2026-09-13 sqlite_master 実測）。"
+        "sector は core_stocks.sector と同じ JPX 由来なので personal-only",
+    ),
+    # 優待ジャンル。`description` は kabulab-cf が自作して公開面に出している
+    # （あちらの services/otakara-yutai/src/tests/public-summary-safety.test.ts が
+    # `yutai_genres.description` を「自作説明」として扱っている）。ただしジャンル
+    # 分類そのものがみんかぶ由来かは未確認なので、**推測で uniform にしない**。
+    # 未分類 = 公開しない扱いなので漏れる方向には倒れない（§3-1）。
+    "yutai_genres": TableLicense(
+        kind=TableKind.UNCLASSIFIED,
+        tag=None,
+        source="kabulab-cf 所有（ジャンル名・slug・自作説明）",
+        evidence="本番 DDL は id/name/slug/description/created_at のみ"
+        "（2026-09-13 sqlite_master 実測）。分類の出自が未確認なので未分類で登録",
+    ),
 }
 
 # 行タグで判定する表は `license_tag` 列を持っていなければ嘘になる。
 ROW_TAG_COLUMN = "license_tag"
 
-# 宣言の裏付けが取れている表の数。本番は 30 表なので残り 3 表は
-# 最初の本番実行が名前を出す（module docstring の「更新手順」）。
+# 本番（`_cf_KV` を除く）の表数。2026-09-13 の実測で 30 表 375 列あり、
+# `TABLE_LICENSE` はその 30 表すべてを登録している。
 OBSERVED_TABLE_COUNT = 30
 
 # 本番 `sqlite_master` から除く名前。SQLite と D1 の内部表。
@@ -424,10 +465,18 @@ WRITER_CLAIMS: tuple[WriterClaim, ...] = tuple(
 # （どの dataset が `all` / `stockStock` で入っているか）は本レーンからは読めず、
 # 推測で prune すると読めない情報を壊す。
 #
-# **fail へ上げる条件**: (1) 最初の本番実行のログで既存 4 行の (dataset,
-# column_group, writer) が判明し、(2) この宣言と食い違う行を整理する PR が入り、
-# (3) kabulab-cf 側にも同じ照合が入ったとき（片側だけの規律にしない。設計書
-# §1.3-2）。そのとき `CLAIM_MISMATCH_IS_FAILURE = True` にする。
+# **fail へ上げる条件**: (1) 既存 4 行の (dataset, column_group, writer) が判明し、
+# (2) この宣言と食い違う行を整理する PR が入り、(3) kabulab-cf 側にも同じ照合が
+# 入ったとき（片側だけの規律にしない。設計書 §1.3-2）。そのとき
+# `CLAIM_MISMATCH_IS_FAILURE = True` にする。
+#
+# (1) は 2026-09-13 の読み取り照会で済んだ。本番の 4 行は
+# `jss_financials` / `jss_raw_files` / `jss_supply_latest` / `jss_xbrl_documents`
+# の `('all', 'stockStock')` で、**下の宣言と完全に一致する**（`jss_` 表は
+# すべて `all` / `stockStock` で宣言してある）。つまり (2) の整理は不要で、
+# 残っているのは (3) の kabulab-cf 側の照合だけである。
+# 同じ照会で `jss_column_license` の既存 7 行も宣言 16 行の部分集合だと確認した
+# ので、初回実行の孤児削除は 0 行・`sector33` のタグ更新 1 行だけになる。
 CLAIM_MISMATCH_IS_FAILURE = False
 
 WRITER_CLAIMS_SQL = "SELECT dataset, column_group, writer FROM jss_writer_claims"

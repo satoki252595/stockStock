@@ -17,9 +17,14 @@
 - `--verify`: 適用後の検証（G-core-2 / G-core-3 / G-core-5 / E7）だけを実行する。
   **`core_stocks` へは SELECT / PRAGMA しか発行しないので CI から毎日回せる。**
   `.github/workflows/ops_check.yml` の第3ステップが `--compare-to` なしで呼ぶ。
-  その形（比較相手なし）では **`core_stocks` の行を 1 行も走査しない**。
-  G-core-2/3 は適用前の状態と突き合わせて初めて意味を持つ判定なので、
-  `--compare-to` / `--state-dump` を渡したときだけ断面を読む（`_observe`）。
+  その形（比較相手なし）では **断面 (`SNAPSHOT_SQL`) と件数 (`COUNTS_SQL`) と
+  `sqlite_sequence` (`SEQ_SQL`) を発行しない**。G-core-2/3 は適用前の状態と
+  突き合わせて初めて意味を持つ判定なので、`--compare-to` / `--state-dump` を
+  渡したときだけ断面を読む（`_observe`）。
+  **「core_stocks の行を 1 行も走査しない」ではない**: 孤児検査 (G-core-5) は
+  比較相手なしでも判定に使い、`子表 LEFT JOIN core_stocks` なので core_stocks の
+  索引行を読む（2026-09-13 実測で `core_stock_financials` 1 表ぶんだけで
+  `rows_read` 7,528）。この PR が削ったのは「読んで捨てていた分」だけである。
   なお「1 文も書かない」ではない: 他の全ジョブと同じく `jobs.runner.run_job` が
   終了時に ⑦ `jss_job_runs` へ 1 行 INSERT する（移行対象表には触らないが、
   読み取り専用トークンでは動かない）
@@ -82,12 +87,16 @@ def _observe(store: D1Store, *, baseline: bool) -> dict:
     `COUNTS_SQL`（同 3,818 行）を必ず投げていた。
 
     `.github/workflows/ops_check.yml` の第3ステップは `--compare-to` を渡さない
-    ので、**毎日 7,636 行を走査してハッシュを計算し、その結果を捨てていた。**
-    D1 の課金軸は走査行数なので、これは料金だけを払って何も検知していない。
-    比較相手がある経路（`--compare-to` / `--apply` / `--state-dump` /
+    ので、**毎日 7,654 行を走査してハッシュを計算し、その結果を捨てていた**
+    （2026-09-13 の本番実測: `SNAPSHOT_SQL` 3,818 / `COUNTS_SQL` 3,818 /
+    `SEQ_SQL` 18。`SEQ_SQL` は `sqlite_sequence` の 18 行を走査するので 1 行では
+    ない）。D1 の課金軸は走査行数なので、これは料金だけを払って何も検知して
+    いない。比較相手がある経路（`--compare-to` / `--apply` / `--state-dump` /
     `--snapshot`）だけで読む。
 
     孤児検査（G-core-5）は `before` なしでも `_verify` が使うので常に読む。
+    こちらは `子表 LEFT JOIN core_stocks` で core_stocks の索引行も読むため、
+    この関数が「core_stocks を 1 行も走査しない」状態にはならない。
     """
     columns = {
         str(r["name"]): {

@@ -42,7 +42,8 @@ personal-only なら害は無いが、`commercial-ok` の孤児が残ると「�
 
 ## 地図の網羅性（行を走査しない形で見る）
 
-本番 30 表 374 列のうち、行タグも列地図も無いのが 22 表 / 256 列だった。
+本番 30 表 375 列のうち、行タグも列地図も無いのが 22 表 / 257 列だった
+（2026-09-13 の `sqlite_master` 実測。当初の「374 / 256」は 1 列ぶん少ない）。
 `cloud_store/governance.TABLE_LICENSE` が表区分を持ち、ここが本番
 `sqlite_master` と突き合わせる。**列名も `sqlite_master.sql` から読む**（30 表に
 `PRAGMA table_info` を投げると往復が 30 回になる）。
@@ -65,9 +66,15 @@ personal-only なら害は無いが、`commercial-ok` の孤児が残ると「�
 
 ## 走査行数（D1 は走査行課金）
 
-1 回の実行で読むのは `sqlite_master` 2 文（`jss_` の存在確認と全表 DDL）と、
-`jss_column_license` / `jss_index_symbols` / `jss_writer_claims` の全行（宣言の
-件数と同じオーダー = 合計 39 行）だけ。実データの表は 1 行も読まない。
+1 回の実行で読むのは `sqlite_master` 2 文と、`jss_column_license` /
+`jss_index_symbols` / `jss_writer_claims` の全行（宣言の件数と同じオーダー =
+合計 39 行）だけ。**実データの表は 1 行も読まない。**
+
+`sqlite_master` は「行を走査しない」と書きたくなるが、D1 の `rows_read` には
+**カタログの走査も計上される**。2026-09-13 に本番で実測した値は
+`JSS_TABLES_SQL` が 105 行 / `ALL_TABLES_SQL` が 126 行で、合計 231 行。
+1 実行あたりの読みは 39 + 231 = **約 270 行**で、表の件数だけで決まりデータ量
+では増えない（`ir_disclosures` が 10 倍になっても変わらない）。
 """
 
 from __future__ import annotations

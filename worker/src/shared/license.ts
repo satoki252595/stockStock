@@ -40,7 +40,7 @@ export const RESTRICTED_COLUMNS: Record<string, readonly string[]> = {
   // 書く既存列 (personal-only)、`sector33` は stockStock が EDINET コードリストの
   // 「提出者業種」を書く新設列 (commercial-ok) で、writer も一次ソースも違う。
   // 正本は `cloud_store/schema.py` の MIXED_LICENSE_COLUMNS と
-  // `tests/fixtures/contracts/d1-governance.json`。
+  // `tests/fixtures/contracts/d1-license-map.json`。
   //
   // ただし `core_stocks.sector33` は 2026-09-13 時点で本番 3,818 行すべて NULL。
   // 伏せるのをやめても今は何も出ない代わりに、**公開面の業種を `sector` から
