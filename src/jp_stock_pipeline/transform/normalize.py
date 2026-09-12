@@ -60,23 +60,37 @@ ELEMENT_CANDIDATES: dict[str, tuple[str, ...]] = {
         "ProfitLossAttributableToOwnersOfParent",
         "ProfitLoss",
     ),
+    # EDINET の有報/四半期報告は「主要な経営指標等の推移」の要素に
+    # `...SummaryOfBusinessResults` 接尾辞が付く。これを候補に入れていなかったため
+    # eps / bps / equity_ratio_pct / dps が EDINET 経由で**1件も取れていなかった**
+    # （実データ 60 書類で 0%。2026-09-12 実測）。
+    # 接尾辞つきは Current/Prior1〜4 の5年度ぶんが並ぶが、`_pick_value` が
+    # `_is_current` で当期だけに絞り、`consolidated` 列で連結を優先するので
+    # 年度・連結単体の取り違えは起きない（コンテキストを実測して確認済み）。
     "eps": (
         "NetIncomePerShare",
         "BasicEarningsPerShareIFRS",
         "BasicEarningsLossPerShare",
         "BasicEarningsPerShare",
         "BasicNetIncomePerShare",
+        "BasicEarningsLossPerShareSummaryOfBusinessResults",
+        "BasicEarningsLossPerShareIFRSSummaryOfBusinessResults",
+        "BasicEarningsLossPerShareIFRS",
     ),
     "bps": (
         "NetAssetsPerShare",
         "BookValuePerShare",
         "EquityAttributableToOwnersOfParentPerShareIFRS",
+        "NetAssetsPerShareSummaryOfBusinessResults",
+        "EquityAttributableToOwnersOfParentPerShareIFRSSummaryOfBusinessResults",
     ),
     "equity_ratio_pct": (
         "CapitalAdequacyRatio",
         "EquityToAssetRatio",
         "RatioOfOwnersEquityToTotalAssets",
         "EquityAttributableToOwnersOfParentToTotalAssetsRatioIFRS",
+        "EquityToAssetRatioSummaryOfBusinessResults",
+        "EquityToAssetRatioIFRSSummaryOfBusinessResults",
     ),
     "cf_operating": (
         "CashFlowsFromOperatingActivities",
@@ -85,15 +99,25 @@ ELEMENT_CANDIDATES: dict[str, tuple[str, ...]] = {
     ),
     "cf_investing": (
         "CashFlowsFromInvestingActivities",
+        # EDINET タクソノミの実名は Investing ではなく **Investment**。
+        # 営業CF・財務CF が 78% 取れているのに投資CF だけ 0% だった原因
+        # （2026-09-12 に実データ 60 書類で実測）。
+        "NetCashProvidedByUsedInInvestmentActivities",
         "NetCashProvidedByUsedInInvestingActivities",
+        "NetCashProvidedByUsedInInvestingActivitiesSummaryOfBusinessResults",
         "CashFlowsFromUsedInInvestingActivitiesIFRS",
+        "CashFlowsFromUsedInInvestingActivitiesIFRSSummaryOfBusinessResults",
     ),
     "cf_financing": (
         "CashFlowsFromFinancingActivities",
         "NetCashProvidedByUsedInFinancingActivities",
         "CashFlowsFromUsedInFinancingActivitiesIFRS",
     ),
-    "dps": ("DividendPerShare", "DistributionsPerUnit"),
+    "dps": (
+        "DividendPerShare",
+        "DistributionsPerUnit",
+        "DividendPaidPerShareSummaryOfBusinessResults",
+    ),
 }
 
 # 比率系要素は XBRL 上は小数 (例 0.582 = 58.2%)。% への換算は単位の確定的変換
