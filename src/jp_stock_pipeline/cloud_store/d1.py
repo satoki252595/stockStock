@@ -21,6 +21,12 @@ logger = logging.getLogger(__name__)
 # 上限から逆算する（列数 × 行数 <= 100）。超えると実行時に落ちる。
 MAX_BOUND_PARAMS = 100
 
+# D1 の compound SELECT（UNION / UNION ALL / INTERSECT / EXCEPT）の項数上限。
+# 素の SQLite の既定は 500 だが、D1 は **5** で、6 項目から
+# `too many terms in compound SELECT: SQLITE_ERROR` を返す（2026-09-12 に本番で実測）。
+# 複数表を1文で数えるようなクエリはここで分割する。
+MAX_COMPOUND_SELECT_TERMS = 5
+
 
 class D1Error(RuntimeError):
     """D1 への読み書きに失敗した（取得単位の失敗として記録する）。"""
@@ -46,11 +52,19 @@ class D1Store:
             f"/d1/database/{self.database_id}/query"
         )
 
-    def query(self, sql: str, params: list | None = None) -> list[dict[str, Any]]:
+    def query(
+        self, sql: str, params: list | None = None, *, idempotent: bool = True
+    ) -> list[dict[str, Any]]:
         """1 文を実行して結果行を返す。
 
         Cloudflare の API は HTTP 200 でも body の success=false でエラーを返すため、
         ステータスコードだけで成否を判断しない（EDINET と同じ落とし穴）。
+
+        `idempotent=False` は**再送してはいけない文**に使う。既定の再送経路は
+        タイムアウト・5xx・429 で最大3回まで自動で投げ直すため、`ALTER TABLE
+        ADD COLUMN` のような非冪等な DDL では「D1 側は成功したが応答が失われ、
+        再送が `duplicate column name` を返す」= 実際は適用済みなのに失敗として
+        報告される、が起こりうる。
         """
         if params and len(params) > MAX_BOUND_PARAMS:
             raise D1Error(
@@ -61,8 +75,9 @@ class D1Store:
                 self._url,
                 json_body={"sql": sql, "params": params or []},
                 headers={"Authorization": f"Bearer {self.settings.cf_api_token}"},
-                # upsert と SELECT のみを通す前提なので冪等。再送しても二重作成しない。
-                idempotent=True,
+                # upsert と SELECT は再送しても二重作成しない。DDL だけは
+                # 呼び出し側が idempotent=False を渡して再送を止める。
+                idempotent=idempotent,
             )
         except http.FetchError as exc:
             raise D1Error(f"D1 リクエスト失敗: {exc}") from exc
@@ -131,4 +146,4 @@ class D1Store:
         return written
 
 
-__all__ = ["D1Error", "D1Store", "MAX_BOUND_PARAMS"]
+__all__ = ["D1Error", "D1Store", "MAX_BOUND_PARAMS", "MAX_COMPOUND_SELECT_TERMS"]

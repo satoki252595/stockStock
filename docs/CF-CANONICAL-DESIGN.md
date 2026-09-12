@@ -658,13 +658,44 @@ R2 のエグレスは無料なので課金は発生しないが、**所要時間
 
 #### A-1. `core_stocks`（拡張）— ①銘柄マスタ
 
-`core_stocks.id` は integer autoIncrement のサロゲートキーで、**12個の子テーブルが `stock_id` で参照する**（多くは `onDelete: cascade`）。
+`core_stocks.id` は integer autoIncrement のサロゲートキーで、**14個の子テーブルが `stock_id` で参照する**（多くは `onDelete: cascade`）。
+
+> 2026-09-12 実測で訂正: 「12個」は誤りで **14個**
+> (`core_stock_annual_financials` / `core_stock_financials` / `ir_disclosures` /
+> `otakara_stock_financials` / `otakara_stock_scores` / `rsi_percentile` /
+> `swing_daily_ohlcv` / `swing_entry_signals` / `swing_stock_indicators` /
+> `swing_stock_screening` / `yuho_documents` / `yuho_order_facts` /
+> `yuho_overseas_facts` / `yutai_benefits`)。加えて `jss_financials` が FK 宣言の
+> 無い soft 参照を持つため、孤児検査は **15表**を対象にする
+> (`cloud_store/core_stocks.CHILD_TABLES`)。
 
 **絶対規則**
 1. upsert は `INSERT … ON CONFLICT(code) DO UPDATE` のみ。**`id` を SET 句に絶対に入れない**
 2. `TRUNCATE` / `DELETE` / `DROP` を発行しない
 3. 対象外化は `is_active = 0` の UPDATE のみ
-4. `universe.ts:155-201` の**3段ガードをそのまま移植**（JPX raw 行数下限 4,000 / 内国株式 3,000・既存 active 比 98%・一括対象外化 2% 上限）。1つでも破れたら書込ゼロで異常終了
+4. `src/cron/universe.ts:82-120` の `assertUniverseCoverage` の**4条件をそのまま移植**（JPX raw 行数下限 4,000 / 内国株式 3,000 / 既存 active 比 98% / 一括対象外化 2% 上限）。1つでも破れたら書込ゼロで異常終了
+
+> 2026-09-12 実測で訂正: 参照先 `scripts/sync/universe.ts:155-201` は誤り。
+> 同ファイルは 29 行の薄い CLI で、ガードの実体は `src/cron/universe.ts:82-120`
+> （定数は :55/:57/:59/:61）。また「3段」ではなく **4条件**で、「取込ジョブ 確定仕様」節の
+> `master_sync` のガード（本文中の (a)-(d) の列挙）のほうが
+> 実コードと一致する。移植は
+> `cloud_store/universe_guards.assert_universe_coverage` に 1:1 で入れた。
+>
+> **分母の取り違えに注意**: (c)(d) の分母は `core_stocks` の total ではなく
+> **is_active=1 の件数**（実測 3,715。total は 3,818）。
+>
+> **(c) は P4b で必ず発火する**: active が +725 されて 4,440 になると
+> **3,700/4,440 = 0.833 < 0.98** となり、kabulab-cf の月次 universe sync が毎月
+> throw して止まる（現行配布 `data_j.xlsx` 2026-08-31 実測）。
+>
+> **(d) も同時に直すこと。** (d) は同じ `existingActiveCount` を分母に使うため、
+> P4b で active が膨らむと一括対象外化の上限が **74 件 → 88 件**へ自動的に緩む。
+> 対象外化の候補は実質すべて内国普通株なので、分母だけが増えると防御が弱くなる。
+>
+> **P4b の前提条件として (c)(d) の分母を
+> `is_active=1 AND instrument_type='equity'` に揃える改修が必須**
+> （`tests/test_universe_guards.py` に (c) の発火と (d) の緩みを仕様として固定済み）。
 
 | 追加列 | 型 | 説明 | ライセンス |
 |---|---|---|---|
@@ -1616,11 +1647,13 @@ stockStock 側の UPSERT は `SET` 句を**ホワイトリストで列挙**す�
 
 **新規要件: 母集団拡張。** 現行は EDINET コードリストのみで、ETF/ETN/REIT/PRO/出資証券/外国株を含まない。R2 `daily/` の母集団 4,445 を供給するには JPX `data_j.xls` が必須。新コレクタ `collectors/jpx_universe.py` を追加し、「市場・商品区分」→ `instrument_type` へ写像する。**未知の区分は `None` にしてログに出す**（`equity` に倒さない）。`sector33` / `sector17` は data_j.xls 由来、`edinet_code` は EDINET 由来で、code でマージする。片方にしか無い銘柄は欠けた列を `None` にする（推定禁止）。
 
-**ガード（`universe.ts:155-201` から移植）**: (a) JPX raw 行数 < 4,000 で中止、(b) 内国株式 < 3,000 で中止、(c) 既存 active の被覆率 < 98% で中止、(d) 1 run の対象外化が既存 active の 2% 超で中止。現行 `master_sync._detect_delistings` の `MIN_CODELIST_COVERAGE = 0.5` は緩すぎるので 0.98 へ引き上げ、(d) を新設する。
+**ガード（`src/cron/universe.ts:82-120` の `assertUniverseCoverage` から移植。`cloud_store/universe_guards.py`）**: (a) JPX raw 行数 < 4,000 で中止、(b) 内国株式 < 3,000 で中止、(c) 既存 active の被覆率 < 98% で中止、(d) 1 run の対象外化が既存 active の 2% 超で中止。**(c)(d) の分母は `core_stocks` の total ではなく is_active=1 の件数**（実測 3,715）。
 
-**母集団拡張は2段に割る（重要）。** `core_stocks` を 3,818→4,445 に拡張した直後から、kabulab-cf の `daily.ts` が `is_active=true` の全件（4,445）を処理対象にする。つまり切替が済んでいない状態で 627件が**旧 writer**の処理対象に入り、yfinance 取得と D1 rows written が 1.16倍、PER/PBR/ROE を持たない 627行が `core_stock_financials` と `swing_stock_indicators` に NULL で積まれる。
+> なお `master_sync._detect_delistings` の `MIN_CODELIST_COVERAGE = 0.5` は **EDINET コードリストによる上場廃止検知**の閾値で、kabulab-cf の 0.98（`universe.ts:59`）とは別物。混同しないこと。0.5 を 0.98 へ引き上げるかは ① の writer 移管時に判断する。
 
-→ **第1段: `instrument_type` 列の追加のみ**（既存3,818行に `equity` を埋める）。**第2段: +627行の INSERT を、R2 `daily/` の writer 交代の直前に行う。** あるいは拡張と同時に kabulab-cf の `daily.ts` の対象を `is_active=true AND instrument_type='equity'` に絞る改修を入れる。どちらにせよ承認項目に「旧 writer の処理対象が627件増えることの受諾」を含める。
+**母集団拡張は2段に割る（重要）。** `core_stocks` を 3,818→4,543 に拡張した直後から、kabulab-cf の `daily.ts` が `is_active=true` の全件を処理対象にする。つまり切替が済んでいない状態で **725件**が**旧 writer**の処理対象に入り、yfinance 取得と D1 rows written が約1.19倍、PER/PBR/ROE を持たない 725行が `core_stock_financials` と `swing_stock_indicators` に NULL で積まれる。
+
+→ **第1段: `instrument_type` 列の追加のみ**（既存3,818行に `equity` を埋める）。**第2段: +725行の INSERT を、R2 `daily/` の writer 交代の直前に行う。** あるいは拡張と同時に kabulab-cf の `daily.ts` の対象を `is_active=true AND instrument_type='equity'` に絞る改修を入れる。どちらにせよ承認項目に「旧 writer の処理対象が725件増えることの受諾」を含める。
 
 #### 2.2 `prices_daily` — 毎営業日 19:30 JST（`cron: "30 10 * * 1-5"` 現行維持）
 
@@ -1863,7 +1896,7 @@ read-merge-write（既存 JSON を GET → `date`/`ts`/`d` をキーにした Ma
 
 全テーブル `INSERT ... ON CONFLICT(...) DO UPDATE`。
 
-- `core_stocks` → `ON CONFLICT(code)`。**`id` を SET 句に絶対に入れない**。`TRUNCATE` / `DELETE` / `DROP` を発行しない（12個の子テーブルが cascade で消える）
+- `core_stocks` → `ON CONFLICT(code)`。**`id` を SET 句に絶対に入れない**。`TRUNCATE` / `DELETE` / `DROP` を発行しない（**14個**の子テーブル、うち cascade 11 本が消える）
 - `core_stock_financials` → `ON CONFLICT(stock_id)`
 - `jss_financials` → `ON CONFLICT(code, fiscal_period_end, disclosure_type)`
 - `jss_raw_files` → `ON CONFLICT(sha256)`
@@ -2081,9 +2114,9 @@ converted CSV を600件サンプルした平均は 1,061行/doc・359 KB/doc。3
 | 5 | **`supply_jsf`（日証金4CSV）を新規作成** | Notion ⑧ / PG と R2 / D1 の行数一致 |
 | 6 | **`supply_jpx`（新旧両様式）** — 9/25 に間に合わないなら現行 cron を火曜+金曜へ先に直す | 数値トークン数分岐の単体テスト。旧様式の既存週で `find()` 等価性 |
 | 7 | `yutai_monthly` に D1 書込を追加（保護列のテストを先に書く） | 保護4列が変化しないことを SELECT で確認 |
-| 8 | `master_sync` に data_j.xls + `instrument_type`（列追加のみ）+ 3段ガード | dry-run で `instrument_type` 別件数を `stocks.json` と突合。ガードの発火テスト |
+| 8 | `master_sync` に data_j.xlsx + `instrument_type`（列追加のみ）+ **4条件ガード** | dry-run で `instrument_type` 別件数を `stocks.json` と突合。ガードの発火テスト |
 | 9 | `prices_daily`: 履歴子DB廃止 + R2 merge 経路 + マージ後系列でのテクニカル計算 + D1 断面 | **既存 `daily/{code}.json` を1件も壊さない**（GET→書き戻しの往復テスト）。sma75/sma200/week52 が NULL にならないこと |
-| 10 | `master_sync` の母集団 +627件 INSERT（**9 の直前**） | 旧 writer の処理対象増を承認済みであること |
+| 10 | `master_sync` の母集団 **+725件** INSERT（**9 の直前**） | 旧 writer の処理対象増を承認済みであること |
 | 11 | `export_weekly` の入力を R2 `daily/` へ、トラックAを D1 へ | 生成 Parquet の行数・期間が従来と一致 |
 | 12 | `edinet_daily` / `tdnet_hourly` に R2 原本 + `jss_*`。TDnet PDF 取得を追加 | `jss_raw_files` と R2 の突合 |
 | 13 | `reconcile_weekly` を整合チェックへ改修 | 意図的に不整合を作って検出できるか |
@@ -2585,7 +2618,7 @@ R2 のマージ書込は「読んで・足して・全置換」なので、読�
 | **P3** | ⑨優待（第1波） | D1 既存表 | **あり** | 要 | 3–5 | 14日 |
 | **P4a** | ①銘柄マスタ **列追加のみ**（第2波前半） | D1 既存表 | **あり** | 要 | 2–3 | 14日 |
 | **P5** | ③断面 + 年次 + 財務サマリ（第3波） | D1 既存表 | **あり** | 要 | 6–9 | 21日 |
-| **P4b** | ①**母集団拡張 +627行**（第2波後半） | D1 既存表 | **あり** | 要 | 1–2 | 14日 |
+| **P4b** | ①**母集団拡張 +725行**（第2波後半） | D1 既存表 | **あり** | 要 | 1–2 | 14日 |
 | **P6** | ②日足 writer 移管 + 指数新設（第4波） | vwap-data・D1 | **あり** | 要 | 8–12 | 28日 |
 | **P7** | swing 系の縮小（第5波・不可逆 DROP を含む） | D1 既存表 | **あり** | 要 | 6–9（大半は kabulab-cf 側） | 28日 |
 | **P8** | ④開示メタ（第6波） | D1 既存表・37,338行 | **あり** | 要 | 7–10 | 28日 |
@@ -2597,9 +2630,9 @@ R2 のマージ書込は「読んで・足して・全置換」なので、読�
 
 ## 2.1 P4 を2分割した理由（レビュー F5）
 
-kabulab-cf の日次 cron は「①マスタの active 全件」を処理対象にする。①を 3,818 → 4,445 に拡張すると、**切替が済んでいない状態で旧 writer が拡張母集団を掴む**。yfinance 取得と D1 rows written が 1.16倍になり、PER/PBR/ROE を持たない 627件が断面テーブルに NULL で積まれる。
+kabulab-cf の日次 cron は「①マスタの active 全件」を処理対象にする。①を 3,818 → 4,543 に拡張すると、**切替が済んでいない状態で旧 writer が拡張母集団を掴む**。yfinance 取得と D1 rows written が約1.19倍になり、PER/PBR/ROE を持たない 725件が断面テーブルに NULL で積まれる。
 
-→ **P4a（列追加 + 既存3,818行への銘柄種別の充填）と P4b（+627行の INSERT）に割り、P4b を P6 の直前に置く。** あるいは P4b と同時に kabulab-cf 側の処理対象を「銘柄種別 = 内国普通株」に絞る改修を入れる。どちらを採るかは実装時に決めてよいが、**P4b を P5 より前に置いてはならない**。
+→ **P4a（列追加 + 既存3,818行への銘柄種別の充填）と P4b（+725行の INSERT）に割り、P4b を P6 の直前に置く。** あるいは P4b と同時に kabulab-cf 側の処理対象を「銘柄種別 = 内国普通株」に絞る改修を入れる。どちらを採るかは実装時に決めてよいが、**P4b を P5 より前に置いてはならない**。
 
 ---
 
@@ -2758,18 +2791,77 @@ JPX は 2026-09-28 から週次→毎営業日16:00へ変更し、様式も変�
 
 **絶対規則**
 1. `ON CONFLICT(code) DO UPDATE` のみ。**サロゲートキーを SET 句に含めない。**
-2. `TRUNCATE` / `DELETE` / `DROP` を発行しない（12子表が cascade で消える）。
+2. `TRUNCATE` / `DELETE` / `DROP` を発行しない（**14子表**、うち多くが cascade で消える）。
 3. 対象外化は非アクティブ化の UPDATE のみ。
-4. **3段ガードを移植**（JPX 行数下限 4,000/3,000・既存 active 比 98%・1 run の対象外化が既存 active の 2% 上限）。1つでも破れたら書込ゼロで異常終了。現行の被覆率下限 0.5 は緩すぎるので 0.98 に引き上げる。
+4. **4条件ガードを移植**（JPX 行数下限 4,000 / 内国株式 3,000 / 既存 active 比 98% / 1 run の対象外化が既存 active の 2% 上限）。1つでも破れたら書込ゼロで異常終了。**(c)(d) の分母は total ではなく is_active=1 の件数**。なお「現行の被覆率下限 0.5」は stockStock 側 `master_sync.MIN_CODELIST_COVERAGE`（EDINET コードリストによる上場廃止検知）の値で、移植元 kabulab-cf は既に 0.98。別物なので混同しないこと。
 
 **検証（shadow で3回連続）**
 - **G-core-1（id 不変）**: 書き込み SQL を**実行せずダンプ**し、サロゲートキー列が SET 句に一度も現れないことを静的に検査。
 - **G-core-2（キー集合）**: 旧にあって新に無い code がゼロ。
 - **G-core-3（値一致）**: 名称・市場・業種の完全一致率。不一致は1件ずつ原因を特定する（JPX と EDINET の表記ゆれ）。**不一致を自動で片方に寄せない。**
 - **G-core-4（ガード発火）**: JPX 行数を意図的に下限未満に細工した入力で、書込ゼロで異常終了することを確認。
-- **G-core-5（子表の孤児ゼロ）**: 切替後に全12子表で孤児が0件。
+- **G-core-5（子表の孤児ゼロ）**: 切替後に**全14子表 + `jss_financials` の soft 参照 = 15表**で孤児が0件。
 
 **ロールバック**: 切替前に取得する全件スナップショットから active フラグだけを戻す UPDATE。追加列は使わなければ無害なので DROP しない。
+
+### 実施記録（2026-09-12）
+
+`jobs/core_stocks_migrate.py --apply` で 14 文（`ALTER TABLE ... ADD COLUMN` 12 +
+`CREATE INDEX` 2）を発行。**値の充填は行っていない**（後述の理由で P4a の範囲外）。
+
+適用前後の実測:
+
+| | 適用前 | 適用後 |
+|---|---|---|
+| 列数 | 9 | 21 |
+| 索引 | `core_stocks_code_unique` のみ | + `idx_core_stocks_active_market` / `idx_core_stocks_edinet` |
+| total / active / sector NULL | 3,818 / 3,715 / 62 | 3,818 / 3,715 / 62（不変） |
+| `sqlite_sequence.seq` | 14,455 | 14,455（不変） |
+| 15表の孤児 | 0 | 0 |
+| 追加12列が非 NULL の行 | — | 0 |
+
+全 3,818 行のスナップショット（`id/code/name/market/sector/is_active/is_yutai`）を
+適用前後で取得し、**完全一致**を確認（G-core-2 / G-core-3）。
+kabulab-cf は `pnpm typecheck` 通過、本番 11 経路がすべて 200。
+
+**先に実測で確かめたこと**（本番と同一 DDL のローカル複製）:
+- SQLite の `ALTER TABLE ADD COLUMN` は既定値の無い `NOT NULL` も `UNIQUE` も
+  付けられない。したがって**追加12列は全て nullable 必須**
+- `core_stocks.name` / `market` が NOT NULL で既定値が無いため、
+  「code と新列だけを渡す部分 upsert」は**既存行が相手でも失敗する**
+  (`NOT NULL constraint failed`)。よって**充填は `UPDATE` 一択**で、
+  `D1Store.upsert()` は使えない（`cloud_store/core_stocks.build_column_update`）
+- 列追加後も kabulab-cf の `universe.ts` と等価の upsert（新規 INSERT / 既存 UPDATE）
+  は通る
+
+**D1 固有の制約（本番実測）**: compound SELECT（`UNION ALL` 等）の項数上限は
+**5**。6 項目から `too many terms in compound SELECT: SQLITE_ERROR` を返す
+（素の SQLite の既定は 500）。15 表の孤児検査を 1 文にまとめると必ず失敗するので
+3 文に分割している（`cloud_store/d1.MAX_COMPOUND_SELECT_TERMS`）。
+
+**P4a の範囲外にしたもの**: `instrument_type` / `sector33` / `sector17` の値の充填。
+
+着手時点では供給源の JPX data_j が旧 URL (`.../data_j.xls`) で **HTTP 404** を返し、
+一次データを正規に取得できなかった（`core_stocks.MAX(updated_at)` は 2026-08-10 で、
+9 月の月次 universe sync はこの 404 で失敗していた）。
+
+> **その後、同日に解消済み**: JPX は同じパスで `.xls` → **`.xlsx`** へ差し替えていた。
+> 新 URL は `https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xlsx`
+> で HTTP 200（kabulab-cf `fix/jpx-listing-xlsx` で追従済み。基準日 2026-08-31 /
+> raw 4,441 行 / isListedEquity 3,700 / 4条件ガードすべて通過を実測）。
+> したがって充填の前提条件そのものは解消しており、残る判断は
+> **stockStock 側に data_j の取得経路を持つかどうか**（`collectors/jpx_universe.py` の新設）。
+
+充填を別フェーズに切ったまま据え置く理由:
+- 列追加（DDL・1回きり）と値の充填（UPDATE・繰り返し）で、承認とロールバックの
+  単位が違う
+- `sector33` の正本ソースが未決（本番 `core_stocks.sector` は JPX 33業種区分と
+  **不一致 0 件**で、stockStock の `edinet_codelist.py` は EDINET 提出者業種を
+  入れる実装。どちらに寄せるかで `jss_column_license` のタグも変わる）
+- `instrument_type` の語彙が data_j の「市場・商品区分」から 1:1 に導けない
+  （`ETF・ETN` は 1 区分で etf/etn を分離不能、`REIT・ベンチャーファンド・
+  カントリーファンド・インフラファンド` も同様、`出資証券` は 7 語彙のどれにも
+  当たらない）。**A-1 の語彙表を先に直す必要がある**
 
 ---
 
@@ -2795,13 +2887,30 @@ kabulab-cf の日次 cron は断面テーブルと同時に RSI パーセンタ�
 
 ---
 
-## P4b — ①母集団拡張（+627行）
+## P4b — ①母集団拡張（+725行。設計当初の「+627」は誤り）
+
+> 2026-09-12 実測で訂正: 「+627」は `4,445 − 3,818` の単純引き算で、集合差では
+> ない。**現行配布の `data_j.xlsx`（基準日 2026-08-31、raw 4,441 行 /
+> 4文字コード 4,434）と本番 `core_stocks`（3,818 / active 3,715）の集合差**は:
+>
+> | | 件数 |
+> |---|---|
+> | data_j にあり core に無い（= INSERT 対象） | **725** |
+> | core にあり data_j 4文字集合に無い（= 余剰） | **109**（うち active 7） |
+> | P4b 後の総行数 | **4,543** |
+>
+> INSERT 725 件の内訳: ETF・ETN 477 / PRO Market 187 / REIT等 54 / 外国株 5 /
+> グロース（内国株式）1 / 出資証券 1。
+>
+> **どの基準日の data_j で測ったかを必ず併記すること。** 基準日が変われば
+> 数字も変わる（2026-05-31 版では 707 / 80 / 4,525 だった）。余剰 109 行の扱い
+> （残す / `is_active=0` にする / 最新 data_j で自然解消を待つ）は P4b の設計時に決める。
 
 P5 完了後、P6 の直前に実施する（§2.1）。
 
 - 銘柄種別（内国普通株 / ETF / ETN / REIT / PRO / 外国株 / 出資証券）を埋め、母集団を 4,445 にする。
 - これは P6 で「stockStock の母集団で日足を上書きして ETF を更新停止させる」事故を**型で防ぐ**ための前提。
-- **副作用の明示**: 001/003/004/005 の一覧件数が +627行になる。ETF/REIT/PRO に PER/PBR/ROE は存在しないので、「欠損」ではなく「対象外」として扱う値が品質区分に無い（要検討）。002 は優待フラグで絞っているので影響を受けない。
+- **副作用の明示**: 001/003/004/005 の一覧件数が +725行になる。ETF/REIT/PRO に PER/PBR/ROE は存在しないので、「欠損」ではなく「対象外」として扱う値が品質区分に無い（要検討）。002 は優待フラグで絞っているので影響を受けない。
 - kabulab-cf の日次 cron が拡張母集団を掴む副作用（取得 1.16倍・NULL 行の積み上がり）を受け入れるか、処理対象を内国普通株に絞る改修を同時に入れるかを選ぶ。
 
 ---
@@ -3044,7 +3153,7 @@ D1 の内訳で従来試算とのずれが大きい2点: 原本索引は R2 キ�
 | A9 | P4a | ①マスタへの列追加と既存3,818行への銘柄種別充填 | 可逆 |
 | A10 | P5 | ②断面の writer 切替 | 可逆 |
 | A11 | P5 | kabulab-cf 日次 cron の**部分停止改修**（分割フラグの追加。P5 のブロッカー） | 可逆 |
-| A12 | P4b | **母集団の +627行 拡張**（001/003/004/005 の件数が変わる。旧 writer の処理対象も増える） | 可逆 |
+| A12 | P4b | **母集団の +725行 拡張**（001/003/004/005 の件数が変わる。旧 writer の処理対象も増える） | 可逆 |
 | A13 | P6 | per-code 日足の writer 切替（外部読者2つが直読） | 可逆 |
 | A14 | P6 | kabulab-cf の日足/5分足の cron 分離改修と日足 cron 停止 | 可逆 |
 | A15 | P6/S5 | 007 の信用残 API を per-code 読みへ変更（互換シム廃止の前提） | 可逆 |

@@ -28,9 +28,12 @@ from jp_stock_pipeline.models import now_jst
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "convert"
 
 YANOSHIN_RECENT_URL = "https://webapi.yanoshin.jp/webapi/tdnet/list/recent.json?limit=5"
+# JPX は 2026-09 に配布形式を .xls から .xlsx へ差し替えた。旧 URL は HTTP 404。
+# 一覧ページ https://www.jpx.co.jp/markets/statistics-equities/misc/01.html が正。
 JPX_DATA_J_URL = (
-    "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
+    "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xlsx"
 )
+JPX_DATA_J_NAME = "data_j.xlsx"
 
 
 def _direct_pdf_url(document_url: str) -> str:
@@ -76,9 +79,19 @@ def capture_tdnet_pdf(listing: dict) -> None:
 
 
 def capture_jpx_data_j() -> None:
-    """JPX data_j.xls（上場銘柄一覧）を取得・保存する。personal-only (§2.1)。"""
+    """JPX data_j.xlsx（上場銘柄一覧）を取得・保存する。personal-only (§2.1)。
+
+    マジックバイトを検証する。JPX が配布形式を差し替えたとき（実際 2026-09 に
+    .xls → .xlsx が起きた）、404 でない HTML を掴んで「取得できた」ことにしない。
+    """
     resp = fetch(JPX_DATA_J_URL)
-    out = FIXTURES_DIR / "data_j.xls"
+    # .xlsx は zip (PK\x03\x04)。旧 .xls の OLE2 ヘッダとも HTML とも違う。
+    if not resp.content.startswith(b"PK\x03\x04"):
+        raise FetchError(
+            f"JPX 上場銘柄一覧が xlsx (zip) でない: head={resp.content[:16]!r}"
+            " — 配布形式/URL が変わっていないか一覧ページで確認すること"
+        )
+    out = FIXTURES_DIR / JPX_DATA_J_NAME
     out.write_bytes(resp.content)
     print(f"saved: {out} ({len(resp.content)} bytes)")
 
@@ -102,7 +115,10 @@ def main() -> int:
         capture_jpx_data_j()
     except FetchError as exc:
         failures += 1
-        print(f"WARN: JPX data_j.xls 取得失敗（テストは skip される）: {exc}", file=sys.stderr)
+        print(
+            f"WARN: JPX {JPX_DATA_J_NAME} 取得失敗（テストは skip される）: {exc}",
+            file=sys.stderr,
+        )
     return 1 if failures else 0
 
 
