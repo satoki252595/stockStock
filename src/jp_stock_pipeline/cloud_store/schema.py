@@ -14,6 +14,8 @@ finmath_/yuho_/ir_ と同居するため、接頭辞で所有を明示する。
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
+from dataclasses import dataclass
 
 from ..licensing import LicenseTag
 
@@ -294,16 +296,66 @@ INDEX_SYMBOLS: tuple[tuple[str, str | None, str], ...] = (
 
 # 列単位のライセンス。混在するテーブルだけを明示し、それ以外は行の
 # license_tag に従う（ここで全列を二重定義しない）。
+#
+# ## `sector` と `sector33` は**別の出所**である（取り違えると規約違反になる）
+#
+# 名前が似ているうえに値もほぼ同じなので、1 つの事実の別名だと読んでしまう。
+# 実際には writer が違い、したがってライセンスも違う。
+#
+# | 列 | 書く writer | 一次ソース | タグ |
+# |---|---|---|---|
+# | `sector`   | kabulab-cf `src/cron/universe.ts`（`sector: r.sector33`） | JPX `data_j.xlsx` の33業種 | **personal-only** |
+# | `sector33` | stockStock `master_sync`（値の充填は P4b）                 | EDINET コードリストの「提出者業種」 | **commercial-ok** |
+#
+# stockStock 側の根拠は `collectors/edinet_codelist.py` の
+# `sector33=row[idx[_COL_SECTOR]]`（`_COL_SECTOR = "提出者業種"`）で、レコードの
+# Provenance も `Source.EDINET` / `COMMERCIAL_OK` になっている。EDINET 由来の値に
+# JPX のタグを貼っていたのが従来の宣言（`sector33` = personal-only）で、これは
+# **公開してよい列を公開禁止と宣言していた**誤りである（逆向きの誤りなら漏洩に
+# なっていた）。同時に、実際に JPX 由来である `sector` が**地図に一度も載って
+# いなかった**。片方だけ直すと「JPX 由来の業種が commercial-ok として公開面に
+# 出る」に反転するので、2 列は必ず同時に扱う。
+#
+# `sector33` は 2026-09-13 時点で本番 3,818 行すべて NULL。タグが公開可に
+# なっても**中身が入るのは P4b の充填以降**なので、公開面の業種を
+# `sector` → `sector33` へ切り替えるのは充填の後でなければならない
+# （切り替えだけ先に入れると業種が全件空欄になる）。
 MIXED_LICENSE_COLUMNS: dict[str, dict[str, LicenseTag]] = {
-    # EDINETコードリスト由来は commercial-ok、JPX data_j.xls 由来は personal-only。
     "core_stocks": {
+        # EDINET コードリスト由来 → commercial-ok
         "code": LicenseTag.COMMERCIAL_OK,
         "name": LicenseTag.COMMERCIAL_OK,
         "edinet_code": LicenseTag.COMMERCIAL_OK,
+        "sector33": LicenseTag.COMMERCIAL_OK,  # EDINET「提出者業種」。`sector` と混同しない
+        # JPX data_j.xlsx 由来 → personal-only
         "market": LicenseTag.PERSONAL_ONLY,
-        "sector33": LicenseTag.PERSONAL_ONLY,
+        "sector": LicenseTag.PERSONAL_ONLY,  # kabulab-cf が JPX 33業種を書く既存列
         "sector17": LicenseTag.PERSONAL_ONLY,
         "instrument_type": LicenseTag.PERSONAL_ONLY,
+        # 一次開示で判明したライフサイクル。設計書 §A-1 の追加列表が
+        # commercial-ok と決めている（EDINET・TDnet の開示が一次ソース）。
+        "listing_status": LicenseTag.COMMERCIAL_OK,
+        "listing_date": LicenseTag.COMMERCIAL_OK,
+        "delisting_date": LicenseTag.COMMERCIAL_OK,
+        # 来歴メタ。第三者由来の値を 1 バイトも含まない（どのソースから・いつ
+        # 取ったか、という stockStock 自身の記録）。設計書 §A-1 は「メタ」と
+        # 書いているが、タグは 3 値しかないので最も緩い側で明示する。
+        # **タグは「値が第三者の著作物・データセットを含むか」を答える列**で、
+        # 「公開 API が出すべきか」ではない（後者は API 設計の判断）。
+        "license_tag": LicenseTag.COMMERCIAL_OK,
+        "src_source": LicenseTag.COMMERCIAL_OK,
+        "src_data_date": LicenseTag.COMMERCIAL_OK,
+        "src_fetched_at": LicenseTag.COMMERCIAL_OK,
+        "quality": LicenseTag.COMMERCIAL_OK,
+        # 宣言しない 5 列: `id` / `is_active` / `is_yutai` / `created_at` /
+        # `updated_at`。いずれも kabulab-cf が書く既存列で、タグを決めるには
+        # 派生元の判断が要る（`is_active` は JPX data_j に載っているかで決まる
+        # ので継承すれば personal-only、`is_yutai` は yutai_benefits（みんかぶ）
+        # 由来。ただしどちらも「上場している」「優待がある」という公開の事実
+        # でもあり、EDINET 上場区分から独立に作れる）。**推測で埋めない**
+        # （§3-1）。未宣言の列は「公開してよいと決まっていない」= 公開投影に
+        # 入らないので、漏れる方向には倒れない。`jobs/license_map.py` が
+        # 毎日この 5 列を名前つきで報告する。
     },
 }
 
@@ -315,6 +367,90 @@ def column_license_rows() -> list[list[str]]:
         for column, tag in sorted(columns.items()):
             rows.append([table, column, tag.value])
     return rows
+
+
+def index_symbol_rows() -> list[list[str]]:
+    """jss_index_symbols へ投入する行。Yahoo シンボル未確認のものは含めない。"""
+    return [
+        [slug, sym, name, f"index/{slug}.json", LicenseTag.PERSONAL_ONLY.value]
+        for slug, sym, name in INDEX_SYMBOLS
+        if sym
+    ]
+
+
+@dataclass(frozen=True)
+class ReferenceDiff:
+    """宣言（コード）と実表（D1）の差分。I/O を持たない純粋な比較結果。
+
+    - `missing`: 宣言にあって実表に無い行。投入が届いていない
+    - `mismatched`: キーは一致するが値が違う行。`(キー, 実表の値, 宣言の値)`
+    - `orphan`: 実表にあって宣言に無い行。**upsert では消えない**ので溜まる
+    """
+
+    missing: tuple[tuple[str, ...], ...] = ()
+    mismatched: tuple[tuple[tuple[str, ...], str, str], ...] = ()
+    orphan: tuple[tuple[str, ...], ...] = ()
+
+    @property
+    def clean(self) -> bool:
+        return not (self.missing or self.mismatched or self.orphan)
+
+
+def _diff(declared: dict[tuple[str, ...], str], observed: dict[tuple[str, ...], str]) -> ReferenceDiff:
+    return ReferenceDiff(
+        missing=tuple(sorted(k for k in declared if k not in observed)),
+        mismatched=tuple(
+            (k, observed[k], declared[k])
+            for k in sorted(declared)
+            if k in observed and observed[k] != declared[k]
+        ),
+        orphan=tuple(sorted(k for k in observed if k not in declared)),
+    )
+
+
+COLUMN_LICENSE_SQL = "SELECT table_name, column_name, license_tag FROM jss_column_license"
+INDEX_SYMBOLS_SQL = "SELECT slug, yahoo_symbol FROM jss_index_symbols"
+
+# 孤児宣言の削除。キーを明示して 1 行ずつ消す。
+# `NOT IN (...)` の 1 文にまとめない理由: D1 のバインドパラメータ上限は 100 で、
+# 宣言が増えると静かに上限へ当たる（`d1.MAX_BOUND_PARAMS`）。孤児は稀なので
+# 往復回数より上限の安全側を採る。
+COLUMN_LICENSE_DELETE_SQL = (
+    "DELETE FROM jss_column_license WHERE table_name = ? AND column_name = ?"
+)
+
+
+def column_license_diff(observed_rows: Iterable[dict]) -> ReferenceDiff:
+    """`jss_column_license` の実表と宣言を突き合わせる。
+
+    **upsert は `conflict=(table_name, column_name)` なので DELETE を伴わない。**
+    宣言から外した列の行はそのまま残り続ける。残った行が personal-only なら
+    害は無いが、**commercial-ok の孤児が残ると「公開してよい」と宣言したまま
+    誰も管理していない列**ができる。地図が実体と一致していることを別途
+    確かめる必要がある。
+    """
+    declared = {(t, c): tag for t, c, tag in column_license_rows()}
+    observed = {
+        (str(r.get("table_name") or ""), str(r.get("column_name") or "")): str(
+            r.get("license_tag") or ""
+        )
+        for r in observed_rows
+    }
+    return _diff(declared, observed)
+
+
+def index_symbol_diff(observed_rows: Iterable[dict]) -> ReferenceDiff:
+    """`jss_index_symbols` の実表と宣言を突き合わせる（slug → yahoo_symbol）。
+
+    `nkvi` は Yahoo シンボルが未確認で投入しないので、**実表に無いのが正常**。
+    `index_symbol_rows()` に入っていない slug は宣言に無い扱いになるため、
+    未確認のものが `missing` に出ることはない。
+    """
+    declared = {(row[0],): str(row[1]) for row in index_symbol_rows()}
+    observed = {
+        (str(r.get("slug") or ""),): str(r.get("yahoo_symbol") or "") for r in observed_rows
+    }
+    return _diff(declared, observed)
 
 
 def apply_schema(store) -> int:
@@ -339,15 +475,17 @@ def apply_schema(store) -> int:
 
 
 def seed_reference_tables(store) -> None:
-    """参照表（指数シンボル・列ライセンス）を投入する。"""
-    known = [(slug, sym, name) for slug, sym, name in INDEX_SYMBOLS if sym]
+    """参照表（指数シンボル・列ライセンス）を投入する。
+
+    **呼び出し元は `jobs/license_map.py` だけ**。ここを直接呼ぶ新しい経路を
+    増やさないこと（宣言の投入口が複数あると、どれが最後に走ったかで実表の
+    内容が変わる）。
+    """
+    symbols = index_symbol_rows()
     store.upsert(
         "jss_index_symbols",
         ["slug", "yahoo_symbol", "name_ja", "r2_key", "license_tag"],
-        [
-            [slug, sym, name, f"index/{slug}.json", LicenseTag.PERSONAL_ONLY.value]
-            for slug, sym, name in known
-        ],
+        symbols,
         conflict=["slug"],
     )
     rows = column_license_rows()
@@ -359,16 +497,42 @@ def seed_reference_tables(store) -> None:
     )
     logger.info(
         "参照表を投入: 指数 %d 件(未確認 %d 件はスキップ) / 列ライセンス %d 件",
-        len(known), len(INDEX_SYMBOLS) - len(known), len(rows),
+        len(symbols), len(INDEX_SYMBOLS) - len(symbols), len(rows),
     )
 
 
+# `jss_*` が本番に存在するかを sqlite_master で確かめる 1 文。
+# **行を走査しない**（sqlite_master はスキーマのカタログ）。
+JSS_TABLES_SQL = (
+    "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'jss_%' ORDER BY name"
+)
+
+
+def declared_tables() -> frozenset[str]:
+    """`SCHEMA_STATEMENTS` の CREATE TABLE から表名を取り出す。"""
+    names = set()
+    for statement in SCHEMA_STATEMENTS:
+        head = statement.strip()
+        if head.upper().startswith("CREATE TABLE"):
+            names.add(head.split("(", 1)[0].split()[-1])
+    return frozenset(names)
+
+
 __all__ = [
+    "COLUMN_LICENSE_DELETE_SQL",
+    "COLUMN_LICENSE_SQL",
     "FINANCIALS_PK",
     "INDEX_SYMBOLS",
+    "INDEX_SYMBOLS_SQL",
+    "JSS_TABLES_SQL",
     "MIXED_LICENSE_COLUMNS",
     "SCHEMA_STATEMENTS",
+    "ReferenceDiff",
     "apply_schema",
+    "column_license_diff",
     "column_license_rows",
+    "declared_tables",
+    "index_symbol_diff",
+    "index_symbol_rows",
     "seed_reference_tables",
 ]

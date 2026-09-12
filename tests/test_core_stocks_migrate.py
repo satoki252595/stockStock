@@ -18,6 +18,7 @@ import pytest
 from jp_stock_pipeline.cloud_store import core_stocks as cs
 from jp_stock_pipeline.cloud_store.d1 import D1Error, D1Store
 from jp_stock_pipeline.config import CloudStoreSettings
+from jp_stock_pipeline.jobs import core_stocks_migrate as csm
 
 # core_stocks は本番 D1 の実 DDL（2026-09-12 に sqlite_master から取得）。
 # 子表は最小再現用で、**FK の ON DELETE は本番と異なる**（本番の yutai_benefits は
@@ -415,6 +416,113 @@ class _RecordingD1Store(D1Store):
     def query(self, sql: str, params: list | None = None) -> list:  # type: ignore[override]
         self.sqls.append(sql)
         return []
+
+
+class TestFillWouldBlindTheFreshnessMonitor:
+    """`sector33` の充填を P4b に置いた理由を機械可読な事実として固定する。
+
+    `sector33` の出所は決着している（EDINET「提出者業種」= commercial-ok）ので、
+    `master_sync` に UPDATE を 1 行足せば充填できる。**足してはいけない。**
+
+    `cloud_store/datasets.py` は `core_stocks` に日付列が無いため鮮度を
+    `MAX(updated_at)` で測っており、`build_column_update` は `updated_at` を
+    明示的に進める。月次で 3,818 行を充填すると `MAX(updated_at)` が毎月必ず
+    進み、kabulab-cf の universe sync が死んでいても `core_stocks` の SLO
+    （33 日で黄・46 日で赤）が発火しなくなる。JPX の 404 で銘柄マスタが 33 日
+    止まったのに誰も気づかなかった、というまさに検知したかった事象を自分の
+    書き込みで隠すことになる（設計書 B-8 の「now を入れると永久に緑」と同型）。
+
+    この 2 つの事実（鮮度の基準が `updated_at` である / 充填が `updated_at` を
+    進める）が両方とも成り立っている間は充填を有効にできない。どちらかを
+    先に崩すのが P4b の前提条件である。
+    """
+
+    def test_鮮度の基準が_updated_at_である(self) -> None:
+        from jp_stock_pipeline.cloud_store.datasets import DATASET_SOURCE_BY_NAME
+
+        source = DATASET_SOURCE_BY_NAME["core_stocks"]
+        assert "MAX(updated_at)" in source.sql
+        assert "NULL AS latest_date" in source.sql  # 日付列が無い
+
+    def test_充填の_UPDATE_が_updated_at_を進める(self) -> None:
+        sql, _ = cs.build_column_update("7203", {"sector33": "輸送用機器"})
+        assert "updated_at = (unixepoch())" in sql
+
+    def test_充填を実行するコードがまだ存在しない(self) -> None:
+        """`build_column_update` の呼び出し元が「組み立てるだけ」であること。
+
+        本番の書込経路（`jobs/`）から呼ばれ始めたら、上の 2 つの事実のどちらかが
+        先に崩れている必要がある。
+        """
+        import ast
+        import pathlib
+
+        # **文字列検索ではなく AST の Call ノードで見る。** docstring で
+        # 「この関数は呼ばない」と説明している箇所を「呼んでいる」と誤検出する
+        # （実際に誤検出した。`jobs/master_sync.py` が理由を書いている）。
+        jobs = pathlib.Path(cs.__file__).resolve().parent.parent / "jobs"
+        callers = []
+        for path in sorted(jobs.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+                if name == "build_column_update":
+                    callers.append(path.name)
+        assert callers == [], (
+            f"{callers} が充填を実行しようとしている。"
+            "core_stocks の鮮度が MAX(updated_at) で測られている間は"
+            "毎月の充填が監視を恒久的に緑にする（P4b の前提条件を先に解くこと）"
+        )
+
+
+class TestObserveDoesNotScanRowsWithoutABaseline:
+    """比較相手が無いとき `core_stocks` の行を 1 行も走査しないこと（D1 は走査行課金）。
+
+    G-core-2（件数・sqlite_sequence）と G-core-3（既存行の sha256）は適用前の
+    状態と突き合わせて初めて意味を持つ判定で、`_verify` は `before is None` で
+    早期 return する。それでも `_observe` は `SNAPSHOT_SQL`（全 3,818 行）と
+    `COUNTS_SQL`（同）を毎回投げており、**`ops_check.yml` の日次実行が毎日
+    7,636 行を走査してハッシュを捨てていた**。
+
+    孤児検査（G-core-5）は `before` なしでも判定に使うので、消えていないことを
+    同時に固定する（走査を減らす変更が本物の検査を一緒に削っていないこと）。
+    """
+
+    def test_verify_単独では断面を読まない(self) -> None:
+        store = _RecordingD1Store()
+        state = csm._observe(store, baseline=False)
+        joined = " | ".join(store.sqls)
+        assert cs.SNAPSHOT_SQL not in store.sqls
+        assert cs.COUNTS_SQL not in store.sqls
+        assert cs.SEQ_SQL not in store.sqls
+        assert cs.TABLE_INFO_SQL in store.sqls
+        assert cs.INDEX_LIST_SQL in store.sqls
+        assert "LEFT JOIN core_stocks" in joined  # 孤児検査は残っている
+        # 未観測は 0 ではなく None。0 だと「件数が 0 に変わった」と誤報告しうる。
+        assert state["rows"] is None
+        assert state["rows_sha256"] is None
+        assert state["counts"] is None
+
+    def test_比較相手があるときは断面を読む(self) -> None:
+        store = _RecordingD1Store()
+        csm._observe(store, baseline=True)
+        assert cs.SNAPSHOT_SQL in store.sqls
+        assert cs.COUNTS_SQL in store.sqls
+        assert cs.SEQ_SQL in store.sqls
+
+    def test_未観測の断面は_G_core_2_の差分として報告されない(self) -> None:
+        """未観測(None)を値として比べると「3,818 -> None」という嘘の差分が出る。"""
+        before = {
+            "columns": {}, "indexes": {}, "orphans": {},
+            "counts": {"total": 3818}, "sqlite_sequence": 4000,
+            "rows": 3818, "rows_sha256": "a" * 64,
+        }
+        after = dict(before, counts=None, sqlite_sequence=None, rows=None, rows_sha256=None)
+        problems = csm._verify(after, before)
+        assert not [p for p in problems if "G-core-2" in p or "G-core-3" in p], problems
 
 
 class TestD1StoreUpsertIsNotUsable:

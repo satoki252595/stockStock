@@ -17,6 +17,14 @@
 - `--verify`: 適用後の検証（G-core-2 / G-core-3 / G-core-5 / E7）だけを実行する。
   **`core_stocks` へは SELECT / PRAGMA しか発行しないので CI から毎日回せる。**
   `.github/workflows/ops_check.yml` の第3ステップが `--compare-to` なしで呼ぶ。
+  その形（比較相手なし）では **断面 (`SNAPSHOT_SQL`) と件数 (`COUNTS_SQL`) と
+  `sqlite_sequence` (`SEQ_SQL`) を発行しない**。G-core-2/3 は適用前の状態と
+  突き合わせて初めて意味を持つ判定なので、`--compare-to` / `--state-dump` を
+  渡したときだけ断面を読む（`_observe`）。
+  **「core_stocks の行を 1 行も走査しない」ではない**: 孤児検査 (G-core-5) は
+  比較相手なしでも判定に使い、`子表 LEFT JOIN core_stocks` なので core_stocks の
+  索引行を読む（2026-09-13 実測で `core_stock_financials` 1 表ぶんだけで
+  `rows_read` 7,528）。この PR が削ったのは「読んで捨てていた分」だけである。
   なお「1 文も書かない」ではない: 他の全ジョブと同じく `jobs.runner.run_job` が
   終了時に ⑦ `jss_job_runs` へ 1 行 INSERT する（移行対象表には触らないが、
   読み取り専用トークンでは動かない）
@@ -62,13 +70,33 @@ def _store(ctx: JobContext) -> D1Store | None:
     return D1Store(cloud.settings, writer=JOB_NAME, database_id=database_id)
 
 
-def _observe(store: D1Store) -> dict:
+def _observe(store: D1Store, *, baseline: bool) -> dict:
     """現状を読む（SELECT / PRAGMA のみ）。
 
     名前だけでなく**定義**まで持つ。列名の集合しか見ていないと
     「型の違う同名列」「(is_active, market) ではなく (sector) 上に作られた
     同名索引」を素通りさせる（`CREATE INDEX IF NOT EXISTS` は no-op になる）。
     行の値は `SNAPSHOT_SQL` のハッシュで丸ごと突き合わせる。
+
+    ## `baseline=False` で行を 1 行も走査しない理由（D1 は走査行課金）
+
+    G-core-2（件数・`sqlite_sequence`）と G-core-3（既存行の sha256）は
+    **適用前の状態と突き合わせて初めて意味を持つ**判定で、`_verify` は
+    `before is None` の時点で早期 return する。ところが `_observe` は
+    `before` の有無に関わらず `SNAPSHOT_SQL`（`core_stocks` 全 3,818 行）と
+    `COUNTS_SQL`（同 3,818 行）を必ず投げていた。
+
+    `.github/workflows/ops_check.yml` の第3ステップは `--compare-to` を渡さない
+    ので、**毎日 7,654 行を走査してハッシュを計算し、その結果を捨てていた**
+    （2026-09-13 の本番実測: `SNAPSHOT_SQL` 3,818 / `COUNTS_SQL` 3,818 /
+    `SEQ_SQL` 18。`SEQ_SQL` は `sqlite_sequence` の 18 行を走査するので 1 行では
+    ない）。D1 の課金軸は走査行数なので、これは料金だけを払って何も検知して
+    いない。比較相手がある経路（`--compare-to` / `--apply` / `--state-dump` /
+    `--snapshot`）だけで読む。
+
+    孤児検査（G-core-5）は `before` なしでも `_verify` が使うので常に読む。
+    こちらは `子表 LEFT JOIN core_stocks` で core_stocks の索引行も読むため、
+    この関数が「core_stocks を 1 行も走査しない」状態にはならない。
     """
     columns = {
         str(r["name"]): {
@@ -81,32 +109,46 @@ def _observe(store: D1Store) -> dict:
     indexes = {
         str(r["name"]): cs.normalize_sql(r.get("sql")) for r in store.query(cs.INDEX_LIST_SQL)
     }
-    counts = (store.query(cs.COUNTS_SQL) or [{}])[0]
-    seq_rows = store.query(cs.SEQ_SQL)
     orphans: dict[str, int] = {}
     for sql in cs.orphan_check_statements():
         orphans.update({str(r["t"]): int(r["n"] or 0) for r in store.query(sql)})
-    rows = store.query(cs.SNAPSHOT_SQL)
-    digest = hashlib.sha256(
-        json.dumps(rows, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()
-    return {
+    state: dict = {
         "columns": columns,
         "indexes": indexes,
-        "counts": {k: (int(v) if v is not None else None) for k, v in counts.items()},
-        "sqlite_sequence": int(seq_rows[0]["seq"]) if seq_rows else None,
         "orphans": orphans,
-        "rows": len(rows),
-        "rows_sha256": digest,
+        # 比較相手が無いときは「測っていない」を明示する。0 や {} を入れると
+        # `_verify` が「件数が 0 に変わった」と誤って報告しうる。
+        "counts": None,
+        "sqlite_sequence": None,
+        "rows": None,
+        "rows_sha256": None,
     }
+    if not baseline:
+        return state
+
+    counts = (store.query(cs.COUNTS_SQL) or [{}])[0]
+    seq_rows = store.query(cs.SEQ_SQL)
+    rows = store.query(cs.SNAPSHOT_SQL)
+    state["counts"] = {k: (int(v) if v is not None else None) for k, v in counts.items()}
+    state["sqlite_sequence"] = int(seq_rows[0]["seq"]) if seq_rows else None
+    state["rows"] = len(rows)
+    state["rows_sha256"] = hashlib.sha256(
+        json.dumps(rows, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return state
 
 
 def _report(state: dict, pending: list[str]) -> None:
     logger.info(
         "列 %d 個 / 索引 %s", len(state["columns"]), sorted(state["indexes"])
     )
-    logger.info("行 %s (sha256 %s)", state.get("rows"), str(state.get("rows_sha256"))[:16])
-    logger.info("件数: %s / sqlite_sequence=%s", state["counts"], state["sqlite_sequence"])
+    if state.get("rows_sha256") is None:
+        # 走査していないことを黙らせない。「0 行」と読めてしまうと、
+        # G-core-2/3 が通ったと誤解される。
+        logger.info("行・件数・sqlite_sequence: 未観測（比較相手が無いので走査しない）")
+    else:
+        logger.info("行 %s (sha256 %s)", state["rows"], str(state["rows_sha256"])[:16])
+        logger.info("件数: %s / sqlite_sequence=%s", state["counts"], state["sqlite_sequence"])
     bad = {t: n for t, n in state["orphans"].items() if n}
     logger.info("孤児: %s", bad or "全子表で 0 件")
     logger.info("未適用の DDL: %d 文", len(pending))
@@ -165,13 +207,16 @@ def _verify(state: dict, before: dict | None) -> list[str]:
             )
     if before is None:
         return problems
-    if before["counts"] != state["counts"]:
-        problems.append(f"G-core-2: 件数が変わった {before['counts']} -> {state['counts']}")
-    if before["sqlite_sequence"] != state["sqlite_sequence"]:
-        problems.append(
-            f"G-core-2: sqlite_sequence が動いた "
-            f"{before['sqlite_sequence']} -> {state['sqlite_sequence']}"
-        )
+    # 片方でも未観測なら比較しない。未観測（None）を値として比べると
+    # 「件数が 3,818 から None に変わった」という嘘の差分が出る。
+    if before["counts"] is not None and state["counts"] is not None:
+        if before["counts"] != state["counts"]:
+            problems.append(f"G-core-2: 件数が変わった {before['counts']} -> {state['counts']}")
+        if before["sqlite_sequence"] != state["sqlite_sequence"]:
+            problems.append(
+                f"G-core-2: sqlite_sequence が動いた "
+                f"{before['sqlite_sequence']} -> {state['sqlite_sequence']}"
+            )
     lost = set(before["columns"]) - set(state["columns"])
     if lost:
         problems.append(f"既存列が消えた: {sorted(lost)}")
@@ -189,7 +234,13 @@ def _verify(state: dict, before: dict | None) -> list[str]:
             problems.append(f"既存索引 {name} の定義が変わった")
     # G-core-3: 既存行が1バイトでも変わっていないこと。件数一致だけでは
     # 「全行の name を書き換えた」「is_active を反転した」を見逃す。
-    if before.get("rows_sha256") and before["rows_sha256"] != state.get("rows_sha256"):
+    # 片方が未観測（None）なら比較しない。未観測を値として比べると
+    # 「sha256 が aaaa… から None に変わった」という嘘の差分になる。
+    if (
+        before.get("rows_sha256")
+        and state.get("rows_sha256")
+        and before["rows_sha256"] != state["rows_sha256"]
+    ):
         problems.append(
             f"G-core-3: 既存行の内容が変わった "
             f"(sha256 {before['rows_sha256'][:16]} -> {str(state.get('rows_sha256'))[:16]})"
@@ -217,8 +268,20 @@ def execute(ctx: JobContext) -> None:
         return
     args = ctx.args
 
+    # 既存行の断面（3,818 行）を読むのは、突き合わせる相手がある経路だけ。
+    # `--verify` 単独（= ops_check.yml の第3ステップ）は列・索引・孤児しか見ない
+    # ので走査しない（`_observe` の docstring を読むこと）。
+    # `--state-dump` は後で `--compare-to` に渡す「適用前の状態」を作るための口
+    # なので、断面を欠いた JSON を吐かせない（欠けた baseline を渡すと G-core-2/3
+    # が黙って比較をスキップし、検証が通ったように見える）。
+    verify_only = (
+        bool(getattr(args, "verify", False))
+        and not getattr(args, "compare_to", None)
+        and not getattr(args, "state_dump", None)
+    )
+    need_baseline = not verify_only
     try:
-        state = _observe(store)
+        state = _observe(store, baseline=need_baseline)
     except D1Error as exc:
         ctx.add_failure("observe", f"現状を読めない: {exc}")
         return
@@ -298,7 +361,7 @@ def execute(ctx: JobContext) -> None:
         logger.info("適用: %s", sql)
 
     try:
-        after = _observe(store)
+        after = _observe(store, baseline=True)
     except D1Error as exc:
         ctx.add_failure("observe", f"適用後の状態を読めない: {exc}")
         return

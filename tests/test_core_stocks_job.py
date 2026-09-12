@@ -150,20 +150,21 @@ class TestVerifyDetectsDamage:
 
     def _applied(self, store: FakeStore) -> dict:
         job.execute(FakeCtx(store, apply=True))
-        return job._observe(store)  # noqa: SLF001
+        # 突き合わせ相手 (before) を作るので断面まで読む
+        return job._observe(store, baseline=True)  # noqa: SLF001
 
     def test_既存行の値の書き換えを検出する(self, store: FakeStore) -> None:
         before = self._applied(store)
         store.con.execute("UPDATE core_stocks SET name = 'すり替え' WHERE code='7203'")
         store.con.commit()
-        problems = job._verify(job._observe(store), before)  # noqa: SLF001
+        problems = job._verify(job._observe(store, baseline=True), before)  # noqa: SLF001
         assert any("G-core-3" in p for p in problems), problems
 
     def test_is_active_の反転を検出する(self, store: FakeStore) -> None:
         before = self._applied(store)
         store.con.execute("UPDATE core_stocks SET is_active = 1 - is_active")
         store.con.commit()
-        problems = job._verify(job._observe(store), before)  # noqa: SLF001
+        problems = job._verify(job._observe(store, baseline=True), before)  # noqa: SLF001
         assert problems, "件数が同じでも内容が変わったことを検出できていない"
 
     def test_同名で定義の違う索引を検出する(self, store: FakeStore) -> None:
@@ -184,14 +185,14 @@ class TestVerifyDetectsDamage:
         before = self._applied(store)
         store.con.execute("INSERT INTO yutai_benefits (stock_id) VALUES (999)")
         store.con.commit()
-        problems = job._verify(job._observe(store), before)  # noqa: SLF001
+        problems = job._verify(job._observe(store, baseline=True), before)  # noqa: SLF001
         assert any("G-core-5" in p for p in problems), problems
 
     def test_soft参照の未解決行は孤児にしない(self, store: FakeStore) -> None:
         before = self._applied(store)
         store.con.execute("INSERT INTO jss_financials (stock_id) VALUES (NULL)")
         store.con.commit()
-        problems = job._verify(job._observe(store), before)  # noqa: SLF001
+        problems = job._verify(job._observe(store, baseline=True), before)  # noqa: SLF001
         assert not any("G-core-5" in p for p in problems), problems
 
 
@@ -206,7 +207,8 @@ class TestColumnDriftDetection:
 
     def _applied(self, store: FakeStore) -> dict:
         job.execute(FakeCtx(store, apply=True))
-        return job._observe(store)  # noqa: SLF001
+        # 突き合わせ相手 (before) を作るので断面まで読む
+        return job._observe(store, baseline=True)  # noqa: SLF001
 
     def test_適用直後は何も検出しない(self, store: FakeStore) -> None:
         before = self._applied(store)
@@ -217,7 +219,7 @@ class TestColumnDriftDetection:
         self._applied(store)
         store.con.execute("ALTER TABLE core_stocks ADD COLUMN shares_outstanding INTEGER")
         store.con.commit()
-        problems = job._verify(job._observe(store), None)  # noqa: SLF001
+        problems = job._verify(job._observe(store, baseline=False), None)  # noqa: SLF001
         assert any("E7" in p for p in problems), problems
         assert any("shares_outstanding" in p for p in problems), problems
 
@@ -225,12 +227,12 @@ class TestColumnDriftDetection:
         self._applied(store)
         store.con.execute("CREATE INDEX idx_core_stocks_sector ON core_stocks (sector)")
         store.con.commit()
-        problems = job._verify(job._observe(store), None)  # noqa: SLF001
+        problems = job._verify(job._observe(store, baseline=False), None)  # noqa: SLF001
         assert any("定義に無い索引" in p for p in problems), problems
 
     def test_追加列の欠落は従来どおり検出する(self, store: FakeStore) -> None:
         """superset 方向を足しても subset 方向を壊していないこと。"""
-        state = job._observe(store)  # noqa: SLF001 - P4a 未適用の状態
+        state = job._observe(store, baseline=False)  # noqa: SLF001 - P4a 未適用の状態
         problems = job._verify(state, None)  # noqa: SLF001
         assert any("追加列が入っていない" in p for p in problems), problems
 
@@ -245,6 +247,13 @@ class TestColumnDriftDetection:
         assert store.sqls, "1 文も発行していない（観測していない）"
         for sql in store.sqls:
             assert sql.split()[0].upper() in ("SELECT", "PRAGMA"), sql
+        # D1 は走査行課金。`--compare-to` を渡さない CI の形では `core_stocks` の
+        # 行を 1 行も走査しない（G-core-2/3 は比較相手が無ければ評価されないので、
+        # 断面を読んでも結果を捨てるだけで料金だけが増える）。
+        assert cs.SNAPSHOT_SQL not in store.sqls
+        assert cs.COUNTS_SQL not in store.sqls
+        # 孤児検査 (G-core-5) は比較相手なしでも判定に使うので消えていないこと。
+        assert any("LEFT JOIN core_stocks" in sql for sql in store.sqls)
 
     def test_ドリフトがあれば_verify_が失敗して_CI_が赤くなる(self, store: FakeStore) -> None:
         self._applied(store)

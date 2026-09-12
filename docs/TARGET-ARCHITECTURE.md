@@ -58,7 +58,8 @@ core_stock_financials × finmath_price_snapshot: n=3,759 / price 不一致 3,711
 
 ```
 kabulab-cf (src/services/worker, *.ts) の personal-only|license_tag|licenseTag grep: 0 件
-D1 jss_column_license: core_stocks の market / sector33 / sector17 / instrument_type を personal-only と宣言（読み手は両リポジトリに 0 件）
+D1 jss_column_license: core_stocks の market / sector33 / sector17 / instrument_type を personal-only と宣言（読み手は両リポジトリに 0 件。
+  しかも sector33 は EDINET 由来 = commercial-ok で**タグ自体が誤り**、実際に JPX 由来の sector は地図に載っていなかった → 2026-09-13 修正）
 本番: /swing-trading/screening が 33 業種を出力、/otakara-yutai/ が Yahoo 株価・PER・PBR、
       /vwap-analysis/api/daily?code=7203 が Yahoo 日足 223,430 バイトを無認証で返す
 ```
@@ -494,6 +495,8 @@ D1 jss_column_license (7行) と worker/src/shared/license.ts の RESTRICTED_COL
   どちらも照合コードが本番の公開面に 0 行
 jss_column_license が宣言する edinet_code / sector33 / sector17 / instrument_type は
   core_stocks 3,818 行すべて NULL = 「まだ存在しない列」を記述している
+  （加えて sector33 のタグが personal-only で誤っていた。出所は EDINET「提出者業種」= commercial-ok。
+   実際に JPX 由来なのは地図に無かった sector 列 → 2026-09-13 に 2 列同時に修正）
 ```
 
 ### 8.2 4 層で守る（上ほど強い）

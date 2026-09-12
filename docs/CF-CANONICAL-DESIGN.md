@@ -147,7 +147,7 @@
 
 | # | データ | 粒度 | 年間量（確定値） | 格納先 | 形式 | 正本か | ライセンス区分 |
 |---|---|---|---:|---|---|---|---|
-| **①** | 銘柄マスタ | 銘柄 | 4,445行（増分ほぼ0） | **D1** `core_stocks`（列追加） | 行 | **○正本** | EDINETコードリスト由来列=commercial-ok ／ JPX data_j.xls 由来列（`market`/`sector33`/`sector17`/`instrument_type`）=**personal-only**（列単位で混在） |
+| **①** | 銘柄マスタ | 銘柄 | 4,445行（増分ほぼ0） | **D1** `core_stocks`（列追加） | 行 | **○正本** | EDINETコードリスト由来列（`code`/`name`/`edinet_code`/**`sector33`**）=commercial-ok ／ JPX data_j.xlsx 由来列（`market`/**`sector`**/`sector17`/`instrument_type`）=**personal-only**（列単位で混在） |
 | **②** | 株価 日足OHLCV（10年） | 銘柄×営業日 | 約95.5万行 / +0.07 GB | **R2** `vwap-data/daily/{code}.json` | JSON（per-code） | **○正本** | personal-only（yfinance） |
 | **②** | 株価 指数・為替・先物 | シンボル×営業日 | **7シンボル**×245 | **R2** `vwap-data/index/{slug}.json` | JSON（per-slug） | **○正本** | personal-only |
 | **②** | 株価 5分足 | 銘柄×5分 | （**未実測**・仮2 GB/5年） | **R2** `vwap-data/intra/{code}.json` | JSON（per-code） | ○正本 | personal-only |
@@ -792,7 +792,7 @@ D4 はその手動同期を 1 回ぶん増やしている。契約ファイル�
 | 追加列 | 型 | 説明 | ライセンス |
 |---|---|---|---|
 | `instrument_type` | TEXT | `equity/etf/etn/reit/pro/foreign/preferred`。母集団を 3,818 → 4,445 へ拡張するために必須 | **personal-only**（JPX data_j.xls 由来） |
-| `sector33` | TEXT | 33業種 | **personal-only**（同上） |
+| `sector33` | TEXT | 33業種（EDINET コードリストの「提出者業種」） | **commercial-ok**（EDINET 由来。既存 `sector` と出所が違う → E7） |
 | `sector17` | TEXT | 17業種 | **personal-only**（同上） |
 | `edinet_code` | TEXT | EDINETコード | commercial-ok |
 | `listing_status` | TEXT | 上場/監理/整理/上場廃止 | commercial-ok |
@@ -806,7 +806,7 @@ D4 はその手動同期を 1 回ぶん増やしている。契約ファイル�
 
 追加索引: `idx_core_stocks_active_market (is_active, market)` / `idx_core_stocks_edinet (edinet_code)`。既存の `code` UNIQUE は維持。
 
-**既存 `sector` 列との関係（未解消）**: 既存 `core_stocks.sector` と新設 `sector33` は同一の事実を指す可能性が高いが、本仕様は「**既存 `sector` を触らない・`sector33` を別列として足す**」に留める。統合・廃止の計画は立てていない（同一行に同値2列が残る状態を許容している）。統合するなら既存 consumer（001 のスクリーニング、`株ラボ-Youtube/data/d1.py` の `stocks()`）の洗い出しが先。
+**既存 `sector` 列との関係（出所は 2026-09-13 に確定、統合は未着手）**: 値はほぼ同じだが**出所が違う別の列**である。`sector` は kabulab-cf `src/cron/universe.ts` が JPX `data_j.xlsx` の33業種を書く既存列（**personal-only**）、`sector33` は stockStock `collectors/edinet_codelist.py` が EDINET コードリストの「提出者業種」を書く新設列（**commercial-ok**）。本仕様は「**既存 `sector` を触らない・`sector33` を別列として足す**」に留める。**タグが違うので統合してはいけない**（1列にまとめた瞬間に、公開してよい EDINET 由来の値と公開できない JPX 由来の値が同じ列に同居し、列単位の地図で区別できなくなる）。公開面で業種を出すなら `sector33` を使う（ただし充填は P4b 以降。それまで全行 NULL）。既存 consumer（001 のスクリーニング、`株ラボ-Youtube/data/d1.py` の `stocks()`）は `sector` を読み続けるので私用面に留める。
 
 **ライセンスが列単位で混在する点の帰結**: ① は「EDINETコードリスト由来=commercial-ok / JPX由来=personal-only」で1行に混在するため、**行の `license_tag` 1列では公開可否を表現できない**。判定は列単位の地図（`jss_column_license`）に従う必要がある。
 
@@ -846,16 +846,35 @@ D4 はその手動同期を 1 回ぶん増やしている。契約ファイル�
 これは `build_column_update` が明示的に進める唯一の既存列なので PROTECTED から
 外してある。
 
-**`sector` を `MIXED_LICENSE_COLUMNS` に足すと地図が 3 枚目になる。** 本節の上と
-:150（①の行）／B-10 `jss_column_license` の「新設の根拠」の段は「JPX 由来列 =
-`market` / `sector33` / `sector17` / `instrument_type`」と宣言しており、
-`sector` はそこに入っていない
-（当初ここに書いていた `:1078` は誤り。その行は B-5 `jss_supply_latest` で無関係）。一方で本番
-`core_stocks.sector` は JPX 33業種区分と**不一致 0 件**で、stockStock の
-`edinet_codelist.py` は EDINET 提出者業種を入れる実装である（= 出自が未決）。
-`cloud_store/schema.py` の `MIXED_LICENSE_COLUMNS` に `sector` を足すなら、
-**同時にこの 3 箇所の宣言と `jss_column_license` の投入行も直すこと。**
-出自が決まっていない現状では足さないのが正しい。
+**2026-09-13 決着: `sector33` のタグが誤っていた。`sector` を地図に足した。**
+
+当初この節は「`sector` の出自が未決なので `MIXED_LICENSE_COLUMNS` に足さないのが
+正しい」と書いていた。**結論が逆だった。** 未決だったのは「`sector` と `sector33`
+が同じ事実か」ではなく、**2 列の writer が別々であること自体を見落としていた**点で、
+実装を読めばどちらの出所も確定していた。
+
+| 列 | 書く writer | 一次ソース | 正しいタグ |
+|---|---|---|---|
+| `sector` | kabulab-cf `src/cron/universe.ts:177`（`sector: r.sector33`） | JPX `data_j.xlsx` の33業種 | **personal-only** |
+| `sector33` | stockStock `collectors/edinet_codelist.py:151`（`_COL_SECTOR = "提出者業種"`） | EDINET コードリスト | **commercial-ok** |
+
+つまり従来の宣言は **(a) EDINET 由来の `sector33` を personal-only と誤って
+公開禁止にし、(b) 実際に JPX 由来である `sector` を地図に一度も載せていなかった**。
+(a) だけを直すと「JPX 由来の業種が commercial-ok として公開面に出る」へ反転する
+（`sector` を載せていないので地図が何も止めない）。**2 列は必ず同時に直す。**
+
+同時に直した宣言は 5 箇所:
+`cloud_store/schema.py` の `MIXED_LICENSE_COLUMNS` /
+`tests/fixtures/contracts/d1-license-map.json`（両リポジトリ共有の契約） /
+`worker/src/shared/license.ts` の `RESTRICTED_COLUMNS` /
+本節の上の `:150`（①の行） / B-10 `jss_column_license` の「新設の根拠」。
+（当初ここに書いていた `:1078` は誤り。その行は B-5 `jss_supply_latest` で無関係。）
+
+**`core_stocks.sector33` は本番 3,818 行すべて NULL のまま**なので、タグが公開可に
+なっても今は 1 件も出ない。**公開面の業種を `sector` → `sector33` へ切り替えて
+よいのは P4b の充填が済んだ後**（切り替えだけ先に入れると業種が全件空欄になる）。
+統合（2 列を 1 列に寄せる）は**してはいけない**: タグが違う値が同じ列に同居すると
+列単位の地図で区別できなくなる。
 
 #### A-2. `core_stock_financials`（拡張）— ②価格・バリュエーション・テクニカルの唯一の断面
 
@@ -1213,6 +1232,40 @@ CREATE TABLE jss_writer_claims (
 
 行数: 約20。
 
+##### `column_group` の語彙（2026-09-13 確定）
+
+本番の既存 4 行はすべて `column_group='all'` / `writer='stockStock'` で、**`'base'` / `'enrich'` という値の定義が設計書に無かった**。PK が `(dataset, column_group)` なので後からの改名は DELETE + INSERT の破壊的書換になる。値を先に固定する。正本は `cloud_store/governance.COLUMN_GROUPS` と共有契約 `tests/fixtures/contracts/d1-license-map.json`。
+
+| 値 | 意味 |
+|---|---|
+| `all` | その表の全列を 1 writer が書く（分割の必要が無い表） |
+| `base` | 行の作成 + 基本列（INSERT / UPDATE の両方） |
+| `enrich` | 既存行の UPDATE のみ（INSERT / DELETE を発行しない列集合） |
+
+`base` / `enrich` の意味は上の §1.4 の表と 1:1 である。
+
+##### 宣言する条件 — 今日 writer が居る (dataset, column_group) だけ
+
+writer の居ない列群には行を作らない。「列を足したが writer を入れ忘れて黙って死ぬ」（`estimate_source_url` は 8,314 行すべて NULL なのに `estimated_value` は 5,333 行ある）を検出可能にしておくためである。したがって `core_stocks` の `enrich` 群（P4a で足した 12 列）は**宣言しない**。
+
+##### `core_stocks` を `kabulab-cf` から始める（順序の罠）
+
+`core_stocks` の行を今日書いているのは kabulab-cf の `src/cron/universe.ts` **だけ**である。stockStock 側は `jobs/core_stocks_migrate.py` が ALTER と CREATE INDEX しか出さず、値の充填は `cloud_store/core_stocks.build_column_update` が「組み立てて返す（実行しない）」設計になっている。
+
+ここで `writer='stockStock'` と宣言すると、kabulab-cf 側に同じ照合を入れた瞬間に `universe.ts` が毎回 throw して **JPX 母集団同期が止まる**。P4b の writer 交代までは `kabulab-cf` とし、交代は同一 PR で (1) `core_stocks/enrich` を `stockStock` で足す (2) 充填を有効にする の順に行う。`base` 群の writer は交代後も kabulab-cf のままである。
+
+`all` ではなく最初から `base` にしてあるのは、後で `base` / `enrich` へ割るときに `all` 行の DELETE が必要になるのを避けるため。
+
+##### 照合は warn → fail の 2 段リリース
+
+**claim が無いときに例外で落とす検査を先に入れてはいけない。** claim を投入するのも書込ジョブなので、claim 行の無い DB に対する最初の実行が必ず異常終了してブートストラップ不能になる（鶏と卵）。1 段目は `jobs/license_map.py` が投入して差分を warning に出すだけ。fail へ上げる条件は `governance.CLAIM_MISMATCH_IS_FAILURE` のコメントにある: (1) 最初の本番実行のログで既存 4 行の中身が判明し、(2) 食い違う行を整理する PR が入り、(3) kabulab-cf 側にも同じ照合が入ったとき（§1.3-2 の「片側だけの規律にしない」）。
+
+`jss_writer_claims` の孤児は **prune しない**（本番の既存 4 行がどの dataset を指しているかは読めないので、推測で消すと読めない情報を壊す）。名前つきで報告する。
+
+##### `jss_dataset_freshness.writer` との突合（§1.3-3）
+
+`cloud_store/datasets.py` は `core_stocks` の writer を `master_sync`、`yutai_benefits` を `yutai_backup` と宣言していたが、**どちらも誤り**だった。`master_sync` は D1 の `core_stocks` へ 1 行も書かず（充填は組み立てるだけ）、`yutai_backup` は `yutai_benefits` を**読んで R2 へ退避する**だけである。claim と食い違ったままでは §1.3-3 の突合が成立しないので、両方を `kabulab-cf` に直した。
+
 #### B-10. `jss_column_license` — 列単位のライセンス地図
 
 ```sql
@@ -1224,9 +1277,23 @@ CREATE TABLE jss_column_license (
 );
 ```
 
-**新設の根拠**: `core_stocks` は「EDINETコードリスト由来=commercial-ok / JPX data_j.xls 由来（`market`/`sector33`/`sector17`/`instrument_type`）=personal-only」で**1行に混在**する。行の `license_tag` 1列では表現できないため、判定は列単位でなければならない。`licensing.py` から生成し、手書きの二重定義を作らない。
+**新設の根拠**: `core_stocks` は「EDINETコードリスト由来（`code`/`name`/`edinet_code`/`sector33`）=commercial-ok / JPX data_j.xlsx 由来（`market`/`sector`/`sector17`/`instrument_type`）=personal-only」で**1行に混在**する。行の `license_tag` 1列では表現できないため、判定は列単位でなければならない。`licensing.py` から生成し、手書きの二重定義を作らない。**`sector` と `sector33` は名前が似ているだけで writer も一次ソースも違う**（E7 を読むこと。取り違えると公開面へ JPX 由来の業種が出る）。
 
 行数: 約300。
+
+#### B-10-1. 投入する実行主体と網羅性の検査（2026-09-13 追加）
+
+**投入口は `jobs/license_map.py` だけ。** `cloud_store/schema.seed_reference_tables()` は定義とテストだけがあって `jobs/*.py` からの呼び出しが **0 件**で、本番の 7 行は経路外で一度だけ手で入れられたものだった（= 宣言を直しても実表に届かず、実表を手で直しても宣言に戻らない）。`.github/workflows/ops_check.yml` の第4ステップ（cron `30 14 * * *`）が毎日実行する。新しい cron は足していない。
+
+**upsert は孤児宣言を消さない。** `conflict=(table_name, column_name)` なので宣言から外した列の行が残り続ける。`commercial-ok` の孤児は「公開してよい」と宣言したまま誰も管理していない列になるため、投入後に実表を読み直して孤児をキー指定で削除する。`jss_index_symbols` の孤児は削除しない（`r2_key` が実オブジェクトを指し、`r2.py` に削除 API が無いので回収できない）。
+
+**表の区分は `cloud_store/governance.TABLE_LICENSE`。** 本番 30 表 375 列のうち行タグも列地図も無いのが 22 表 / 257 列（68.5%）で、`license_tag` 列を持つ 8 表のうち行が入って機能していたのは 3 表だけ（`jss_index_symbols` 6 / `jss_raw_files` 150 / `jss_supply_latest` 4,351。`core_stocks.license_tag` は 3,818 行すべて NULL）だった。区分は `column-map` / `row-tag` / `uniform` / `operational` / `unclassified` の 5 つ。
+
+**網羅性の検査は行を 1 行も走査しない。** `sqlite_master` 1 文で全表の DDL を取り、列名は DDL から読む（SQLite は `ALTER TABLE ADD COLUMN` で保存済みの CREATE TABLE 文を書き換えるので、P4a で足した 12 列も DDL に出る）。30 表へ `PRAGMA table_info` を投げる案は往復が 30 回になるので採らない。全表に `SUM(col IS NOT NULL)` を打って実際の充填を測る案は、`ir_disclosures`(37,641) と `yutai_benefits`(8,314) を含めて **1 実行あたり約 6 万行の走査**になり、:1047 が「桁で下げる」と言っている対象と正面衝突するので採らない。
+
+**スナップショットの所有と fail open / closed**: 区分の宣言は **stockStock が所有する**。理由は「kabulab-cf にテストを回す CI が無いから」**ではない**（当初そう書いていたが事実誤認。あちらには `.github/workflows/ci.yml` があり push / pull_request で `pnpm test` を回す）。本番 `sqlite_master` と突き合わせる実行主体 (`jobs/license_map.py`) がこちらにしか無いからである。「宣言に無い表が本番にある」は **warning**（対向リポジトリの migration ごとに毎日赤くなる検査は読まれなくなる）。2026-09-13 に読み取り専用の `sqlite_master` 照会で残り 3 表（`swing_market_context` / `swing_sector_daily` / `yutai_genres`）が判明したので 30 表すべてを登録済みで、今後この warning が出るのは kabulab-cf が表を足したときだけである。「宣言にある表が本番から消えた」「行タグ前提の表に `license_tag` 列が無い」「列地図にある列が本番から消えた」「2 つの地図が食い違う」は **failure**。
+
+**未宣言の列の扱い**: 地図は公開できるものの allowlist であって、公開できないものの denylist ではない。宣言が無い列は「公開してよいと決まっていない」= 公開投影に入らないので、報告が warning でも漏れる方向へは倒れない。現在未宣言なのは `core_stocks` の `id` / `is_active` / `is_yutai` / `created_at` / `updated_at` の 5 列で、いずれも kabulab-cf が書く既存列。タグを決めるには派生元の判断が要る（`is_active` は data_j に載っているかで決まるので継承すれば personal-only だが、「上場している」は EDINET 上場区分から独立に作れる公開の事実でもある）ので推測で埋めない（§3-1）。
 
 ---
 
@@ -3004,13 +3071,31 @@ kabulab-cf は `pnpm typecheck` 通過、本番 11 経路がすべて 200。
 充填を別フェーズに切ったまま据え置く理由:
 - 列追加（DDL・1回きり）と値の充填（UPDATE・繰り返し）で、承認とロールバックの
   単位が違う
-- `sector33` の正本ソースが未決（本番 `core_stocks.sector` は JPX 33業種区分と
-  **不一致 0 件**で、stockStock の `edinet_codelist.py` は EDINET 提出者業種を
-  入れる実装。どちらに寄せるかで `jss_column_license` のタグも変わる）
+- ~~`sector33` の正本ソースが未決~~ **2026-09-13 決着**: `sector33` は EDINET
+  コードリストの「提出者業種」で **commercial-ok**（`edinet_codelist.py:151`）。
+  既存 `sector` は kabulab-cf が JPX 33業種を書く別の列で **personal-only**。
+  値も出所も別なので寄せない（E7 / B-10 を読むこと）
 - `instrument_type` の語彙が data_j の「市場・商品区分」から 1:1 に導けない
   （`ETF・ETN` は 1 区分で etf/etn を分離不能、`REIT・ベンチャーファンド・
   カントリーファンド・インフラファンド` も同様、`出資証券` は 7 語彙のどれにも
   当たらない）。**A-1 の語彙表を先に直す必要がある**
+
+##### 新しい前提条件: 充填は鮮度監視を恒久的に緑にする（2026-09-13 追加）
+
+`sector33` の出所が決着した時点で「`master_sync` に UPDATE を 1 行足せば充填できる」状態になったが、**足してはいけない。**
+
+`cloud_store/datasets.py` は `core_stocks` に日付列が無いため鮮度を `MAX(updated_at)` で測っており、`cloud_store/core_stocks.build_column_update` は `updated_at = (unixepoch())` を明示的に進める。月次 `master_sync` が 3,818 行を充填すると **`MAX(updated_at)` が毎月必ず進む**ので、kabulab-cf の月次 universe sync が死んでいても `core_stocks` の SLO（33 日で黄・46 日で赤）が発火しなくなる。
+
+これは検知したかった事象そのもの（**JPX の 404 で銘柄マスタが 33 日止まったのに誰も気づかなかった**）を自分の書き込みで隠すことを意味する。B-8 が「`updated_at` に `now` を入れると翌日から永久に緑」「鮮度表があるのに何も検知しない状態は writer 不在より悪い」と書いているのと同型である。
+
+したがって P4b は充填の前に次のどちらかを先に済ませる必要がある:
+
+1. `src_data_date` / `src_fetched_at` を充填し、`core_stocks` の鮮度の基準をそちらへ移す（`datasets.py` のコメントが既に「`src_fetched_at` が埋まったらそちらへ寄せる」と予告している）
+2. 鮮度 SQL を「kabulab-cf が書く列だけ」で測る形にする（例: `is_active` の更新を伴う行だけを見る、など）
+
+この 2 つの事実（鮮度の基準が `updated_at` である / 充填が `updated_at` を進める）は `tests/test_core_stocks_migrate.py` の `TestFillWouldBlindTheFreshnessMonitor` が固定してあり、`build_column_update` を `jobs/` から呼び始めた時点で落ちる（AST の Call ノードで検出する）。
+
+なお `sector33` が全行 NULL のままなので、**kabulab-cf 側が公開面の業種を `sector` → `sector33` へ切り替えてよいのは充填の後**である（切り替えだけ先に入れると業種が全件空欄になる）。タグの修正（commercial-ok）と充填は別物であることに注意。
 
 ---
 
