@@ -1,0 +1,204 @@
+{
+  "$schema_note": "銘柄コード正規化の言語横断テストベクタ。stockStock (Python) と kabulab_tool_cloudflare (TypeScript) の両リポジトリに同一バイト列で置き、双方のテストがこのファイルを読む。片方だけを直すと相手リポの CI (cross-repo diff ジョブ) が落ちる。",
+  "$scope_note": "ここに列挙した入力についてのみ両言語の一致を固定する。列挙外の入力の一致は保証しない。",
+  "canonical_regex": "^[0-9]{3}[0-9A-Z]$",
+  "operations": {
+    "normalize": "表現揺れの吸収のみ (trim / 全角英数字→半角 / 英字大文字化)。妥当性は判定しない。欠損 (null/None) は空文字列 \"\" を返す。",
+    "parse": "正準形 (4文字) なら正準形を返し、そうでなければ null。",
+    "source_to_ticker": "TDnet company_code / EDINET secCode の 5 文字形式 (4文字ティッカー + 検査文字1文字) を 4文字ティッカーへ。検査文字は '0' のみ受理する。4文字でそのまま来る場合も受理する。それ以外は null。"
+  },
+  "vectors": [
+    {
+      "id": "plain-4-digit",
+      "input": "7203",
+      "normalize": "7203",
+      "parse": "7203",
+      "source_to_ticker": "7203",
+      "note": "4桁数字の基本形 (トヨタ自動車)。本番 core_stocks の 3,812 行中 3,638 行がこの形。"
+    },
+    {
+      "id": "leading-zero-5-char",
+      "input": "07203",
+      "normalize": "07203",
+      "parse": null,
+      "source_to_ticker": null,
+      "note": "実害あり。5文字だが末尾が検査文字 '0' でない。旧実装 (TDnet/EDINET/reconcile) は先頭4文字を無条件に切り出して \"0720\" を返していた。本番 core_stocks に先頭0のコードは1件も無く (leading_zero=0)、\"0720\" は実在しない銘柄。"
+    },
+    {
+      "id": "too-short",
+      "input": "720",
+      "normalize": "720",
+      "parse": null,
+      "source_to_ticker": null,
+      "note": "桁不足。0 パディングで \"0720\" に補完してはならない (推測で埋めない)。"
+    },
+    {
+      "id": "yahoo-suffix",
+      "input": "7203.T",
+      "normalize": "7203.T",
+      "parse": null,
+      "source_to_ticker": null,
+      "note": "Yahoo Finance の取引所サフィックス付き。剥がすのは呼び出し側の責務で、コード契約の対象外。"
+    },
+    {
+      "id": "jpx-alnum",
+      "input": "130A",
+      "normalize": "130A",
+      "parse": "130A",
+      "source_to_ticker": "130A",
+      "note": "2024年1月以降の英字入りコード (Veritas In Silico)。本番 core_stocks に 174 件あり、全件 4 桁目のみ英字。"
+    },
+    {
+      "id": "jpx-alnum-lowercase",
+      "input": "130a",
+      "normalize": "130A",
+      "parse": "130A",
+      "source_to_ticker": "130A",
+      "note": "小文字は大文字化する (表現揺れの吸収)。JPX 付番は英大文字。本番データに小文字は0件 (with_lower=0)。"
+    },
+    {
+      "id": "fullwidth-digits",
+      "input": "７２０３",
+      "normalize": "7203",
+      "parse": "7203",
+      "source_to_ticker": "7203",
+      "note": "全角は半角化する (表現揺れの吸収)。モバイル日本語 IME 対策。以前 ir-catalog の companyCodeToTicker だけが null を返して割れていた。"
+    },
+    {
+      "id": "fullwidth-alnum",
+      "input": "１３０ａ",
+      "normalize": "130A",
+      "parse": "130A",
+      "source_to_ticker": "130A",
+      "note": "全角小文字英字も半角大文字へ。"
+    },
+    {
+      "id": "empty",
+      "input": "",
+      "normalize": "",
+      "parse": null,
+      "source_to_ticker": null,
+      "note": "空文字列。HTML フォームの未入力はこれで送られる。"
+    },
+    {
+      "id": "whitespace-only",
+      "input": "  ",
+      "normalize": "",
+      "parse": null,
+      "source_to_ticker": null,
+      "note": "空白のみ。trim 後は空。"
+    },
+    {
+      "id": "missing",
+      "input": null,
+      "normalize": "",
+      "parse": null,
+      "source_to_ticker": null,
+      "note": "欠損。Python 側は str(None) が \"None\" になる罠を踏まないこと (reconcile.normalize_code は実際に文字列 \"None\" をキーにしていた)。TS 側は TypeError を投げないこと。"
+    },
+    {
+      "id": "trailing-space",
+      "input": "7203 ",
+      "normalize": "7203",
+      "parse": "7203",
+      "source_to_ticker": "7203",
+      "note": "末尾空白は trim。本番データに空白入りは0件 (with_space=0)。"
+    },
+    {
+      "id": "bom-prefixed",
+      "input": "\ufeff7203",
+      "normalize": "7203",
+      "parse": "7203",
+      "source_to_ticker": "7203",
+      "note": "先頭 BOM (U+FEFF)。UTF-8-sig の CSV 先頭セルには実際に付く。JS の trim() は U+FEFF を落とすが Python の str.strip() は落とさないため、ここを固定しないと同じ入力で TS が \"7203\"・Python が null に割れる (実測)。Python 側は JS の trim 集合を明示して揃えている。"
+    },
+    {
+      "id": "fullwidth-punctuation-gap",
+      "input": "７２０３：",
+      "normalize": "7203：",
+      "parse": null,
+      "source_to_ticker": null,
+      "note": "半角化するのは全角英数字の 3 レンジ (FF10-FF19 / FF21-FF3A / FF41-FF5A) だけで、その隙間の全角記号 (FF1A-FF20 の ：；＜＝＞？＠ 等) は変換しない。Python 側が FF10-FF5A を 1 本の連続範囲で変換していたため \"7203:\" を返して TS と割れていた (実測)。妥当性判定は両言語とも null なので今日は無害だが、normalize の出力は kabulab-cf 側で core_stocks に書く値そのもの。"
+    },
+    {
+      "id": "alpha-first",
+      "input": "A130",
+      "normalize": "A130",
+      "parse": null,
+      "source_to_ticker": null,
+      "note": "1桁目が英字。JPX の付番体系 (英字は2桁目/4桁目のみ) に存在しない。旧実装のうち TDnet/EDINET/reconcile が \"A130\" をそのまま通していた。"
+    },
+    {
+      "id": "class-share-5-char",
+      "input": "25935",
+      "normalize": "25935",
+      "parse": null,
+      "source_to_ticker": null,
+      "note": "実害あり。伊藤園第1種優先株式。本番 core_stocks に実在する 5文字コード (is_active=0)。旧実装は \"2593\" (伊藤園 普通株、is_active=1) に丸めており、優先株の開示を普通株に付け替える取り違えだった。"
+    },
+    {
+      "id": "tdnet-5-char",
+      "input": "25930",
+      "normalize": "25930",
+      "parse": null,
+      "source_to_ticker": "2593",
+      "note": "TDnet/EDINET の 5 文字形式。末尾 '0' が検査文字。本番 ir_disclosures 37,641 行はすべてこの形 (len5=37641 / 末尾非0=0)。"
+    },
+    {
+      "id": "tdnet-5-char-toyota",
+      "input": "72030",
+      "normalize": "72030",
+      "parse": null,
+      "source_to_ticker": "7203",
+      "note": "5文字形式。parse は4文字契約なので null、source_to_ticker が \"7203\" を返す。この2操作の混同が6実装が割れた原因。"
+    },
+    {
+      "id": "tdnet-5-char-alnum",
+      "input": "130A0",
+      "normalize": "130A0",
+      "parse": null,
+      "source_to_ticker": "130A",
+      "note": "英字コードの 5 文字形式。"
+    },
+    {
+      "id": "tdnet-5-char-alnum-lower",
+      "input": "130a0",
+      "normalize": "130A0",
+      "parse": null,
+      "source_to_ticker": "130A",
+      "note": "小文字 + 5文字形式。"
+    },
+    {
+      "id": "nonzero-check-char",
+      "input": "16714",
+      "normalize": "16714",
+      "parse": null,
+      "source_to_ticker": null,
+      "note": "取りこぼし (意図的)。末尾検査文字が '0' でない 5文字形式 (ETF 1671 の TDnet 形式)。旧 TDnet 実装は \"1671\" を返していた。1671 は core_stocks に不在 (ETF は isListedEquity で母集団外) なので、取込は従来も次行の母集団突合で落ちていた。末尾非0を一律 null にすると 25935 の取り違えが消える代わりにこのケースを失う。取り違えより取りこぼしを選ぶ。"
+    },
+    {
+      "id": "too-long",
+      "input": "1234567",
+      "normalize": "1234567",
+      "parse": null,
+      "source_to_ticker": null,
+      "note": "桁過多。"
+    },
+    {
+      "id": "separator",
+      "input": "12-34",
+      "normalize": "12-34",
+      "parse": null,
+      "source_to_ticker": null,
+      "note": "区切り文字入り。5文字だが英数字でない。"
+    },
+    {
+      "id": "future-second-digit-alpha",
+      "input": "1A00",
+      "normalize": "1A00",
+      "parse": null,
+      "source_to_ticker": null,
+      "note": "既知のギャップ。JPX 仕様は英字を2桁目にも認める (1A00 から付番予定) が、現行の正準パターンは4桁目のみ。本番データに2桁目英字は0件 (pos2_alpha=0) なので今日は無害。JPX が 1A00 台の付番を始めたら canonical_regex とこのベクタを同時に更新する。"
+    }
+  ]
+}

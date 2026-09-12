@@ -42,15 +42,55 @@ class _StubResponse:
 
 
 class TestNormalizeCompanyCode:
-    def test_5桁から4桁化(self):
-        # TDnet は末尾1桁付き5桁（フィクスチャ実例: "70500", "316A0", "16714"）
+    def test_5文字から4文字化(self):
+        # TDnet は末尾に検査文字1文字を付けた5文字で返す
         assert ty.normalize_company_code("70500") == "7050"
         assert ty.normalize_company_code("316A0") == "316A"
-        # 末尾は "0" 以外の実例もある（ETF 等。2026-06-10 フィクスチャに存在）
-        assert ty.normalize_company_code("16714") == "1671"
 
     def test_4桁はそのまま(self):
         assert ty.normalize_company_code("7203") == "7203"
+
+    def test_末尾検査文字が0でない5文字はNone(self):
+        """仕様変更。以前は `"16714" == "1671"` を要求していた。
+
+        元の意図は「末尾は "0" 以外の実例もある（ETF 等）」で、実際に
+        2026-06-10 の TDnet フィクスチャに `"16714"` があったと当時の
+        コメントが記録している（フィクスチャは公開リポジトリに置けず
+        .gitignore 済みなので、ここでは再検証できない）。
+
+        それでも None に倒すのは、「5文字なら先頭4文字」規則が **別の証券を
+        既存銘柄に取り違える**ため。`"25935"`（伊藤園 第1種優先株式）は
+        `"2593"`（同社 普通株）になり、本番 core_stocks に両方が実在するので
+        優先株の開示が普通株のページへ付く。取り違えは取りこぼしより重い。
+
+        取りこぼし側の実害は無い（実測）:
+
+        - 本番 ir_disclosures 37,641 行の company_code は**全件が末尾 "0"**。
+          末尾非0の開示は1件も取り込まれていない。
+        - `1671` は ETF で core_stocks に不在（母集団は内国普通株のみ）。
+          旧実装でも ingest の母集団突合（`codeToId.get()` 相当）で落ちていた。
+
+        つまりこの変更で落ちる行は、従来も1行あとで落ちていた行だけ。
+        """
+        assert ty.normalize_company_code("16714") is None
+
+    def test_種類株コードを普通株に丸めない(self):
+        # 伊藤園第1種優先株式。旧実装は "2593"（同社 普通株）を返していた。
+        assert ty.normalize_company_code("25935") is None
+        # 実在しないコード "0720" を捏造していた（本番に先頭0のコードは0件）。
+        assert ty.normalize_company_code("07203") is None
+
+    def test_1桁目英字はNone(self):
+        # 旧実装は正規表現 [0-9A-Z]{4,5} で "A130" を通していた。
+        # JPX の付番体系では英字は2桁目/4桁目のみ。
+        assert ty.normalize_company_code("A130") is None
+
+    def test_表記揺れは吸収する(self):
+        # 小文字・全角・前後空白は「同じ値の別表記」なので正規化して受理する。
+        # 旧実装はいずれも None にしており、EDINET 側の実装と割れていた。
+        assert ty.normalize_company_code("130a") == "130A"
+        assert ty.normalize_company_code("７２０３") == "7203"
+        assert ty.normalize_company_code(" 7203 ") == "7203"
 
     def test_解釈できない形式はNone(self):
         # 推定しない (§3-1)
