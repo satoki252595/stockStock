@@ -175,3 +175,146 @@ class TestJobContextWiring:
         ctx = self._ctx(None)
         assert ctx._cloud(lambda c: True, "x") is None  # noqa: SLF001
         assert ctx.cloud_failed == 0
+
+
+class TestFinancialSummary:
+    """③財務サマリ (D1 jss_financials)。器だけあって 0 行だった表への writer。"""
+
+    def _record(self, **kw):
+        from jp_stock_pipeline.models import (
+            DataQuality,
+            FinancialSummaryRecord,
+            Provenance,
+        )
+
+        prov = Provenance(
+            source=Source.EDINET,
+            license_tag=LicenseTag.COMMERCIAL_OK,
+            data_date=date(2026, 6, 25),
+            fetched_at=datetime(2026, 6, 25, 21, 0, tzinfo=JST),
+            quality=DataQuality.OK,
+        )
+        base = dict(
+            code="7203",
+            fiscal_period_end=date(2026, 3, 31),
+            disclosure_type="本決算",
+            provenance=prov,
+            consolidated="連結",
+            net_sales=1000.0,
+            disclosed_at=datetime(2026, 6, 25, 15, 0, tzinfo=JST),
+        )
+        base.update(kw)
+        return FinancialSummaryRecord(**base)
+
+    def _store(self):
+        from test_cloud_financials import FakeStore
+
+        return FakeStore()
+
+    def test_resolves_stock_id_and_writes_one_row(self):
+        store = self._store()
+        sink = _sink(d1=store)
+        assert sink.upsert_financial_summary(
+            self._record(), doc_id="S100AAAA", raw_sha256="a" * 64
+        ) is True
+        rows = store.fin_rows()
+        assert len(rows) == 1
+        assert rows[0]["stock_id"] == 11
+        assert rows[0]["doc_id"] == "S100AAAA"
+        assert rows[0]["raw_sha256"] == "a" * 64
+
+    def test_stock_id_lookup_is_cached_across_records(self):
+        """同じ銘柄が同日に複数の書類を出すのは普通。SELECT を繰り返さない。"""
+        store = self._store()
+        sink = _sink(d1=store)
+        sink.upsert_financial_summary(self._record(), doc_id="S1", raw_sha256="a" * 64)
+        sink.upsert_financial_summary(
+            self._record(disclosure_type="1Q"), doc_id="S2", raw_sha256="b" * 64
+        )
+        from jp_stock_pipeline.cloud_store import financials
+
+        assert store.sqls.count(financials.STOCK_ID_SQL) == 1
+
+    def test_a_failing_stock_id_lookup_is_reported_as_false_not_raised(self):
+        """SELECT を try の外に出すと True/False/None の契約が破れる。"""
+        from jp_stock_pipeline.cloud_store.d1 import D1Error
+
+        class _Boom:
+            def query(self, sql, params=None, *, idempotent=True):
+                raise D1Error("no such table: core_stocks")
+
+            def rows_per_request(self, n):
+                return 3
+
+        assert _sink(d1=_Boom()).upsert_financial_summary(
+            self._record(), doc_id="S1", raw_sha256="a" * 64
+        ) is False
+
+    def test_conflict_target_without_a_matching_unique_fails_loudly(self):
+        """PK 移行前の本番はこの経路。黙って後勝ちさせず失敗させる。"""
+        import sqlite3
+
+        from jp_stock_pipeline.cloud_store import schema as S
+        from test_cloud_financials import FakeStore
+
+        store = FakeStore()
+        store.con.execute("DROP TABLE jss_financials")
+        ddl = next(s for s in S.SCHEMA_STATEMENTS if "jss_financials" in s)
+        store.con.execute(
+            ddl.replace(
+                "PRIMARY KEY (code, fiscal_period_end, disclosure_type, consolidated)",
+                "PRIMARY KEY (code, fiscal_period_end, disclosure_type)",
+            ).strip()
+        )
+
+        original = store.query
+
+        def query(sql, params=None, *, idempotent=True):
+            from jp_stock_pipeline.cloud_store.d1 import D1Error
+
+            try:
+                return original(sql, params, idempotent=idempotent)
+            except sqlite3.OperationalError as exc:  # D1 は success=false で返す
+                raise D1Error(str(exc)) from exc
+
+        store.query = query
+        assert _sink(d1=store).upsert_financial_summary(
+            self._record(), doc_id="S1", raw_sha256="a" * 64
+        ) is False
+
+    def test_dry_run_writes_nothing(self):
+        store = self._store()
+        sink = CloudSink(_settings(), writer="edinet_daily", dry_run=True)
+        sink._d1 = store  # noqa: SLF001
+        assert sink.upsert_financial_summary(
+            self._record(), doc_id="S1", raw_sha256="a" * 64
+        ) is None
+        assert store.sqls == []
+
+    def test_disabled_without_d1_config(self):
+        store = self._store()
+        sink = _sink(_settings(cf_api_token=None, d1_database_id=None), d1=store)
+        assert sink.upsert_financial_summary(
+            self._record(), doc_id="S1", raw_sha256="a" * 64
+        ) is None
+        assert store.sqls == []
+
+
+class TestJobContextFinancialWiring:
+    def test_none_record_is_a_programming_error_not_a_silent_noop(self):
+        """`fin is None` のガードを呼び出し側から外したら気付けるようにする。"""
+        import argparse
+
+        import pytest
+
+        from jp_stock_pipeline.config import load_settings
+        from jp_stock_pipeline.jobs.runner import JobContext
+        from jp_stock_pipeline.notion.client import NotionClient
+
+        ctx = JobContext(
+            settings=load_settings(env={"RAW_DATA_DIR": "/tmp"}, dry_run=True),
+            client=NotionClient(None, rps=1000.0, dry_run=True),
+            args=argparse.Namespace(),
+        )
+        with pytest.raises(ValueError):
+            ctx.cloud_financial_summary(None, doc_id="S1", raw_sha256=None)

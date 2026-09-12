@@ -58,7 +58,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..licensing import LicenseTag
+from ..licensing import LicenseTag, inherit
+
+# ③財務サマリは EDINET(commercial-ok) と TDnet(factual-cite) が**同じ表に混ざる**。
+# dataset レベルのタグは固定文字列にせず、混ざる可能性のあるタグから
+# `licensing.inherit`（= 最も厳しい側）で導く。文字列で書くと、将来 personal-only
+# の経路が1つ足された瞬間に緩いタグが残って公開面のフィルタを素通りする。
+# なお行単位のタグは `cloud_store/financials.py` が upsert のたびに厳しい側へ
+# マージするので、行とデータセットで別々の規則を持つことにはならない。
+FINANCIALS_LICENSE_TAG = inherit(
+    [LicenseTag.COMMERCIAL_OK, LicenseTag.FACTUAL_CITE]
+).value
 
 
 # 観測先 D1 の識別子。文字列リテラルを散らすと綴り間違いが静かに
@@ -171,14 +181,19 @@ DATASET_SOURCES: tuple[DatasetSource, ...] = (
         dataset="financials",
         store="D1",
         location="jss_financials",
-        writer="edinet_daily",
+        # ③ は**単一 writer に出来ない**。EDINET の 1Q/3Q は 2024-06-20 で
+        # 途切れて以降 TDnet にしか無く、EPS と 1 株配当は TDnet 側にしか無い
+        # （`docs/TARGET-ARCHITECTURE.md` §4.2）。単一名を宣言すると、二重
+        # writer 検知を入れたときに片方が「想定外の writer」として毎回落ちる。
+        writer="edinet_daily / tdnet_hourly",
         sql=(
             "SELECT MAX(data_date) AS latest_date, MAX(fetched_at) AS source_epoch,"
             " COUNT(*) AS n FROM jss_financials"
         ),
-        license_tag=LicenseTag.FACTUAL_CITE.value,
+        license_tag=FINANCIALS_LICENSE_TAG,
         note=(
-            "現在 0 行（writer 未実装）。0 件は unknown ではなく red として出す。"
+            "EDINET(commercial-ok) と TDnet 短信(factual-cite) が混ざる表なので"
+            "タグは厳しい側 = factual-cite。0 件は unknown ではなく red として出す。"
             "source_epoch は `fetched_at`（NOT NULL）。`disclosed_at` は nullable な"
             "開示時刻で、全行 NULL だと行があるのに unknown へ倒れる"
         ),

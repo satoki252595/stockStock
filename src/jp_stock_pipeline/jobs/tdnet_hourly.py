@@ -132,6 +132,11 @@ def _process_financial_xbrl(
         label=f"③{record.doc_id}",
     ):
         raise RuntimeError(f"③ を Notion/ローカル両系統に書けず: {record.doc_id}")
+    # Cloudflare 正本 (D1 jss_financials)。fin is None は上で return 済み。
+    # TDnet 由来なので行の license_tag は factual-cite (§2.1)。
+    ctx.cloud_financial_summary(
+        fin, doc_id=record.doc_id, raw_sha256=artifact.sha256
+    )
 
 
 def _load_map_guarded(loader, label: str) -> tuple[dict[str, str], bool]:

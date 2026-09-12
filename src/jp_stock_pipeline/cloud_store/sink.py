@@ -12,12 +12,12 @@ import mimetypes
 from typing import TYPE_CHECKING
 
 from ..config import CloudStoreSettings
-from . import keys
+from . import financials, keys
 from .d1 import D1Error, D1Store
 from .r2 import R2Error, R2Store
 
 if TYPE_CHECKING:
-    from ..models import RawArtifact
+    from ..models import FinancialSummaryRecord, RawArtifact
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,9 @@ class CloudSink:
         self.dry_run = dry_run
         self._raw_bucket: R2Store | None = None
         self._d1: D1Store | None = None
+        # 1 ジョブ実行内の core_stocks.code -> id の解決結果。同じ銘柄が同日に
+        # 複数の書類を出すのは普通なので、同じ SELECT を繰り返さない。
+        self._stock_ids: dict[str, int | None] = {}
 
     @property
     def enabled(self) -> bool:
@@ -135,6 +138,54 @@ class CloudSink:
         except D1Error as exc:
             # R2 には原本が残っている＝トレーサビリティは失われていない。
             logger.warning("D1 jss_raw_files への索引作成に失敗: %s: %s", key, exc)
+            return False
+        return True
+
+
+    def upsert_financial_summary(
+        self,
+        record: "FinancialSummaryRecord",
+        *,
+        doc_id: str | None,
+        raw_sha256: str | None,
+    ) -> bool | None:
+        """③財務サマリを D1 `jss_financials` へ upsert する。
+
+        `raw_sha256` は ⑤原本索引 `jss_raw_files.sha256`（PK）への結合キー。
+        `jss_raw_files.doc_id` は実測で 150 行すべて NULL だが、結合はこの
+        sha256 側で成立するので ③ ↔ ⑤ の辿り直しはできる。
+
+        `core_stocks.id` の解決も**この try の中**に入れてある。外に出すと
+        SELECT の失敗が例外としてここを素通りし、このクラスが宣言している
+        「True=書けた / False=失敗 / None=対象外」の契約が破れる。
+        """
+        if not self.enabled:
+            return None
+        if not self.settings.d1_enabled():
+            return None
+        try:
+            stock_id = financials.resolve_stock_id(
+                self.d1, record.code, cache=self._stock_ids
+            )
+            financials.write(
+                self.d1,
+                [
+                    financials.record_to_row(
+                        record,
+                        stock_id=stock_id,
+                        doc_id=doc_id,
+                        raw_sha256=raw_sha256,
+                    )
+                ],
+            )
+        except D1Error as exc:
+            # 移行前の本番は PK に consolidated が無く、ON CONFLICT が一致する
+            # UNIQUE を見つけられずここに来る。**黙って後勝ちさせない**ための
+            # 失敗なので、メッセージに移行の要否が読めるようにしておく。
+            logger.warning(
+                "D1 %s への ③ 書き込みに失敗: %s %s: %s",
+                financials.TABLE, record.code, record.fiscal_period_end, exc,
+            )
             return False
         return True
 
