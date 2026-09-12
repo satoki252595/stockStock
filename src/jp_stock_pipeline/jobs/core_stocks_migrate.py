@@ -4,8 +4,10 @@
 参照している。P4a で発行するのは **`ALTER TABLE ... ADD COLUMN` と
 `CREATE INDEX` だけ**で、既存行・既存列・子表には1バイトも触れない。
 
-値の充填（`instrument_type` 等）は P4a の範囲外。供給源の JPX data_j.xls が
-2026-09-12 時点で HTTP 404 を返しており、充填に使える一次データが無い。
+値の充填（`instrument_type` 等）は P4a の範囲外。列追加（DDL・1回きり）と
+値の充填（UPDATE・繰り返し）で承認とロールバックの単位が違うため、別フェーズに
+割っている。`sector33` の正本ソースと `instrument_type` の語彙が未決なのも理由
+（詳細は docs/CF-CANONICAL-DESIGN.md の P4a 実施記録）。
 
 ## モード
 
@@ -20,6 +22,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -34,9 +37,19 @@ JOB_NAME = "core_stocks_migrate"
 
 # 移行元 D1（kabulab-cf）を読む。正本 DB と同一なので既定はそちら。
 def _store(ctx: JobContext) -> D1Store | None:
+    """D1 が使えないなら失敗として記録する。
+
+    検証・適用のジョブは「対象に触れなかった」を成功にしてはいけない。
+    環境変数名の間違いや `--dry-run` の付けっぱなしで、孤児が出ていても
+    列が消えていても「成功 (processed=0)」に見えてしまう。
+    """
     cloud = ctx.cloud
     if cloud is None or not cloud.settings.d1_enabled():
-        logger.warning("D1 未設定のため何もしない（no-op）")
+        ctx.add_failure(
+            "d1",
+            "D1 が未設定（CF_ACCOUNT_ID / CF_API_TOKEN / CF_D1_DATABASE_ID）。"
+            " --dry-run では ctx.cloud が張られないので使えない",
+        )
         return None
     database_id = (
         cloud.settings.kabulab_d1_database_id or cloud.settings.d1_database_id
@@ -45,25 +58,49 @@ def _store(ctx: JobContext) -> D1Store | None:
 
 
 def _observe(store: D1Store) -> dict:
-    """現状を読む（SELECT / PRAGMA のみ）。"""
-    columns = {str(r["name"]) for r in store.query(cs.TABLE_INFO_SQL)}
-    indexes = {str(r["name"]) for r in store.query(cs.INDEX_LIST_SQL)}
+    """現状を読む（SELECT / PRAGMA のみ）。
+
+    名前だけでなく**定義**まで持つ。列名の集合しか見ていないと
+    「型の違う同名列」「(is_active, market) ではなく (sector) 上に作られた
+    同名索引」を素通りさせる（`CREATE INDEX IF NOT EXISTS` は no-op になる）。
+    行の値は `SNAPSHOT_SQL` のハッシュで丸ごと突き合わせる。
+    """
+    columns = {
+        str(r["name"]): {
+            "type": str(r["type"] or ""),
+            "notnull": int(r["notnull"] or 0),
+            "dflt": r["dflt_value"],
+        }
+        for r in store.query(cs.TABLE_INFO_SQL)
+    }
+    indexes = {
+        str(r["name"]): cs.normalize_sql(r.get("sql")) for r in store.query(cs.INDEX_LIST_SQL)
+    }
     counts = (store.query(cs.COUNTS_SQL) or [{}])[0]
     seq_rows = store.query(cs.SEQ_SQL)
     orphans: dict[str, int] = {}
     for sql in cs.orphan_check_statements():
         orphans.update({str(r["t"]): int(r["n"] or 0) for r in store.query(sql)})
+    rows = store.query(cs.SNAPSHOT_SQL)
+    digest = hashlib.sha256(
+        json.dumps(rows, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
     return {
-        "columns": sorted(columns),
-        "indexes": sorted(indexes),
+        "columns": columns,
+        "indexes": indexes,
         "counts": {k: (int(v) if v is not None else None) for k, v in counts.items()},
         "sqlite_sequence": int(seq_rows[0]["seq"]) if seq_rows else None,
         "orphans": orphans,
+        "rows": len(rows),
+        "rows_sha256": digest,
     }
 
 
 def _report(state: dict, pending: list[str]) -> None:
-    logger.info("列 %d 個 / 索引 %s", len(state["columns"]), state["indexes"])
+    logger.info(
+        "列 %d 個 / 索引 %s", len(state["columns"]), sorted(state["indexes"])
+    )
+    logger.info("行 %s (sha256 %s)", state.get("rows"), str(state.get("rows_sha256"))[:16])
     logger.info("件数: %s / sqlite_sequence=%s", state["counts"], state["sqlite_sequence"])
     bad = {t: n for t, n in state["orphans"].items() if n}
     logger.info("孤児: %s", bad or "全子表で 0 件")
@@ -81,9 +118,24 @@ def _verify(state: dict, before: dict | None) -> list[str]:
     missing = [c for c in cs.NEW_COLUMNS if c not in state["columns"]]
     if missing:
         problems.append(f"追加列が入っていない: {missing}")
-    missing_idx = [i for i in cs.NEW_INDEXES if i not in state["indexes"]]
-    if missing_idx:
-        problems.append(f"追加索引が入っていない: {missing_idx}")
+    # 型と nullability まで見る。ALTER は NOT NULL / UNIQUE を付けられないので、
+    # notnull=1 の同名列があるなら別物が既に居る。
+    for name, want_type in cs.NEW_COLUMNS.items():
+        got = state["columns"].get(name)
+        if not isinstance(got, dict):
+            continue
+        if got.get("type", "").upper() != want_type.upper():
+            problems.append(f"{name} の型が違う: {got.get('type')!r} != {want_type!r}")
+        if got.get("notnull"):
+            problems.append(f"{name} が NOT NULL になっている（ALTER では付かないはず）")
+    for name, want_sql in cs.NEW_INDEXES.items():
+        got_sql = state["indexes"].get(name)
+        if got_sql is None:
+            problems.append(f"追加索引が入っていない: {name}")
+        elif got_sql != cs.normalize_sql(want_sql):
+            problems.append(
+                f"同名だが定義の違う索引がある: {name} 実際={got_sql!r} 期待={cs.normalize_sql(want_sql)!r}"
+            )
     if before is None:
         return problems
     if before["counts"] != state["counts"]:
@@ -96,10 +148,32 @@ def _verify(state: dict, before: dict | None) -> list[str]:
     lost = set(before["columns"]) - set(state["columns"])
     if lost:
         problems.append(f"既存列が消えた: {sorted(lost)}")
+    for name in set(before["columns"]) & set(state["columns"]):
+        if before["columns"][name] != state["columns"][name]:
+            problems.append(
+                f"既存列 {name} の定義が変わった: "
+                f"{before['columns'][name]} -> {state['columns'][name]}"
+            )
     lost_idx = set(before["indexes"]) - set(state["indexes"])
     if lost_idx:
         problems.append(f"既存索引が消えた: {sorted(lost_idx)}")
+    for name in set(before["indexes"]) & set(state["indexes"]):
+        if before["indexes"][name] != state["indexes"][name]:
+            problems.append(f"既存索引 {name} の定義が変わった")
+    # G-core-3: 既存行が1バイトでも変わっていないこと。件数一致だけでは
+    # 「全行の name を書き換えた」「is_active を反転した」を見逃す。
+    if before.get("rows_sha256") and before["rows_sha256"] != state.get("rows_sha256"):
+        problems.append(
+            f"G-core-3: 既存行の内容が変わった "
+            f"(sha256 {before['rows_sha256'][:16]} -> {str(state.get('rows_sha256'))[:16]})"
+        )
     return problems
+
+
+def _already_applied(exc: Exception) -> bool:
+    """「もう入っている」ことを示す D1 のエラーか。"""
+    text = str(exc).lower()
+    return "duplicate column name" in text or "already exists" in text
 
 
 def _snapshot(store: D1Store, path: Path) -> int:
@@ -182,8 +256,16 @@ def execute(ctx: JobContext) -> None:
             return
     for sql in pending:
         try:
-            store.query(sql)
+            # 非冪等な DDL なので自動再送を止める。再送されると D1 側では
+            # 成功しているのに 2 回目が duplicate column name を返し、
+            # 「適用済みなのに失敗」と誤って報告される。
+            store.query(sql, idempotent=False)
         except D1Error as exc:
+            if _already_applied(exc):
+                # 応答が失われただけで実体は入っている可能性がある。
+                # 打ち切らず、最後の _observe と _verify に判断させる。
+                logger.warning("既に適用済みとして続行: %s (%s)", sql, exc)
+                continue
             ctx.add_failure(sql, f"DDL 発行に失敗: {exc}")
             return
         logger.info("適用: %s", sql)

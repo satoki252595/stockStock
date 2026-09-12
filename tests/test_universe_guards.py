@@ -21,6 +21,7 @@ from jp_stock_pipeline.cloud_store.universe_guards import (
     assert_population_sane,
     assert_universe_coverage,
     is_valid_stock_code,
+    normalize_stock_code,
     should_deactivate_universe_code,
 )
 
@@ -70,6 +71,18 @@ class TestGuardC:
     def test_現行の実測値は素通りする(self) -> None:
         assert_universe_coverage(RAW, EQUITY, ACTIVE, 0)
 
+    def test_比率がちょうど98パーセントなら通る(self) -> None:
+        """移植元は `< 0.98` で止める。`<=` に変えたらここが落ちる。
+
+        (b) が先に発火しないよう equity は 3,000 以上に保つ。
+        """
+        assert 4_900 / 5_000 == MIN_EXISTING_COVERAGE
+        assert_universe_coverage(RAW, 4_900, 5_000, 0)
+
+    def test_比率が98パーセントをわずかに下回れば止める(self) -> None:
+        with pytest.raises(GuardError, match="ガード\\(c\\)"):
+            assert_universe_coverage(RAW, 4_899, 5_000, 0)
+
     def test_P4b_で母集団を広げると発火する(self) -> None:
         """+707 行して active 4,422 になると 3,728/4,422=0.843 で毎月止まる。
 
@@ -88,6 +101,29 @@ class TestGuardD:
 
     def test_境界の74件は通る(self) -> None:
         assert_universe_coverage(RAW, EQUITY, ACTIVE, 74)
+
+    def test_比率がちょうど2パーセントなら通る(self) -> None:
+        """移植元は `> 0.02` で止める。`>=` に変えたらここが落ちる。"""
+        assert 60 / 3_000 == MAX_DEACTIVATION_RATIO
+        assert_universe_coverage(RAW, EQUITY, 3_000, 60)
+
+    def test_比率が2パーセントをわずかに超えれば止める(self) -> None:
+        with pytest.raises(GuardError, match="ガード\\(d\\)"):
+            assert_universe_coverage(RAW, EQUITY, 3_000, 61)
+
+    def test_P4b_後は対象外化の上限が緩む(self) -> None:
+        """分母が active 全体のままだと、母集団拡張で (d) の防御が緩む。
+
+        現行 active 3,715 なら 88 件は 2.37% で止まるが、P4b 後の 4,440 では
+        1.98% になって通ってしまう（上限が 74 件 -> 88 件へ自動的に緩む）。
+        (c) と同じ理由で (d) の分母も内国普通株に絞る必要がある。
+
+        ※ (c) は (d) より先に評価されるので、ここでは被覆率を満たす equity を
+        与えて (d) だけを見る。
+        """
+        with pytest.raises(GuardError, match="ガード\\(d\\)"):
+            assert_universe_coverage(RAW, 3_700, ACTIVE, 88)  # 88/3,715 = 2.37%
+        assert_universe_coverage(RAW, 4_400, 4_440, 88)  # 88/4,440 = 1.98% で通る
 
 
 class TestInitialSeedHole:
@@ -115,6 +151,20 @@ class TestStockCode:
 
     def test_小文字は大文字化して判定する(self) -> None:
         assert is_valid_stock_code("130a")
+
+    def test_前後の空白を落として判定する(self) -> None:
+        assert is_valid_stock_code(" 7203 ")
+        assert is_valid_stock_code("\t130A\n")
+
+    def test_全角は半角化して判定する(self) -> None:
+        """移植元 normalizeStockCode が全角英数字を半角へ倒すのに合わせる。"""
+        assert normalize_stock_code("７２０３") == "7203"
+        assert normalize_stock_code("１３０ａ") == "130A"
+        assert is_valid_stock_code("７２０３")
+        assert is_valid_stock_code("１３０ａ")
+
+    def test_全角でも5桁は落ちる(self) -> None:
+        assert not is_valid_stock_code("２５９３５")
 
 
 class TestDeactivation:

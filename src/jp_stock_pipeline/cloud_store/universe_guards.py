@@ -37,9 +37,24 @@ MAX_DEACTIVATION_RATIO = 0.02  # universe.ts:61  MAX_DEACTIVATION_RATIO
 STOCK_CODE_RE = re.compile(r"^\d{3}[0-9A-Z]$")
 
 
+def normalize_stock_code(code: str | None) -> str:
+    """移植元 `src/shared/jpx/stock-code.ts:56-63` の `normalizeStockCode` と同じ。
+
+    trim → **全角英数字を半角へ** → 大文字化。全角化は data_j 以外の入力
+    （手入力・別ソース）が混ざったときに判定が割れないようにするためで、
+    移植元にある以上こちらでも落とさない。
+    """
+    text = str(code or "").strip()
+    # 全角英数字 U+FF10-FF19 / U+FF21-FF3A / U+FF41-FF5A を半角へ (-0xFEE0)
+    half = "".join(
+        chr(ord(ch) - 0xFEE0) if "\uff10" <= ch <= "\uff5a" else ch for ch in text
+    )
+    return half.upper()
+
+
 def is_valid_stock_code(code: str | None) -> bool:
     """4文字コード契約に合格するか。5桁の種類株はここで落ちる。"""
-    return bool(code) and bool(STOCK_CODE_RE.match(str(code).strip().upper()))
+    return bool(STOCK_CODE_RE.match(normalize_stock_code(code)))
 
 
 def assert_universe_coverage(
