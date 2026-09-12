@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import date
 
 import pandas as pd
+import pytest
 
 from jp_stock_pipeline.licensing import LicenseTag
 from jp_stock_pipeline.models import (
@@ -19,6 +20,7 @@ from jp_stock_pipeline.models import (
     now_jst,
 )
 from jp_stock_pipeline.transform.reconcile import (
+    ReconcileDataError,
     adopt_confirmed_value,
     apply_flags,
     normalize_code,
@@ -50,6 +52,46 @@ class TestNormalizeCode:
 
     def test_four_digit_unchanged(self):
         assert normalize_code("7203") == "7203"
+
+    def test_種類株コードを普通株のキーにしない(self):
+        """旧実装は "25935"（伊藤園 第1種優先株式）を "2593"（同社 普通株）の
+        キーにしていた。第2ソースに種類株の終値が混ざると、普通株の終値と
+        比べて偽の乖離を報告する（あるいは本物の乖離を塗り潰す）。
+        """
+        assert normalize_code("25935") is None
+
+    def test_Noneが文字列Noneにならない(self):
+        """旧実装は `str(raw)` を通していたため、None が突合辞書に `"None"`
+        というキーを作っていた。
+        """
+        assert normalize_code(None) is None
+
+    def test_実在しない形式を素通しさせない(self):
+        assert normalize_code("07203") is None  # "0720" を捏造していた
+        assert normalize_code("7203.T") is None
+        assert normalize_code("A130") is None
+
+
+class TestOurSideCorruption:
+    """② 側の非正準コードは黙って飛ばさず例外にする。
+
+    `record.code` は ① 銘柄マスタ由来で既に正準4文字である前提。ここで
+    正規化に失敗するのは「② 自体がデータ破損している」ということで、
+    それは突合検証がまさに見つけるべきもの。第2ソース側と同じように
+    スキップすると検証の目的を取り落とす（§3-1 の「欠損は欠損」は
+    取得できなかった値の話で、破損を飛ばす許可ではない）。
+    """
+
+    def test_非正準コードはReconcileDataError(self):
+        records = [record("25935", 3000.0)]
+        other = other_frame([("25930", 3100.0)])
+        with pytest.raises(ReconcileDataError, match="25935"):
+            reconcile_prices(other, records, threshold_pct=1.0)
+
+    def test_正準コードなら止まらない(self):
+        records = [record("2593", 3000.0)]
+        other = other_frame([("25930", 3100.0)])
+        assert len(reconcile_prices(other, records, threshold_pct=1.0)) == 1
 
 
 class TestReconcile:

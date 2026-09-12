@@ -18,6 +18,7 @@ import zipfile
 from datetime import date
 
 from ..config import Settings
+from ..contracts.stock_code import source_code_to_ticker
 from ..http import FetchError, fetch
 from ..licensing import LicenseTag
 from ..models import ConvertStatus, Provenance, RawArtifact, Source, StockMasterRecord, now_jst
@@ -43,20 +44,26 @@ _META_DATE_RE = re.compile(r"(\d{4})年(\d{2})月(\d{2})日現在")
 
 
 def normalize_sec_code(sec_code: str | None) -> str | None:
-    """証券コードを4桁基準に正規化する。
+    """証券コードを4文字基準に正規化する。
 
-    EDINETコードリスト・EDINET API の secCode は5桁（4桁コード+末尾0。
-    新方式の英字含みコード例 "409A0" も同様）。末尾0を除いて4桁化する。
-    取得できない（空・None）場合は None のまま返す (§3-1)。
+    判定と正規化は `contracts/stock_code.py` の `source_code_to_ticker` に委譲する
+    （TDnet 側の `normalize_company_code` と同一実装）。
+
+    ここだけ「末尾0の5桁を4桁化し、それ以外は**入力をそのまま返す**」という
+    規則を持っていたため、妥当性を一切検証しない素通しになっていた:
+
+    - `"720"` / `"7203.T"` / `"A130"` / `"25935"` / `"１３０ａ"` のいずれも
+      加工せずそのまま返しており、呼び出し側は不正なコードを正常値として
+      受け取っていた（`edinet.py:209` は scope に、`:246` は code 列に使う）。
+    - `"130a"` の大文字化と全角の半角化をしていなかったため、同じ銘柄が
+      表記違いで別コードとして入りうる。
+
+    **挙動が変わる点:** 妥当でない入力は入力の丸投げではなく None を返す
+    （欠損は欠損 §3-1）。末尾0限定の扱いは旧実装から変えていないが、
+    EDINET について末尾0限定の実測根拠は無い（生 secCode を保存している表が
+    無く分布が取れない）。`source_code_to_ticker` の docstring を見ること。
     """
-    if sec_code is None:
-        return None
-    code = str(sec_code).strip()
-    if not code:
-        return None
-    if len(code) == 5 and code.endswith("0"):
-        return code[:4]
-    return code
+    return source_code_to_ticker(sec_code)
 
 
 def fetch_codelist(settings: Settings) -> RawArtifact:

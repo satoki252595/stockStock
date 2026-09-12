@@ -12,6 +12,26 @@
 6. **変換は値不変** (§5.2): 型変換・縦持ち化・文字コード正規化のみ。値の修正・丸め・補完禁止
 7. **dry-run** (§3-6): 全ジョブは `--dry-run` で Notion に書き込まずに動作する
 8. **テストフィクスチャは実レスポンスのみ** (§3-6): 捏造禁止。取得不能（要APIキー等）なら `tests/conftest.py fixture_path()` の skip 機構を使い、`scripts/capture_*.py` に取得スクリプトを置く
+9. **銘柄コード正規化は `contracts/stock_code.py` だけ**: 正規表現も 5 文字→4 文字の切り出しもモジュール内に書かない。3 操作（`normalize_stock_code` / `parse_stock_code` / `source_code_to_ticker`）を使い分ける。期待値は共有テストベクタ `tests/fixtures/contracts/stock-code-vectors.json` が正で、kabulab-cf `src/shared/jpx/stock-code.ts` と同一バイト列のファイルを共有する（CI の `cross-repo-contract` ジョブが diff する）
+
+## 銘柄コード契約
+
+| 操作 | 入力 | 出力 | 使う場面 |
+|---|---|---|---|
+| `normalize_stock_code` | 任意 | 正規化済み文字列（妥当性は見ない） | 表示・比較の前処理 |
+| `parse_stock_code` | 任意 | 4 文字の正準形 or `None` | ①②由来の値の検証、URL パラメータ |
+| `source_code_to_ticker` | TDnet `company_code` / EDINET `secCode` | 4 文字の正準形 or `None` | ③④の取込 |
+
+正準形は `^[0-9]{3}[0-9A-Z]$`（4 文字）。JPX は 2024 年 1 月から英字入りコードを
+付番しており、英字は仕様上 2 桁目と 4 桁目を取りうるが、本番 `core_stocks` の
+英字コード 174 件は全件 4 桁目のみ（実測）。`1A00` 台の付番が始まったら
+パターンと共有テストベクタを同時に更新する。
+
+**5 文字形式の 4 文字化は末尾検査文字が `"0"` のときだけ行う。** 「5 文字なら
+先頭 4 文字」で切ると別の証券を取り違える（`"25935"` 伊藤園第1種優先株式 →
+`"2593"` 同社普通株。本番に両方が実在する）。TDnet は実測で全件末尾 `"0"`
+だが、**EDINET については末尾 `"0"` 限定の実測根拠が無い**（生 `secCode` を
+保存する表が無く分布が取れない）。
 
 ## コアモジュール（実装済み・変更時は要注意）
 

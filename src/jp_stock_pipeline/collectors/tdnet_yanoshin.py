@@ -36,6 +36,7 @@ from datetime import date, datetime
 from urllib.parse import urlsplit
 
 from ..config import Settings
+from ..contracts.stock_code import source_code_to_ticker
 from ..http import FetchError, fetch
 from ..licensing import source_license
 from ..models import JST, DisclosureRecord, Provenance, RawArtifact, Source
@@ -288,18 +289,26 @@ def corporate_action_attrs(
 
 
 def normalize_company_code(raw_code: str | None) -> str | None:
-    """TDnet の5桁コードを4桁基準コードへ正規化する。
+    """TDnet の5文字コードを4文字基準コードへ正規化する。
 
-    TDnet は末尾1桁（証券種別の識別子。普通株は "0"、ETF等は "4" 等の実例あり）
-    を付けた5桁で返す（実例: "70500"→"7050", "316A0"→"316A", "16714"→"1671"）。
-    4桁ちょうどならそのまま。判別できない形式は加工せず None（推定しない §3-1）。
+    判定と正規化は `contracts/stock_code.py` の `source_code_to_ticker` に委譲する
+    （kabulab-cf の `companyCodeToTicker` / `secCodeToTicker` と同一実装）。
+
+    ここに独自の正規表現を持っていたため、同じ入力の答えが他の5実装と割れていた:
+
+    - `"07203"` → `"0720"`、`"25935"` → `"2593"` を返していた。`"2593"` は
+      伊藤園 普通株で `"25935"` は同社 第1種優先株式。本番 `core_stocks` に
+      両方が実在するため、優先株の開示を普通株へ付け替える**取り違え**だった。
+    - `"A130"`（1桁目英字。JPX 付番体系に無い）をそのまま通していた。
+    - `"130a"`（小文字）と `"７２０３"`（全角）を None にしていた。
+
+    **挙動が変わる点:** 末尾検査文字が "0" でない5文字（旧 docstring が
+    「ETF等は "4"」として挙げていた `"16714"` → `"1671"`）は None を返す。
+    本番 `ir_disclosures` 37,641 行の `company_code` は全件が末尾 "0" で
+    （実測）、ETF の `1671` は `core_stocks` に不在（母集団は内国普通株のみ）
+    なので、旧実装でも次段の母集団突合で落ちていた。取りこぼしは増えない。
     """
-    code = (raw_code or "").strip()
-    if re.fullmatch(r"[0-9A-Z]{5}", code):
-        return code[:4]
-    if re.fullmatch(r"[0-9A-Z]{4}", code):
-        return code
-    return None
+    return source_code_to_ticker(raw_code)
 
 
 def direct_document_url(url: str) -> str:
