@@ -104,9 +104,15 @@ jobs:
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
         run: nix develop -c uv run python -m jp_stock_pipeline.jobs.ops_check
 
-      # 検出層: core_stocks の列定義ドリフト (E7)。読み取りだけ（SELECT / PRAGMA）で
-      # 1 文も書かない。`--compare-to` を渡さないので G-core-2/3（適用前後の差分）は
-      # 見ず、列・索引の定義と孤児だけを見る。
+      # 検出層: core_stocks の列定義ドリフト (E7)。**`core_stocks` に対しては
+      # SELECT / PRAGMA しか発行しない**（`--apply` を付けない限り DDL は出ない）。
+      # `--compare-to` を渡さないので G-core-2/3（適用前後の差分）は見ず、
+      # 列・索引の定義と孤児だけを見る。
+      #
+      # 「1 文も書かない」ではない点だけ正確に書いておく: 他の全ジョブと同じく
+      # `jobs/runner.run_job` が終了時に ⑦ `jss_job_runs` へ 1 行 INSERT する
+      # （`cloud_store/ops.safe_record_job_run`。失敗してもジョブは落ちない）。
+      # 移行対象表には触らないが、読み取り専用トークンでは動かない。
       #
       # KABULAB_D1_DATABASE_ID を渡す理由は上の観測層と同じ。core_stocks は移行元
       # kabulab-cf 所有の表で、正本 DB に同居しているとは限らない。

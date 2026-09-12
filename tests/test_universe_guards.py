@@ -23,6 +23,7 @@ import pytest
 from jp_stock_pipeline.cloud_store.guards import GuardError
 from jp_stock_pipeline.cloud_store.universe_guards import (
     MAX_DEACTIVATION_RATIO,
+    MIN_BACKFILLED_EQUITY_ROWS,
     MIN_EQUITY_ROWS,
     MIN_EXISTING_COVERAGE,
     MIN_JPX_ROWS,
@@ -30,6 +31,7 @@ from jp_stock_pipeline.cloud_store.universe_guards import (
     assert_population_sane,
     assert_universe_coverage,
     coverage_denominator,
+    instrument_type_backfilled,
     is_valid_stock_code,
     normalize_stock_code,
     should_deactivate_universe_code,
@@ -303,6 +305,109 @@ class TestInstrumentTypeTransition:
     def test_本当に空なら充填を要求しない(self) -> None:
         """初回 seed 前。active 0 に対して充填を求めると seed が通らない。"""
         assert_instrument_type_backfilled(0, 0)
+
+
+class TestPartialBackfill:
+    """`instrument_type` の充填が**途中で止まった**状態（2026-09-12 レビューで追加）。
+
+    `None`／`0` だけを未充填として扱うと、equity 件数が 500 のまま P4b を通したとき
+
+    - (c) が **fail-open**: 3,100/500 = 6.2 で 0.98 を割らない。本当の被覆率は
+      3,100/4,440 = 0.698 なので、部分取得された data_j を素通しする
+    - (d2) が **誤発火**: 11/500 = 2.2%。実母集団では 11/3,700 = 0.3% で、
+      D4 が消したはずの「毎月 throw する」の再来になる
+
+    充填は 3,818 行への UPDATE をチャンクで回す別フェーズなので途中終了しうる。
+    下限は新しい数字ではなく (b) の `MIN_EQUITY_ROWS` を再利用している。
+    """
+
+    PARTIAL = 500  # 充填が途中で止まった equity 件数
+
+    def test_下限は_b_の_MIN_EQUITY_ROWS_を再利用する(self) -> None:
+        """勘で置いた別の数字に差し替えられないよう、由来を固定する。"""
+        assert MIN_BACKFILLED_EQUITY_ROWS == MIN_EQUITY_ROWS
+
+    def test_部分充填は充填済みと認めない(self) -> None:
+        assert not instrument_type_backfilled(None)
+        assert not instrument_type_backfilled(0)
+        assert not instrument_type_backfilled(self.PARTIAL)
+        assert not instrument_type_backfilled(MIN_BACKFILLED_EQUITY_ROWS - 1)
+        assert instrument_type_backfilled(MIN_BACKFILLED_EQUITY_ROWS)
+        assert instrument_type_backfilled(ACTIVE)
+
+    def test_部分充填なら従来の分母へ縮退する(self) -> None:
+        denominator, label = coverage_denominator(P4B_ACTIVE, self.PARTIAL)
+        assert denominator == P4B_ACTIVE
+        assert "部分充填" in label
+
+    def test_部分充填で_c_が空虚にならない(self) -> None:
+        """この diff の前は素通りしていた（fail-open）。縮退後は 0.698 で発火する。"""
+        with pytest.raises(GuardError, match="ガード\\(c\\)"):
+            assert_universe_coverage(
+                RAW, 3_100, P4B_ACTIVE, 0, existing_equity_active_count=self.PARTIAL
+            )
+
+    def test_部分充填の発火メッセージに原因を書く(self) -> None:
+        with pytest.raises(GuardError, match="部分充填"):
+            assert_universe_coverage(
+                RAW, 3_100, P4B_ACTIVE, 0, existing_equity_active_count=self.PARTIAL
+            )
+
+    def test_部分充填では_d2_を誤発火させない(self) -> None:
+        """11/500 = 2.2% で止めてはいけない。実母集団では 11/3,700 = 0.3%。
+
+        ※ (c) は (d) より先に評価され、部分充填では分母が active 全体へ縮退する。
+        (d2) だけを見るために、縮退後の被覆率を満たす equity を与える
+        （`TestGuardD2.test_P4b_後も対象外化の上限が緩まない` と同じ手）。
+        """
+        assert_universe_coverage(
+            RAW,
+            4_400,  # 4,400/4,440 = 0.991 で (c) は通る
+            P4B_ACTIVE,
+            11,
+            existing_equity_active_count=self.PARTIAL,
+            pending_deactivation_equity_count=11,
+        )
+
+    def test_部分充填は原因の言葉で先に止める(self) -> None:
+        with pytest.raises(GuardError, match="充填が途中で止まっている"):
+            assert_instrument_type_backfilled(P4B_ACTIVE, self.PARTIAL)
+
+    def test_充填済みなら_d2_は従来どおり働く(self) -> None:
+        """縮退を足しても (d2) 本来の発火を殺していないこと。"""
+        with pytest.raises(GuardError, match="ガード\\(d2\\)"):
+            assert_universe_coverage(
+                RAW,
+                EQUITY_20260831,
+                P4B_ACTIVE,
+                88,
+                existing_equity_active_count=ACTIVE,
+                pending_deactivation_equity_count=88,
+            )
+
+
+class TestEquitySubsetInvariant:
+    """equity active ⊆ active。超過は引数の取り違えか SELECT の失敗。
+
+    分母が呼び出し側から来る引数になったので、その値が壊れていたら (c)(d2) の
+    意味が丸ごと変わる。`assert_population_sane` と同じ趣旨で先に止める。
+    """
+
+    def test_equity_が_active_を超えたら止める(self) -> None:
+        with pytest.raises(GuardError, match="部分集合なのでありえない"):
+            assert_universe_coverage(
+                RAW, EQUITY, ACTIVE, 0, existing_equity_active_count=ACTIVE + 1
+            )
+
+    def test_同数は通す(self) -> None:
+        """充填直後・P4b 前は active 全件が equity になる（実測 3,715 / 3,715）。"""
+        assert_universe_coverage(
+            RAW, EQUITY, ACTIVE, 0, existing_equity_active_count=ACTIVE
+        )
+
+    def test_充填チェック側でも同じ前提を見る(self) -> None:
+        with pytest.raises(GuardError, match="部分集合なのでありえない"):
+            assert_instrument_type_backfilled(ACTIVE, ACTIVE + 1)
 
 
 class TestInitialSeedHole:

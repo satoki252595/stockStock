@@ -78,6 +78,30 @@ P4a 実施記録のとおり語彙が未決）。この状態で equity に絞�
 誤検知ではなく「充填は P4b の前提条件」という設計の表明で、
 `assert_instrument_type_backfilled()` が同じことを先に、読める言葉で止める。
 
+### 「未充填」は 0 件だけではない（部分充填）
+
+2026-09-12 のレビューで見つかった穴。**`None` と `0` だけを未充填として扱うと、
+充填が途中で止まった状態で (c) が黙って空虚になる。** 充填は 3,818 行への
+`UPDATE` をチャンクで回す別フェーズなので、D1 のレート制限やタイムアウトで
+途中終了しうる（語彙が未決なので一部の区分だけ先に埋める運用もありうる）。
+
+equity 件数が 500 のまま P4b を通すと:
+
+- **(c) は fail-open**: 3,100/500 = 6.2 なので 0.98 を割らない。本当の被覆率は
+  3,100/4,440 = 0.698 で、部分取得された data_j を素通しする
+- **(d2) は fail-closed だが誤発火**: 11/500 = 2.2% で止まる。実母集団に対しては
+  11/3,700 = 0.3% で、これは D4 が消したはずの「毎月 throw する」の再来
+
+→ **`MIN_BACKFILLED_EQUITY_ROWS`（= `MIN_EQUITY_ROWS` = 3,000）を下回る equity
+件数は「部分充填」として `0` と同じ扱いにする。** (c) は従来の分母へ縮退し
+（P4b 後なら 0.833 で発火 = fail-closed）、(d2) は評価しない（誤発火させない）。
+どちらも「充填が終わっていないなら equity の分母を信用しない」という 1 つの
+述語（`instrument_type_backfilled()`）から出す。
+
+**equity 件数が active 件数を超える入力は拒否する。** equity active ⊆ active なので
+構造的にありえない。起きたとすれば引数の取り違えか SELECT の失敗で、その値を
+分母に使うと (c)(d2) の意味が丸ごと変わる（`assert_population_sane()` と同じ趣旨）。
+
 ## `instrument_type='equity'` の充填述語をずらしてはいけない
 
 (c) の分子は `isListedEquity`（「内国株式」かつ プライム|スタンダード|グロース
@@ -109,6 +133,14 @@ MAX_DEACTIVATION_RATIO = 0.02  # universe.ts:61  MAX_DEACTIVATION_RATIO
 # `is_active = 1 AND instrument_type = 'equity'` と、充填側で同じ文字列を使う。
 INSTRUMENT_TYPE_EQUITY = "equity"
 
+# 「充填が済んでいる」と見なす equity 件数の下限。**新しい数字を発明していない**:
+# (b) が「内国株式が 3,000 件未満の入力は部分取得として拒否する」と既に宣言して
+# いるので、`core_stocks` 側の内国普通株が 3,000 件を割っているなら、それは
+# 母集団が壊れているか充填が途中で止まっているかのどちらかしかない。
+#
+# この下限が無いと **(c) が黙って空虚になる**（下の「部分充填」の節）。
+MIN_BACKFILLED_EQUITY_ROWS = MIN_EQUITY_ROWS
+
 # JPX の4文字コード契約（英字入り新方式コード "130A" を含む）。
 # kabulab-cf の src/shared/jpx/stock-code.ts:31 と同じ。
 STOCK_CODE_RE = re.compile(r"^\d{3}[0-9A-Z]$")
@@ -134,6 +166,18 @@ def is_valid_stock_code(code: str | None) -> bool:
     return bool(STOCK_CODE_RE.match(normalize_stock_code(code)))
 
 
+def instrument_type_backfilled(existing_equity_active_count: int | None) -> bool:
+    """equity の分母を信用してよいか。(c) の縮退と (d2) の評価が同じ述語を使う。
+
+    ここを「`None`/`0` 以外なら信用する」にすると、充填が途中で止まった状態で
+    (c) が空虚になり (d2) が誤発火する（モジュール docstring「部分充填」の節）。
+    """
+    return (
+        existing_equity_active_count is not None
+        and existing_equity_active_count >= MIN_BACKFILLED_EQUITY_ROWS
+    )
+
+
 def coverage_denominator(
     existing_active_count: int,
     existing_equity_active_count: int | None,
@@ -150,6 +194,15 @@ def coverage_denominator(
         # 列はあるが全 NULL（2026-09-12 の本番はこの状態）。上の docstring の
         # 遷移期の扱いのとおり従来の分母へ縮退する。fail-closed。
         return existing_active_count, "active 全体／instrument_type 未充填"
+    if not instrument_type_backfilled(existing_equity_active_count):
+        # 充填が途中で止まっている。この分母を使うと (c) が空虚になるので、
+        # 0 件とまったく同じに扱う（縮退先は従来の分母 = fail-closed）。
+        return (
+            existing_active_count,
+            f"active 全体／instrument_type 部分充填"
+            f"（equity {existing_equity_active_count} 件 <"
+            f" 下限 {MIN_BACKFILLED_EQUITY_ROWS} 件）",
+        )
     return existing_equity_active_count, f"active かつ {INSTRUMENT_TYPE_EQUITY}"
 
 
@@ -172,11 +225,25 @@ def assert_universe_coverage(
         total ではない（取り違えると (d1) の分母が狂う）。
     :param pending_deactivation_count: これから is_active=0 にする件数（全銘柄種別）。
     :param existing_equity_active_count: `is_active=1 AND instrument_type='equity'`
-        の行数。(c) の分母および (d2) の分母。`None`／`0` は「未観測・未充填」で、
-        (c) は従来の分母へ縮退し (d2) は評価されない（docstring の遷移期の節）。
+        の行数。(c) の分母および (d2) の分母。`None`／`0`／
+        `MIN_BACKFILLED_EQUITY_ROWS` 未満は「未観測・未充填・部分充填」で、
+        (c) は従来の分母へ縮退し (d2) は評価されない（docstring の遷移期・
+        部分充填の節）。`existing_active_count` を超える値は拒否する。
     :param pending_deactivation_equity_count: 対象外化候補のうち
         `instrument_type='equity'` の件数。(d2) の分子。`None` なら (d2) は評価しない。
     """
+    # equity active ⊆ active なので超過はありえない。引数の取り違えか SELECT の
+    # 失敗で、その値を分母に使うと (c)(d2) の意味が丸ごと変わる。先に止める。
+    if (
+        existing_equity_active_count is not None
+        and existing_equity_active_count > existing_active_count
+    ):
+        raise GuardError(
+            f"ガード(前提): active かつ {INSTRUMENT_TYPE_EQUITY} が"
+            f" {existing_equity_active_count} 件で active 全体"
+            f" {existing_active_count} 件を超えている。部分集合なのでありえない。"
+            " 引数の取り違えか SELECT の失敗を疑う"
+        )
     # (a) universe.ts:88-93
     if raw_count < MIN_JPX_ROWS:
         raise GuardError(
@@ -208,10 +275,13 @@ def assert_universe_coverage(
         )
     # (d2) 新設。equity の分子を equity の分母で見る。(d1) だけだと P4b 後に
     # 内国普通株の対象外化の実効上限が 74 -> 88 件へ緩むのを塞ぐ。
+    # 充填が終わっていない equity 件数を分母にすると、実母集団に対して 0.3% の
+    # 対象外化が 2.2% に見えて誤発火する（= D4 が消したはずの「毎月 throw」）。
+    # (c) の縮退と同じ述語で、信用できないときは評価しない。
     if (
         pending_deactivation_equity_count is not None
+        and instrument_type_backfilled(existing_equity_active_count)
         and existing_equity_active_count is not None
-        and existing_equity_active_count > 0
         and pending_deactivation_equity_count / existing_equity_active_count
         > MAX_DEACTIVATION_RATIO
     ):
@@ -254,11 +324,28 @@ def assert_instrument_type_backfilled(
     事故そのものは起きない。しかしそのとき出るのは「被覆率が足りない」という
     **症状の**メッセージで、原因（充填していない）が読めない。P4b の実行前に
     これを先に呼んで、原因の言葉で止める。
+
+    **0 件だけでなく部分充填も止める。** 充填は 3,818 行への UPDATE をチャンクで
+    回すので途中終了しうる。3,000 件（`MIN_BACKFILLED_EQUITY_ROWS`）を下回る
+    equity 件数を「充填済み」と認めると (c) が空虚になる（モジュール docstring
+    「部分充填」の節）。
     """
-    if active_count > 0 and equity_active_count == 0:
+    if equity_active_count > active_count:
+        raise GuardError(
+            f"instrument_type='{INSTRUMENT_TYPE_EQUITY}' が {equity_active_count} 件で"
+            f" active 全体 {active_count} 件を超えている。部分集合なのでありえない。"
+            " 引数の取り違えか SELECT の失敗を疑う"
+        )
+    if active_count > 0 and not instrument_type_backfilled(equity_active_count):
+        detail = (
+            "が 0 件"
+            if equity_active_count == 0
+            else f"が {equity_active_count} 件しかなく下限"
+            f" {MIN_BACKFILLED_EQUITY_ROWS} 件を下回る（充填が途中で止まっている）"
+        )
         raise GuardError(
             f"core_stocks の active は {active_count} 件だが instrument_type="
-            f"'{INSTRUMENT_TYPE_EQUITY}' が 0 件。P4b（母集団拡張）の前提である"
+            f"'{INSTRUMENT_TYPE_EQUITY}' {detail}。P4b（母集団拡張）の前提である"
             " instrument_type の充填が済んでいない"
             "（未充填のままだとガード(c)は active 全体の分母へ縮退する）"
         )

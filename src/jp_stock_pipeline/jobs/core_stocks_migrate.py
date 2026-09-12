@@ -15,8 +15,11 @@
 - `--sql-dump PATH`: 発行予定の全文をファイルへ出す（G-core-1 の静的検査用）
 - `--apply`: DDL を実際に発行する。**唯一の書込モード**
 - `--verify`: 適用後の検証（G-core-2 / G-core-3 / G-core-5 / E7）だけを実行する。
-  **読み取りだけ（SELECT / PRAGMA）なので CI から毎日回せる。**
-  `.github/workflows/ops_check.yml` の第3ステップが `--compare-to` なしで呼ぶ
+  **`core_stocks` へは SELECT / PRAGMA しか発行しないので CI から毎日回せる。**
+  `.github/workflows/ops_check.yml` の第3ステップが `--compare-to` なしで呼ぶ。
+  なお「1 文も書かない」ではない: 他の全ジョブと同じく `jobs.runner.run_job` が
+  終了時に ⑦ `jss_job_runs` へ 1 行 INSERT する（移行対象表には触らないが、
+  読み取り専用トークンでは動かない）
 
 `--snapshot PATH` を付けると、既存 3,818 行のスナップショットを JSON で保存する
 （ロールバックの原本）。
