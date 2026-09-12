@@ -125,7 +125,9 @@ SLOS: tuple[FreshnessSlo, ...] = (
     ),
     FreshnessSlo(
         "financials", 48, 7 * _DAY,
-        "提出から。D1 側は現在 0 行なので赤",
+        "提出から。writer 稼働前は 0 行 = red（judge_observation の (a)）。"
+        "閾値は仮値で、決算提出が薄い時期に 7 営業日空くかは未実測。"
+        "空くなら閾値を緩める（受容宣言に戻すのではなく）",
         business_days=True,
     ),
     FreshnessSlo(
@@ -138,21 +140,24 @@ SLO_BY_DATASET: dict[str, FreshnessSlo] = {s.dataset: s for s in SLOS}
 
 # 「赤だと分かっていて、今は直せない」データセット。
 #
-# 観測を配線しただけでは financials（jss_financials が 0 行）と yutai_benefits
-# （実測 81.96 日 / 赤閾値 50 日）が赤のまま残り、ops_check が**毎日** exit 1 して
-# Issue にコメントが積まれる。それは (1) 通知を見なくなる (2) 新しい赤が埋もれる
-# の二重の害があるので、既知の赤は「宣言済み」として警告に落とす。
+# 観測を配線しただけでは yutai_benefits（実測 81.96 日 / 赤閾値 50 日）が赤のまま
+# 残り、ops_check が**毎日** exit 1 して Issue にコメントが積まれる。それは
+# (1) 通知を見なくなる (2) 新しい赤が埋もれる の二重の害があるので、既知の赤は
+# 「宣言済み」として警告に落とす。
+#
+# **`financials` は 2026-09-13 に外した。** writer（`cloud_store/financials.py`）が
+# 出来たので、`jss_financials` が 0 行のままなら**それは本物の赤**である
+# （writer が動いていない・PK 移行が未適用で ON CONFLICT が失敗している等）。
+# 受容したままにすると、実装した writer が黙って死んでいても「受容済み」として
+# 沈黙する。これは潰したかった状態そのもの（11 営業日連続 processed=0 で「成功」）。
+# 移行 + 初回の edinet_daily / tdnet_hourly が回るまでは red が出るが、それは
+# 「まだ入っていない」を正しく報告している。
 #
 # **理由の文字列を必須にしてある**。理由が無い受容は「消音」と区別できず、
 # 誰も外せなくなるため。受容期限（いつまで）は入れない: いつまで受容するかは
 # 投資判断の問題でユーザにしか決められないので、勝手な日付を置くと
 # 「期限が来たのでまた鳴る」だけになる。代わりに**何が決まれば外せるか**を書く。
 ACCEPTED_RED: dict[str, str] = {
-    "financials": (
-        "jss_financials は 0 行（writer 未実装）。EDINET/TDnet の XBRL から"
-        "財務サマリを作る writer をどちらの経路で実装するか（EDINET 正本か"
-        "短信 inline XBRL か）が決まれば外せる"
-    ),
     "yutai_benefits": (
         "実測 81.96 日。優待の一次ソース（みんかぶ）は規約上再取得できず、"
         "kabulab-cf の LLM 推定値が再取得不能な資産として残っている。"

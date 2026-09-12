@@ -47,13 +47,46 @@ CREATE TABLE IF NOT EXISTS jss_raw_files (
 
 # ③財務サマリ。local_store/schema.py の financials と1対1。
 # 年次サマリは disclosure_type='本決算' で PK 先頭から索引で引ける。
+#
+# ## PK に `consolidated` が要る理由（C1 と同じ後勝ちを作らないため）
+#
+# 旧 PK は `(code, fiscal_period_end, disclosure_type)` で `consolidated` が
+# 非キー列だった。決算短信・有報は**同一期末の連結と単体を両方載せる**ので、
+# この PK では後に書いた方が前の行を潰す。それは `core_stock_annual_financials`
+# で現に起きている事故と同じ構造である（Yahoo が連結と単体を混在させ、持株会社
+# 464 銘柄中 296 が自系列内で 10 倍超のスパンを持つ）。連結と単体は同じ期の
+# **別の測定範囲**であって、どちらかが正しいのではなく両方が必要な事実なので、
+# キーで分ける以外に表現する手が無い。`docs/TARGET-ARCHITECTURE.md` §4.2 も
+# あるべきキーに `consolidated` を含めている。
+#
+# ## `consolidated` を NOT NULL にした理由（SQLite の NULL 重複許容）
+#
+# SQLite は **PRIMARY KEY 列に NULL を許す**（INTEGER PRIMARY KEY / WITHOUT ROWID
+# / STRICT / 明示 NOT NULL を除く）。2026-09-13 に sqlite 3.51.0 で実測:
+# nullable な PK 列へ NULL を 2 回 INSERT すると 2 行できてしまい、さらに
+# `ON CONFLICT` は NULL 同士を別物と見るため**衝突せず 3 行目が増える**。
+# つまり nullable のまま PK に足すと、後勝ちを直す代わりに「同じキーの行が
+# 無限に増える」別の静かな事故に化ける（同じ罠は §3.3 の `ir_disclosures`
+# `doc_id IS NULL` でも既に指摘されている）。
+# よって `cloud_store/financials.py` が連結区分を判定できないレコードへ
+# `UNKNOWN_CONSOLIDATED`（'不明'）を明示的に入れる。値の推測ではなく
+# 「判定できなかった」を名前で持つだけなので §3-1 に反しない。
+#
+# ## `accounting_standard` は PK に入れない
+#
+# 会計基準は (銘柄, 期末, 連結区分) に対して通常 1 値で、連結/単体のように
+# 同一開示へ同時に載るものではない。一方で PK に入れると、項目の一部しか
+# 載せない訂正開示で基準が導出できなかったとき（'不明'）**完全な行と別行に
+# 割れて**訂正が本体へ届かなくなる。日本基準 → IFRS の移行期に同一期末が
+# 2 基準で開示されると後勝ちが残るが、その場合は `disclosed_at` ガードにより
+# 新しい開示が勝つので「最新の基準に寄る」という妥当な側へ倒れる。
 _FINANCIALS = """
 CREATE TABLE IF NOT EXISTS jss_financials (
   code                      TEXT NOT NULL,
   fiscal_period_end         TEXT NOT NULL,
   disclosure_type           TEXT NOT NULL,
   stock_id                  INTEGER,
-  consolidated              TEXT,
+  consolidated              TEXT NOT NULL,
   accounting_standard       TEXT,
   net_sales                 REAL,
   operating_income          REAL,
@@ -82,7 +115,7 @@ CREATE TABLE IF NOT EXISTS jss_financials (
   data_date                 TEXT,
   fetched_at                INTEGER NOT NULL,
   quality                   TEXT NOT NULL,
-  PRIMARY KEY (code, fiscal_period_end, disclosure_type)
+  PRIMARY KEY (code, fiscal_period_end, disclosure_type, consolidated)
 )
 """
 
@@ -206,6 +239,20 @@ CREATE TABLE IF NOT EXISTS jss_column_license (
   PRIMARY KEY (table_name, column_name)
 )
 """
+
+# ③財務サマリの PK。`cloud_store/financials.py` の ON CONFLICT はこれを読む。
+#
+# `_FINANCIALS` の DDL 側は同じ内容を**リテラルで別に持つ**（導出にしない）。
+# 片方を導出にすると、定数から 1 要素を削る変異が DDL と ON CONFLICT の両方へ
+# 同時に効いてしまい、テストが追随して検出できなくなる
+# （`cloud_store/core_stocks.py` の `BASE_COLUMNS` と同じ理由）。
+# 2 本が食い違ったら `tests/test_cloud_schema.py` の突き合わせが落ちる。
+FINANCIALS_PK: tuple[str, ...] = (
+    "code",
+    "fiscal_period_end",
+    "disclosure_type",
+    "consolidated",
+)
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     _RAW_FILES,
@@ -410,6 +457,16 @@ def apply_schema(store) -> int:
     """jss_* を冪等に作成する。作成した文の数を返す。
 
     D1 は SQLite なので IF NOT EXISTS が効き、既存データは壊さない。
+
+    **既存テーブルの PK は変えられない。** `CREATE TABLE IF NOT EXISTS` は表が
+    あれば黙って no-op になるので、この関数を流しても本番 `jss_financials` の
+    PK は旧定義（`consolidated` 抜き）のままである。移行は 0 行のうちに
+    `DROP TABLE` + `CREATE TABLE` + 索引再作成を人が打つ必要がある（手順は PR 本文）。
+
+    移行前でも壊れた行が入ることは無い: `cloud_store/financials.py` の
+    `ON CONFLICT (code, fiscal_period_end, disclosure_type, consolidated)` は
+    一致する UNIQUE 制約が無いと D1 がエラーを返すため、writer は**黙って
+    後勝ちする代わりに失敗する**（失敗は cloud_failed に計上され収集は止まらない）。
     """
     for statement in SCHEMA_STATEMENTS:
         store.query(statement.strip())
@@ -464,6 +521,7 @@ def declared_tables() -> frozenset[str]:
 __all__ = [
     "COLUMN_LICENSE_DELETE_SQL",
     "COLUMN_LICENSE_SQL",
+    "FINANCIALS_PK",
     "INDEX_SYMBOLS",
     "INDEX_SYMBOLS_SQL",
     "JSS_TABLES_SQL",

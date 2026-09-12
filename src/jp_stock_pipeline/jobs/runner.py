@@ -159,6 +159,26 @@ class JobContext:
             return None
         return self._mirror(lambda s: s.upsert_xbrl_facts(rows, artifact), "xbrl_facts")
 
+    def cloud_financial_summary(
+        self, record, *, doc_id: str | None, raw_sha256: str | None
+    ) -> bool | None:
+        """③財務サマリを Cloudflare 正本 (D1 jss_financials) へ書く。
+
+        Notion / ローカルとは独立のベストエフォート（`_cloud` が握って
+        cloud_failed に計上する）。移行期間中は Notion とローカルが並行して
+        正本を持つので、ここの失敗で取得単位を落とす必要はない (§3-2)。
+        """
+        if record is None:
+            # ここに None が来るのは呼び出し側のガード漏れ。黙って no-op にすると
+            # 「③ が入らないのに誰も気づかない」に戻るので分かるようにする。
+            raise ValueError("cloud_financial_summary に None を渡している")
+        return self._cloud(
+            lambda c: c.upsert_financial_summary(
+                record, doc_id=doc_id, raw_sha256=raw_sha256
+            ),
+            f"③{doc_id or record.code}",
+        )
+
     def _persist(self, notion_write, local_write, label: str) -> bool:
         """Notion とローカルへ独立に書き、少なくとも一方に残せたかを返す。
 

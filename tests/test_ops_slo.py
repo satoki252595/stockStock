@@ -413,6 +413,15 @@ class TestBusinessDayAging:
 
 
 class TestAcceptedRed:
+    def test_writerができたデータセットは受容から外す(self) -> None:
+        """`financials` の writer（`cloud_store/financials.py`）が出来た。
+
+        受容したままだと「実装済みの writer が動いていない」が受容済みとして
+        沈黙する。受容は「今は直せない」ものに限る。
+        """
+        assert "financials" not in slo.ACCEPTED_RED
+        assert "financials" in slo.SLO_BY_DATASET
+
     def test_受容理由が必須(self) -> None:
         """理由の無い受容は消音と区別できず、誰も外せなくなる。"""
         assert set(slo.ACCEPTED_RED) <= set(slo.SLO_BY_DATASET)
@@ -609,7 +618,14 @@ class TestOpsCheck:
     """判定ジョブ。何も書かず、異常だけを報告する。"""
 
     def _seed_freshness(self, store: _FakeStore, *, overrides=None) -> None:
-        """全 7 データセットを「宣言済みの赤 2 件 + 緑 5 件」で埋める。"""
+        """全 7 データセットを「宣言済みの赤 1 件 + 緑 6 件」で埋める。
+
+        `financials` は writer（`cloud_store/financials.py`）が出来たので
+        `slo.ACCEPTED_RED` から外れた。したがって 0 行はもう「宣言済みの赤」では
+        なく**本物の赤**であり、この土台では緑（行がある状態）に置く。
+        0 行が exit 1 になることは
+        `test_financialsの0行は宣言外の赤としてexit1` が別に固定する。
+        """
         today = _jst_today().isoformat()
         recent = int(datetime.now(UTC).timestamp()) - 3600
         rows = {
@@ -618,10 +634,10 @@ class TestOpsCheck:
             "edinet_documents": (today, 100, recent),
             "jsf_supply": (today, 4351, recent),
             "core_stocks": (None, 4445, recent),
-            "financials": (None, 0, None),  # 宣言済みの赤
+            "financials": (today, 12000, recent),
             "yutai_benefits": (
                 None, 8314, int((datetime.now(UTC) - timedelta(days=82)).timestamp()),
-            ),  # 宣言済みの赤
+            ),  # 宣言済みの赤（一次ソースが再取得不能で直せない）
         }
         rows.update(overrides or {})
         for dataset, (latest, n, epoch) in rows.items():
@@ -739,13 +755,25 @@ class TestOpsCheck:
         _wire(monkeypatch, store, ops_check)
         assert ops_check.main([], env=dict(_D1_ENV)) == 1
 
+    def test_financialsの0行は宣言外の赤としてexit1(self, monkeypatch) -> None:
+        """受容宣言を外した目的そのもの。
+
+        writer が出来た後に `jss_financials` が 0 行なら、writer が動いていない
+        か PK 移行が未適用で ON CONFLICT が失敗している。受容したままだと
+        「実装済みの writer が黙って死んでいる」が沈黙する。
+        """
+        store = _FakeStore()
+        self._seed_freshness(store, overrides={"financials": (None, 0, None)})
+        self._seed_probe_ok(store)
+        _wire(monkeypatch, store, ops_check)
+        assert ops_check.main([], env=dict(_D1_ENV)) == 1
+
     def test_宣言済みが直ったら失敗させない(self, monkeypatch) -> None:
         """「宣言を外せる」は報告するが exit コードは落とさない。"""
         store = _FakeStore()
         self._seed_freshness(
             store,
             overrides={
-                "financials": (_jst_today().isoformat(), 12000, None),
                 "yutai_benefits": (
                     None, 8314, int(datetime.now(UTC).timestamp()) - 3600,
                 ),

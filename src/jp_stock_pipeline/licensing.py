@@ -50,6 +50,17 @@ def source_license(source: Source) -> LicenseTag:
     return SOURCE_LICENSE[source]
 
 
+def strictness_rank(tag: LicenseTag) -> int:
+    """厳しさの順位（大きいほど厳しい）。
+
+    SQL で同じ順序を再現する必要がある場所があるため公開している
+    （`cloud_store/financials.py` は行内の `license_tag` を「厳しい側を残す」
+    でマージする。Python の `inherit()` と同じ順序でなければ、1 つの行の
+    タグが経路によって変わる）。
+    """
+    return _STRICTNESS[tag]
+
+
 def inherit(tags: Iterable[LicenseTag]) -> LicenseTag:
     """入力タグ群から最も厳しいタグを継承する (§2.2 汚染防止ルール)。"""
     tags = list(tags)

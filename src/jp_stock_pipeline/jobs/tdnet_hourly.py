@@ -132,6 +132,11 @@ def _process_financial_xbrl(
         label=f"③{record.doc_id}",
     ):
         raise RuntimeError(f"③ を Notion/ローカル両系統に書けず: {record.doc_id}")
+    # Cloudflare 正本 (D1 jss_financials)。fin is None は上で return 済み。
+    # TDnet 由来なので行の license_tag は factual-cite (§2.1)。
+    ctx.cloud_financial_summary(
+        fin, doc_id=record.doc_id, raw_sha256=artifact.sha256
+    )
 
 
 def _load_map_guarded(loader, label: str) -> tuple[dict[str, str], bool]:
@@ -164,6 +169,19 @@ def execute(ctx: JobContext) -> None:
     for artifact, records, xbrl_urls in batches:
         # 原本必須: Notion⑤/ローカル⑤ の両系統とも失敗時のみ構造化を書かない (§7.1/§3-3)
         raw_page_id = ctx.upload_raw(artifact)
+
+        # ③ の `core_stocks.id` を 1 回でまとめて解決する (§8.3 と同じ考え方)。
+        # 毎時実行は同一日の一覧を丸ごと再処理するので、繁忙日（短信1,000件超）は
+        # per-record SELECT が 1 回の実行で 1,000 往復になり 30 分 cap を脅かす。
+        # 走査行は変わらない（どちらも code の UNIQUE 索引を引いた分だけ）。
+        if ctx.cloud is not None:
+            ctx.cloud.prefetch_stock_ids(
+                [
+                    r.code
+                    for r in apply_limit(records, ctx.args.limit)
+                    if r.code and _has_financial_xbrl(r, xbrl_urls)
+                ]
+            )
 
         for record in apply_limit(records, ctx.args.limit):
             record.provenance.raw_page_id = raw_page_id
@@ -208,7 +226,7 @@ def execute(ctx: JobContext) -> None:
                         record.doc_id, "①ライフサイクル: Notion/ローカル両系統に書けず"
                     )
 
-            if record.doc_type == "短信" and record.has_xbrl and record.doc_id in xbrl_urls:
+            if _has_financial_xbrl(record, xbrl_urls):
                 try:
                     _process_financial_xbrl(
                         ctx, record, xbrl_urls[record.doc_id],
@@ -217,6 +235,18 @@ def execute(ctx: JobContext) -> None:
                 except Exception as exc:
                     # ③ 反映失敗は欠損として記録 (④ は成立済み。ダミーで埋めない §3-1)
                     ctx.add_failure(record.doc_id, f"短信XBRL→③失敗: {exc}")
+
+
+def _has_financial_xbrl(record: DisclosureRecord, xbrl_urls: dict[str, str]) -> bool:
+    """③ へ反映する短信 XBRL を持つ開示か。
+
+    判定を 1 箇所に閉じる。`execute` の事前解決と実処理でこの条件が食い違うと、
+    先に解決したコードと実際に使うコードがずれて per-code SELECT に落ちる
+    （静かに遅くなるだけなので気付けない）。
+    """
+    return bool(
+        record.doc_type == "短信" and record.has_xbrl and record.doc_id in xbrl_urls
+    )
 
 
 def _resolve_master(

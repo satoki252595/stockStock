@@ -66,6 +66,47 @@ class TestSchemaShape:
         assert "parquet_key" in ddl  # 本体は R2 の Parquet
         assert "element" not in ddl  # ファクトの明細列を持たない
 
+    def test_financials_pk_includes_the_consolidation_flag(self):
+        """連結と単体は同一期末の**別の測定範囲**。キーで分けないと後勝ちになる。
+
+        旧 PK は `(code, fiscal_period_end, disclosure_type)` だった。
+        `core_stock_annual_financials` で現に起きている事故（連結と単体の混在で
+        持株会社 464 銘柄中 296 が自系列内 10 倍超スパン）と同じ構造なので、
+        DDL のリテラルをここで固定する。
+        """
+        ddl = next(s for s in S.SCHEMA_STATEMENTS if "jss_financials" in s)
+        assert (
+            "PRIMARY KEY (code, fiscal_period_end, disclosure_type, consolidated)"
+            in ddl
+        )
+
+    def test_financials_pk_constant_matches_the_ddl(self):
+        """`FINANCIALS_PK`（writer が読む）と DDL のリテラルの突き合わせ。
+
+        片方を導出にすると 1 要素を削る変異が両方へ同時に効いて検出できない
+        ので、2 本のリテラルを別に持ってここで比較する。
+        """
+        ddl = next(s for s in S.SCHEMA_STATEMENTS if "jss_financials" in s)
+        m = re.search(r"PRIMARY KEY \(([^)]*)\)", ddl)
+        assert m is not None
+        assert tuple(c.strip() for c in m.group(1).split(",")) == S.FINANCIALS_PK
+
+    def test_financials_pk_columns_are_all_not_null(self):
+        """SQLite は PK 列に NULL を許す（2026-09-13 sqlite 3.51.0 で実測）。
+
+        nullable な列を PK に入れると、NULL 同士が衝突しないため
+        `ON CONFLICT` が当たらず同じキーの行が毎回増える。後勝ちを直した
+        つもりで別の静かな事故に化けるので、PK 列の NOT NULL を固定する。
+        """
+        ddl = next(s for s in S.SCHEMA_STATEMENTS if "jss_financials" in s)
+        for column in S.FINANCIALS_PK:
+            line = next(
+                row
+                for row in ddl.splitlines()
+                if row.strip().startswith(f"{column} ")
+            )
+            assert "NOT NULL" in line, line
+
     def test_supply_latest_is_a_snapshot_keyed_by_code_and_type(self):
         ddl = next(s for s in S.SCHEMA_STATEMENTS if "jss_supply_latest" in s)
         assert "PRIMARY KEY (code, data_type)" in ddl  # 日付は主キーに入らない＝断面

@@ -934,7 +934,7 @@ D4 はその手動同期を 1 回ぶん増やしている。契約ファイル�
 
 旧設計は `operating_income` / `ordinary_income` / `net_income` / `eps` / `bps` / `dps_actual` / `equity_ratio_pct` / `disclosure_type` / `doc_id` / `license_tag` / `src_source` の11列を足して「年次サマリとして完成させる」としていた。**これを行わない。**
 
-理由: 配置表自身がこのテーブルを「×（`jss_financials` からの派生断面）」と分類している。`jss_financials` の PK は `(code, fiscal_period_end, disclosure_type)` なので、年次サマリは `disclosure_type='本決算'` で索引から直接引ける。列を11本足すのは、派生と認めたテーブルを太らせて重複を深める方向。
+理由: 配置表自身がこのテーブルを「×（`jss_financials` からの派生断面）」と分類している。`jss_financials` の PK は `(code, fiscal_period_end, disclosure_type, consolidated)` で先頭 3 列が一致するので、年次サマリは `disclosure_type='本決算'` で索引から直接引ける。列を11本足すのは、派生と認めたテーブルを太らせて重複を深める方向。
 
 **確定仕様**: 既存の `revenue` のみ（15,943行）を**互換目的で維持**する。保持期間は銘柄あたり最新10期（4,445 × 10 = 44,450行）。新規 consumer は `jss_financials` を引く。既存 consumer（`株ラボ-Youtube/data/d1.py` の `annual_revenue()`、`株ラボ-新高値ブレイク検証`、001 の銘柄詳細）を `jss_financials` へ向け終えたら DROP する、を別チケットにする。
 
@@ -1051,7 +1051,7 @@ CREATE TABLE jss_financials (
   fiscal_period_end         TEXT NOT NULL,   -- YYYY-MM-DD
   disclosure_type           TEXT NOT NULL,   -- 本決算/1Q/2Q/3Q/修正/予想
   stock_id                  INTEGER,
-  consolidated              TEXT,
+  consolidated              TEXT NOT NULL,   -- 連結/単体/不明。PK なので NOT NULL
   accounting_standard       TEXT,
   net_sales                 REAL,
   operating_income          REAL,
@@ -1070,13 +1070,19 @@ CREATE TABLE jss_financials (
   data_date      TEXT,
   fetched_at     INTEGER NOT NULL,
   quality        TEXT NOT NULL,
-  PRIMARY KEY (code, fiscal_period_end, disclosure_type)
+  PRIMARY KEY (code, fiscal_period_end, disclosure_type, consolidated)
 );
 CREATE INDEX idx_jss_fin_stock     ON jss_financials(stock_id, fiscal_period_end DESC);
 CREATE INDEX idx_jss_fin_disclosed ON jss_financials(disclosed_at DESC);
 ```
 
-`local_store/schema.py` の `financials` と1対1。年次サマリは `disclosure_type='本決算'` で PK 先頭から索引で引ける（`core_stock_annual_financials` を太らせない根拠）。
+`local_store/schema.py` の `financials` と1対1。年次サマリは `disclosure_type='本決算'` で PK 先頭から索引で引ける（`core_stock_annual_financials` を太らせない根拠）。PK 先頭 3 列は変えていないのでこの根拠は `consolidated` 追加後も成立する。
+
+**PK に `consolidated` を足した（2026-09-13。当時 0 行）**。旧 PK `(code, fiscal_period_end, disclosure_type)` では、決算短信・有報が**同一期末の連結と単体を両方載せる**ため後に書いた方が前を潰す。それは `core_stock_annual_financials` で現に起きている事故（連結と単体の混在で持株会社 464 銘柄中 296 が自系列内 10 倍超スパン）と同じ構造で、writer を作る前に直さないとバグを再生産する。`docs/TARGET-ARCHITECTURE.md` §4.2 のあるべきキーにも `consolidated` が入っている。
+
+同時に `consolidated` を **NOT NULL** にした。SQLite は PK 列に NULL を許し（INTEGER PRIMARY KEY / WITHOUT ROWID / STRICT / 明示 NOT NULL を除く）、`ON CONFLICT` は NULL 同士を別物と見るため、nullable のまま PK に足すと**同じキーの行が毎回増える**（2026-09-13 に sqlite 3.51.0 で実測）。§3.3 の `ir_disclosures` `doc_id IS NULL` と同じ罠。連結区分が判定できないレコードには `cloud_store/financials.py` が `'不明'` を入れる。
+
+`accounting_standard` は PK に入れていない。会計基準は (銘柄, 期末, 連結区分) に対して通常 1 値で、連結/単体のように同一開示へ同時には載らない。一方 PK に入れると、項目の一部しか載せない訂正開示で基準が導出できなかったとき完全な行と別行に割れ、訂正が本体へ届かなくなる。
 
 行数: 年約2万 → 5年10万行。1行 **350 B**。保持: 無期限。
 
@@ -2108,7 +2114,7 @@ read-merge-write（既存 JSON を GET → `date`/`ts`/`d` をキーにした Ma
 
 - `core_stocks` → `ON CONFLICT(code)`。**`id` を SET 句に絶対に入れない**。`TRUNCATE` / `DELETE` / `DROP` を発行しない（**14個**の子テーブル、うち cascade 11 本が消える）
 - `core_stock_financials` → `ON CONFLICT(stock_id)`
-- `jss_financials` → `ON CONFLICT(code, fiscal_period_end, disclosure_type)`
+- `jss_financials` → `ON CONFLICT(code, fiscal_period_end, disclosure_type, consolidated)`。**`SET` 句は `excluded.c` の機械展開にしない**。`edinet_daily` は doc_type_code 120(有報) と 130(訂正有報) の両方を `disclosure_type='本決算'` に落とすので同一 PK に着地し、訂正が載せていない項目を全部 NULL で潰す。値の列は `COALESCE(excluded.c, jss_financials.c)`、`license_tag` は厳しい側を残す `CASE`、上書き可否は `WHERE excluded.disclosed_at >= jss_financials.disclosed_at OR jss_financials.disclosed_at IS NULL` のガード付き（実装は `cloud_store/financials.py`）
 - `jss_raw_files` → `ON CONFLICT(sha256)`
 - `jss_supply_latest` → `ON CONFLICT(code, data_type)`
 - `yutai_benefits` → `ON CONFLICT(stock_id, item_name, record_month)`。保護4列を SET 句から除外
