@@ -40,17 +40,30 @@ personal-only なら害は無いが、`commercial-ok` の孤児が残ると「�
 確かめ、欠けていたら「`apply_schema` を手で流せ」と報告する。ブートストラップ
 （表が無い環境）は 1 回きりの操作なので、日次 cron の仕事ではない。
 
+## 地図の網羅性（行を走査しない形で見る）
+
+本番 30 表 374 列のうち、行タグも列地図も無いのが 22 表 / 256 列だった。
+`cloud_store/governance.TABLE_LICENSE` が表区分を持ち、ここが本番
+`sqlite_master` と突き合わせる。**列名も `sqlite_master.sql` から読む**（30 表に
+`PRAGMA table_info` を投げると往復が 30 回になる）。
+
+全表に `SUM(col IS NOT NULL)` を打って実際の充填を測る案は採らない。
+`ir_disclosures`(37,641) と `yutai_benefits`(8,314) を含めて 1 実行あたり
+**約 6 万行の走査**になり、設計書がまさにその規模の走査を「桁で下げる」対象と
+して挙げているのと正面衝突する。
+
 ## 走査行数（D1 は走査行課金）
 
-1 回の実行で読むのは `sqlite_master` 1 文と、`jss_column_license` /
-`jss_index_symbols` の全行（宣言の件数と同じオーダー = 合計 14 行）だけ。
-実データの表は 1 行も読まない。
+1 回の実行で読むのは `sqlite_master` 2 文（`jss_` の存在確認と全表 DDL）と、
+`jss_column_license` / `jss_index_symbols` の全行（宣言の件数と同じオーダー =
+合計 22 行）だけ。実データの表は 1 行も読まない。
 """
 
 from __future__ import annotations
 
 import logging
 
+from ..cloud_store import governance as G
 from ..cloud_store import schema as S
 from ..cloud_store.d1 import D1Error, D1Store
 from .runner import JobContext, build_parser, main_exit, run_job
@@ -97,6 +110,40 @@ def _check_tables_exist(store: D1Store, ctx: JobContext) -> bool:
         )
         return False
     return True
+
+
+def _check_coverage(store: D1Store, ctx: JobContext) -> None:
+    """本番の (表, 列) が地図に載っているかを見る。**行を 1 行も走査しない。**
+
+    `sqlite_master` 1 文で全表の DDL を取り、列名は DDL から読む。30 表に
+    `PRAGMA table_info` を投げる案は往復が 30 回になるので採らない（SQLite は
+    `ALTER TABLE ADD COLUMN` で保存済みの CREATE TABLE 文を書き換えるので、
+    ALTER で足した列も DDL に出る。`core_stocks` の P4a の 12 列で確認できる）。
+
+    全表に `SUM(col IS NOT NULL)` を打って実際の充填を測る案は採らない。
+    `ir_disclosures`(37,641) と `yutai_benefits`(8,314) を含めて **1 実行あたり
+    約 6 万行の走査**になり、`docs/CF-CANONICAL-DESIGN.md` がまさにその規模の
+    走査を「桁で下げる」対象として挙げているのと正面衝突する。網羅性は
+    「地図に (表, 列) が載っているか」で見れば足り、中身を見る必要が無い。
+    """
+    try:
+        rows = store.query(G.ALL_TABLES_SQL)
+    except D1Error as exc:
+        ctx.add_failure("coverage", f"sqlite_master から表一覧を読めない: {exc}")
+        return
+    observed = {str(r.get("name") or ""): r.get("sql") for r in rows}
+    report = G.coverage(observed)
+    logger.info(
+        "地図の網羅性: 本番 %d 表 / %d 列（宣言 %d 表・列地図 %d 行）",
+        report.tables, report.columns, len(G.TABLE_LICENSE), len(S.column_license_rows()),
+    )
+    for warning in report.warnings:
+        logger.warning("%s", warning)
+    if report.failures:
+        for failure in report.failures:
+            ctx.add_failure("coverage", failure)
+        return
+    ctx.add_success()
 
 
 def _describe(diff: S.ReferenceDiff, table: str) -> list[str]:
@@ -181,7 +228,9 @@ def execute(ctx: JobContext) -> None:
             logger.info("dry-run: jss_column_license へ投入しない行 %s", row)
         for row in S.index_symbol_rows():
             logger.info("dry-run: jss_index_symbols へ投入しない行 %s", row)
-        ctx.add_success()
+        # 網羅性の検査は読み取りだけなので dry-run でも回す
+        # （本番へ触る前に「地図に無い表」を一覧できる唯一の手段）。
+        _check_coverage(store, ctx)
         return
 
     try:
@@ -192,6 +241,7 @@ def execute(ctx: JobContext) -> None:
 
     _sync_column_license(store, ctx)
     _check_index_symbols(store, ctx)
+    _check_coverage(store, ctx)
 
 
 def main(argv: list[str] | None = None, *, env: dict[str, str] | None = None) -> int:

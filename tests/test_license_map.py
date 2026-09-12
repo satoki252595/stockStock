@@ -15,10 +15,14 @@ import sqlite3
 
 import pytest
 
+from jp_stock_pipeline.cloud_store import core_stocks as cs
+from jp_stock_pipeline.cloud_store import governance as G
 from jp_stock_pipeline.cloud_store import schema as S
 from jp_stock_pipeline.cloud_store.d1 import D1Error, D1Store
 from jp_stock_pipeline.config import CloudStoreSettings
 from jp_stock_pipeline.jobs import license_map, runner
+
+from test_core_stocks_migrate import PROD_DDL
 
 _D1_ENV = {
     "NOTION_TOKEN": "dummy-token",
@@ -42,6 +46,18 @@ class _FakeStore(D1Store):
         self.con = sqlite3.connect(":memory:")
         for stmt in S.SCHEMA_STATEMENTS:
             self.con.execute(stmt)
+        # `core_stocks` は本番の実 DDL + P4a の 12 列。地図が本番の 21 列すべてを
+        # 見るので、ここを削ると網羅性の検査が意味を失う。
+        self.con.executescript(PROD_DDL)
+        for stmt in cs.plan_ddl(set(), set()):
+            self.con.execute(stmt)
+        # kabulab-cf 所有の表。**区分の宣言から名前を導いている**（ここに
+        # リテラルで並べると宣言と二重管理になり、どちらが古いか分からなくなる）。
+        # 列の中身は検査が見ないので最小で足りる。
+        for name in sorted(G.TABLE_LICENSE):
+            if name.startswith("jss_") or name in ("core_stocks", "yutai_benefits"):
+                continue
+            self.con.execute(f"CREATE TABLE IF NOT EXISTS {name} (id INTEGER PRIMARY KEY)")
         self.con.commit()
         self.sql_log: list[str] = []
 

@@ -285,6 +285,30 @@ MIXED_LICENSE_COLUMNS: dict[str, dict[str, LicenseTag]] = {
         "sector": LicenseTag.PERSONAL_ONLY,  # kabulab-cf が JPX 33業種を書く既存列
         "sector17": LicenseTag.PERSONAL_ONLY,
         "instrument_type": LicenseTag.PERSONAL_ONLY,
+        # 一次開示で判明したライフサイクル。設計書 §A-1 の追加列表が
+        # commercial-ok と決めている（EDINET・TDnet の開示が一次ソース）。
+        "listing_status": LicenseTag.COMMERCIAL_OK,
+        "listing_date": LicenseTag.COMMERCIAL_OK,
+        "delisting_date": LicenseTag.COMMERCIAL_OK,
+        # 来歴メタ。第三者由来の値を 1 バイトも含まない（どのソースから・いつ
+        # 取ったか、という stockStock 自身の記録）。設計書 §A-1 は「メタ」と
+        # 書いているが、タグは 3 値しかないので最も緩い側で明示する。
+        # **タグは「値が第三者の著作物・データセットを含むか」を答える列**で、
+        # 「公開 API が出すべきか」ではない（後者は API 設計の判断）。
+        "license_tag": LicenseTag.COMMERCIAL_OK,
+        "src_source": LicenseTag.COMMERCIAL_OK,
+        "src_data_date": LicenseTag.COMMERCIAL_OK,
+        "src_fetched_at": LicenseTag.COMMERCIAL_OK,
+        "quality": LicenseTag.COMMERCIAL_OK,
+        # 宣言しない 5 列: `id` / `is_active` / `is_yutai` / `created_at` /
+        # `updated_at`。いずれも kabulab-cf が書く既存列で、タグを決めるには
+        # 派生元の判断が要る（`is_active` は JPX data_j に載っているかで決まる
+        # ので継承すれば personal-only、`is_yutai` は yutai_benefits（みんかぶ）
+        # 由来。ただしどちらも「上場している」「優待がある」という公開の事実
+        # でもあり、EDINET 上場区分から独立に作れる）。**推測で埋めない**
+        # （§3-1）。未宣言の列は「公開してよいと決まっていない」= 公開投影に
+        # 入らないので、漏れる方向には倒れない。`jobs/license_map.py` が
+        # 毎日この 5 列を名前つきで報告する。
     },
 }
 

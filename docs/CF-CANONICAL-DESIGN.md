@@ -1241,6 +1241,20 @@ CREATE TABLE jss_column_license (
 
 行数: 約300。
 
+#### B-10-1. 投入する実行主体と網羅性の検査（2026-09-13 追加）
+
+**投入口は `jobs/license_map.py` だけ。** `cloud_store/schema.seed_reference_tables()` は定義とテストだけがあって `jobs/*.py` からの呼び出しが **0 件**で、本番の 7 行は経路外で一度だけ手で入れられたものだった（= 宣言を直しても実表に届かず、実表を手で直しても宣言に戻らない）。`.github/workflows/ops_check.yml` の第4ステップ（cron `30 14 * * *`）が毎日実行する。新しい cron は足していない。
+
+**upsert は孤児宣言を消さない。** `conflict=(table_name, column_name)` なので宣言から外した列の行が残り続ける。`commercial-ok` の孤児は「公開してよい」と宣言したまま誰も管理していない列になるため、投入後に実表を読み直して孤児をキー指定で削除する。`jss_index_symbols` の孤児は削除しない（`r2_key` が実オブジェクトを指し、`r2.py` に削除 API が無いので回収できない）。
+
+**表の区分は `cloud_store/governance.TABLE_LICENSE`。** 本番 30 表 374 列のうち行タグも列地図も無いのが 22 表 / 256 列（68.4%）で、`license_tag` 列を持つ 8 表のうち行が入って機能していたのは 3 表だけ（`jss_index_symbols` 6 / `jss_raw_files` 150 / `jss_supply_latest` 4,351。`core_stocks.license_tag` は 3,818 行すべて NULL）だった。区分は `column-map` / `row-tag` / `uniform` / `operational` / `unclassified` の 5 つ。
+
+**網羅性の検査は行を 1 行も走査しない。** `sqlite_master` 1 文で全表の DDL を取り、列名は DDL から読む（SQLite は `ALTER TABLE ADD COLUMN` で保存済みの CREATE TABLE 文を書き換えるので、P4a で足した 12 列も DDL に出る）。30 表へ `PRAGMA table_info` を投げる案は往復が 30 回になるので採らない。全表に `SUM(col IS NOT NULL)` を打って実際の充填を測る案は、`ir_disclosures`(37,641) と `yutai_benefits`(8,314) を含めて **1 実行あたり約 6 万行の走査**になり、:1047 が「桁で下げる」と言っている対象と正面衝突するので採らない。
+
+**スナップショットの所有と fail open / closed**: 区分の宣言は **stockStock が所有する**（kabulab-cf にはテストを回す CI が存在せず、乖離を検出できる場所が物理的にこちら側にしか無い）。「宣言に無い表が本番にある」は **warning**（対向リポジトリの migration ごとに毎日赤くなる検査は読まれなくなる。最初の本番実行が名前を出すので追随 PR で登録する）。「宣言にある表が本番から消えた」「行タグ前提の表に `license_tag` 列が無い」「列地図にある列が本番から消えた」「2 つの地図が食い違う」は **failure**。
+
+**未宣言の列の扱い**: 地図は公開できるものの allowlist であって、公開できないものの denylist ではない。宣言が無い列は「公開してよいと決まっていない」= 公開投影に入らないので、報告が warning でも漏れる方向へは倒れない。現在未宣言なのは `core_stocks` の `id` / `is_active` / `is_yutai` / `created_at` / `updated_at` の 5 列で、いずれも kabulab-cf が書く既存列。タグを決めるには派生元の判断が要る（`is_active` は data_j に載っているかで決まるので継承すれば personal-only だが、「上場している」は EDINET 上場区分から独立に作れる公開の事実でもある）ので推測で埋めない（§3-1）。
+
 ---
 
 ### C. D1 に置かないもの（明示）

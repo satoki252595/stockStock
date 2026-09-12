@@ -1,0 +1,149 @@
+{
+  "$schema_note": "D1 の列単位ライセンス地図と表区分の言語横断契約。stockStock (Python) と kabulab_tool_cloudflare (TypeScript) の両リポジトリに同一バイト列で置き、双方のテストがこのファイルを読む。片方だけを直すと相手リポの CI (cross-repo diff ジョブ) が落ちる。",
+  "$source_of_truth": "Python 実装が正本: column_license は src/jp_stock_pipeline/cloud_store/schema.py の MIXED_LICENSE_COLUMNS、table_license は src/jp_stock_pipeline/cloud_store/governance.py の TABLE_LICENSE。D1 の jss_column_license へ投入するのは jobs/license_map.py だけで、実表との突き合わせも同ジョブが毎日行う。",
+  "$undeclared_policy": "列地図に無い列・表区分に無い表は「公開してよいと決まっていない」= 公開投影ビューに入れない。地図は公開できるものの allowlist であって、公開できないものの denylist ではない。",
+  "$tag_semantics": "タグは「その列の値が第三者の著作物・データセットを含むか」を答える。「公開 API が出すべきか」は別の判断（例: core_stocks.id は第三者由来の値を含まないので commercial-ok だが、移行元の PK なので API には出さない）。",
+  "$provenance_note": "core_stocks.sector と core_stocks.sector33 は名前が似ているだけで出所が違う。sector は kabulab-cf src/cron/universe.ts が JPX data_j.xlsx の33業種を書く既存列 (personal-only)。sector33 は stockStock collectors/edinet_codelist.py が EDINET コードリストの「提出者業種」を書く新設列 (commercial-ok)。2 列を 1 列に統合してはいけない（タグの違う値が同居すると列単位で区別できなくなる）。なお sector33 は 2026-09-13 時点で本番 3,818 行すべて NULL なので、公開面の業種を sector から sector33 へ切り替えてよいのは P4b の充填後。",
+  "$kinds": {
+    "row-tag": "行の license_tag 列が正。ソースが行ごとに違う表。",
+    "column-map": "1 行にライセンスが混在する。column_license が正。",
+    "uniform": "表全体が 1 つのタグ。tag がその値。",
+    "operational": "第三者由来の値を含まない運用・観測用の表。",
+    "unclassified": "本番に存在するがタグを決めていない。公開しない扱い。"
+  },
+  "tags": [
+    "commercial-ok",
+    "factual-cite",
+    "personal-only"
+  ],
+  "column_license": {
+    "core_stocks": {
+      "code": "commercial-ok",
+      "delisting_date": "commercial-ok",
+      "edinet_code": "commercial-ok",
+      "instrument_type": "personal-only",
+      "license_tag": "commercial-ok",
+      "listing_date": "commercial-ok",
+      "listing_status": "commercial-ok",
+      "market": "personal-only",
+      "name": "commercial-ok",
+      "quality": "commercial-ok",
+      "sector": "personal-only",
+      "sector17": "personal-only",
+      "sector33": "commercial-ok",
+      "src_data_date": "commercial-ok",
+      "src_fetched_at": "commercial-ok",
+      "src_source": "commercial-ok"
+    }
+  },
+  "table_license": {
+    "core_stock_annual_financials": {
+      "kind": "uniform",
+      "tag": "personal-only"
+    },
+    "core_stock_financials": {
+      "kind": "uniform",
+      "tag": "personal-only"
+    },
+    "core_stocks": {
+      "kind": "column-map",
+      "tag": null
+    },
+    "finmath_daily_ohlcv": {
+      "kind": "uniform",
+      "tag": "personal-only"
+    },
+    "finmath_price_snapshot": {
+      "kind": "uniform",
+      "tag": "personal-only"
+    },
+    "ir_disclosures": {
+      "kind": "uniform",
+      "tag": "factual-cite"
+    },
+    "jss_column_license": {
+      "kind": "operational",
+      "tag": "commercial-ok"
+    },
+    "jss_dataset_freshness": {
+      "kind": "operational",
+      "tag": "commercial-ok"
+    },
+    "jss_financials": {
+      "kind": "row-tag",
+      "tag": null
+    },
+    "jss_index_symbols": {
+      "kind": "row-tag",
+      "tag": null
+    },
+    "jss_job_runs": {
+      "kind": "operational",
+      "tag": "commercial-ok"
+    },
+    "jss_raw_files": {
+      "kind": "row-tag",
+      "tag": null
+    },
+    "jss_supply_latest": {
+      "kind": "row-tag",
+      "tag": null
+    },
+    "jss_writer_claims": {
+      "kind": "operational",
+      "tag": "commercial-ok"
+    },
+    "jss_xbrl_documents": {
+      "kind": "row-tag",
+      "tag": null
+    },
+    "jss_xbrl_elements": {
+      "kind": "uniform",
+      "tag": "commercial-ok"
+    },
+    "otakara_stock_financials": {
+      "kind": "uniform",
+      "tag": "personal-only"
+    },
+    "otakara_stock_scores": {
+      "kind": "uniform",
+      "tag": "personal-only"
+    },
+    "rsi_percentile": {
+      "kind": "uniform",
+      "tag": "personal-only"
+    },
+    "swing_daily_ohlcv": {
+      "kind": "uniform",
+      "tag": "personal-only"
+    },
+    "swing_entry_signals": {
+      "kind": "uniform",
+      "tag": "personal-only"
+    },
+    "swing_stock_indicators": {
+      "kind": "uniform",
+      "tag": "personal-only"
+    },
+    "swing_stock_screening": {
+      "kind": "uniform",
+      "tag": "personal-only"
+    },
+    "yuho_documents": {
+      "kind": "uniform",
+      "tag": "commercial-ok"
+    },
+    "yuho_order_facts": {
+      "kind": "uniform",
+      "tag": "commercial-ok"
+    },
+    "yuho_overseas_facts": {
+      "kind": "uniform",
+      "tag": "commercial-ok"
+    },
+    "yutai_benefits": {
+      "kind": "uniform",
+      "tag": "personal-only"
+    }
+  }
+}

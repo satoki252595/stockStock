@@ -14,6 +14,32 @@
 8. **テストフィクスチャは実レスポンスのみ** (§3-6): 捏造禁止。取得不能（要APIキー等）なら `tests/conftest.py fixture_path()` の skip 機構を使い、`scripts/capture_*.py` に取得スクリプトを置く
 9. **銘柄コード正規化は `contracts/stock_code.py` だけ**（下の「既知例外」2 件を除く。新しい例外を作らない）: 正規表現も 5 文字→4 文字の切り出しも他モジュールに書かない。3 操作（`normalize_stock_code` / `parse_stock_code` / `source_code_to_ticker`）を使い分ける。期待値は共有テストベクタ `tests/fixtures/contracts/stock-code-vectors.json` が正で、kabulab-cf `src/shared/jpx/stock-code.ts` と同一バイト列のファイルを共有する（CI の `cross-repo-contract` ジョブが diff する）
 
+10. **列単位ライセンス地図は `cloud_store/schema.MIXED_LICENSE_COLUMNS` と
+   `cloud_store/governance.TABLE_LICENSE` の 2 つだけ**。地図に無い (表, 列) は
+   「公開してよいと決まっていない」= 公開投影に入れない（allowlist であって
+   denylist ではない）。タグは「値が第三者の著作物・データセットを含むか」を
+   答える列で、「公開 API が出すべきか」とは別（後者は API 設計の判断）。
+   D1 の `jss_column_license` へ投入するのは `jobs/license_map.py` **だけ**で、
+   期待値は共有契約 `tests/fixtures/contracts/d1-license-map.json`（kabulab-cf と
+   同一バイト列。CI の `cross-repo-contract` が diff する）
+
+## 列単位ライセンス地図
+
+| 区分 (`TableKind`) | 判定根拠 | 例 |
+|---|---|---|
+| `column-map` | `MIXED_LICENSE_COLUMNS`（1 行に混在） | `core_stocks` |
+| `row-tag` | 行の `license_tag` 列 | `jss_raw_files` / `jss_supply_latest` |
+| `uniform` | 表全体で 1 タグ | `swing_*` / `yuho_*` / `ir_disclosures` |
+| `operational` | 第三者由来の値を含まない | `jss_job_runs` / `jss_dataset_freshness` |
+| `unclassified` | タグ未決（公開しない扱い） | — |
+
+**`core_stocks.sector` と `core_stocks.sector33` を取り違えないこと。** 名前も値も
+似ているが writer と一次ソースが違うので**タグが逆**になる:
+`sector` = kabulab-cf が JPX `data_j.xlsx` の33業種を書く既存列 → personal-only /
+`sector33` = stockStock が EDINET「提出者業種」を書く新設列 → commercial-ok。
+2 列を 1 列へ統合してはいけない（タグの違う値が同居すると列単位で区別できない）。
+`sector33` は本番で全行 NULL なので、公開面の業種を切り替えるのは P4b の充填後。
+
 ## 銘柄コード契約
 
 | 操作 | 入力 | 出力 | 使う場面 |

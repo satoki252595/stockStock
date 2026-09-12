@@ -40,6 +40,13 @@ ALLOWED: frozenset[str] = frozenset(
         #  MIXED_LICENSE_COLUMNS が正本）。
         # JPX/TDnet/日証金のデータセットの再配布にはあたらないので追跡してよい。
         "tests/fixtures/contracts/stock-code-vectors.json",
+        # D1 の列単位ライセンス地図と表区分の言語横断契約（同上・同一バイト列で共有）。
+        # 収録しているのは**スキーマのメタデータ**（表名・列名・ライセンスタグ）と
+        # 説明文だけで、JPX/日証金/TDnet/みんかぶの**データ値は 1 つも含まない**。
+        # 列名 `market` / `sector` は personal-only 列の**名前**であって値ではない
+        # （名前を伏せると公開面のフィルタを両リポジトリで共有できず、
+        #  地図を 1 つにするという目的自体が達成できない）。
+        "tests/fixtures/contracts/d1-license-map.json",
     }
 )
 
