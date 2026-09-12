@@ -15,3 +15,15 @@
 ライセンス: **personal-only**。taisyaku.jp の利用規約は「私的利用の範囲を超えて利用する
 ことはできず…第三者の利用に供することを固く禁じます」と明文で定めている。公開 API・
 エクスポート・公開 Worker に流さないこと。
+
+## commit しない（重要）
+
+このリポジトリは **PUBLIC** である。personal-only / factual-cite のフィクスチャを
+commit すると、上の表で自ら禁じている「公開・再配布」をリポジトリ自身が行うことに
+なる。2026-09-12 に該当 17 ファイル（約1.5MB）を**履歴ごと除去**した。
+
+- 取得は `uv run --no-sync python scripts/capture_*.py`。手元にだけ置く
+- `.gitignore` が該当拡張子を除外している。`git add -f` で強制追加しないこと
+- 未取得の環境では `tests/conftest.py` の `fixture_path()` が **skip** する
+  （fail ではない）。実測で 707 passed / 100 skipped / 失敗 0
+- commercial-ok の EDINET 原本だけは追跡してよい

@@ -26,3 +26,32 @@ result
 # （実際に 9,518 ファイル・70MB を1度コミットしてしまった）ので、ルートで止める。
 node_modules/
 worker/node_modules/
+
+# ------------------------------------------------------------------
+# 実レスポンスフィクスチャ（取得はするが commit しない）
+#
+# このリポジトリは PUBLIC。personal-only（JPX / 日証金 / yfinance）と
+# factual-cite（TDnet 開示）のフィクスチャを commit すると、各 README が
+# 自ら禁じている「公開・再配布」をリポジトリ自身が行うことになる
+# （2026-09-12 に 17 ファイル・約1.5MB を履歴ごと除去した）。
+#
+# commercial-ok の EDINET と、データを含まない README / .source.txt /
+# エラーレスポンス断片だけを追跡する。
+# 取得は `uv run --no-sync python scripts/capture_*.py`。
+# 未取得の環境では tests/conftest.py の fixture_path() が skip する
+# （実測: 707 passed / 100 skipped / 失敗 0）。
+# ------------------------------------------------------------------
+tests/fixtures/**/*.xls
+tests/fixtures/**/*.xlsx
+tests/fixtures/**/*.csv
+tests/fixtures/**/*.pdf
+tests/fixtures/tdnet/*.zip
+tests/fixtures/tdnet/*.json
+tests/fixtures/tdnet/*.html
+tests/fixtures/convert/yanoshin_tdnet_recent.json
+tests/fixtures/jpx/*.txt
+tests/fixtures/jpx/*.json
+tests/fixtures/transform/*.json
+# EDINET は commercial-ok なので追跡する（上の *.zip 規則の例外）
+!tests/fixtures/edinet/Edinetcode.zip
+!tests/fixtures/edinet/documents_error_401.json
