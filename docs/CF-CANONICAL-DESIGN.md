@@ -693,9 +693,71 @@ R2 のエグレスは無料なので課金は発生しないが、**所要時間
 > P4b で active が膨らむと一括対象外化の上限が **74 件 → 88 件**へ自動的に緩む。
 > 対象外化の候補は実質すべて内国普通株なので、分母だけが増えると防御が弱くなる。
 >
-> **P4b の前提条件として (c)(d) の分母を
-> `is_active=1 AND instrument_type='equity'` に揃える改修が必須**
-> （`tests/test_universe_guards.py` に (c) の発火と (d) の緩みを仕様として固定済み）。
+> **2026-09-12 訂正（D4 実装時）: 「(c)(d) の分母を揃える」は誤り。**
+> 当初ここには「(c)(d) の分母を `is_active=1 AND instrument_type='equity'` に
+> **揃える**」と書いていたが、実装時の反証レビューで (d) がそれでは壊れることが
+> 分かった。(d) の分子 `deactivatedIds` は active **全件**から算出される
+> （`shouldDeactivate` は data_j の全行集合と突き合わせるので ETF や REIT の
+> 上場廃止も候補に入る）。分母だけを equity に絞ると**分子 ⊄ 分母**になり、
+> 「守っている母集団に対する割合」という意味が消える。ETF/ETN/PRO の上場廃止が
+> 月 74 件を超えれば (d) が誤発火し、D4 が直そうとした「毎月止まる」が形を変えて
+> 残る（極端には比率が 1 を超える）。
+>
+> **確定した分母（`cloud_store/universe_guards.py` の実装が正本）**
+>
+> | 条件 | 分子 | 分母 | 移植元から変えたか |
+> |---|---|---|---|
+> | (c) 被覆率 | `isListedEquity` 件数 | `is_active=1 AND instrument_type='equity'` | **変えた** |
+> | (d1) 一括対象外化 | 対象外化候補（全銘柄種別） | `is_active=1`（全件） | 据え置き |
+> | (d2) 一括対象外化（新設） | 対象外化候補のうち `instrument_type='equity'` | `is_active=1 AND instrument_type='equity'` | **新設** |
+>
+> (d) を 1 本のまま分母だけ動かすのではなく **2 本に割る**。(d1) は「銘柄種別を
+> 問わない大量対象外化」（ETF が一斉に消える事故）を、(d2) は「内国普通株の
+> 大量対象外化」を equity 内の比率で拾う。どちらも分子と分母が同じ母集団なので
+> 比率としての意味が壊れず、かつ P4b 後に実効上限が 74 → 88 件へ緩むことも無い。
+>
+> **遷移期（`instrument_type` が全 NULL）の扱い。** 本番 `core_stocks` は P4a の
+> 列追加のみが済んでおり、`instrument_type` は **3,818 行すべて NULL**（充填は
+> P4a の範囲外。語彙が未決）。この状態で equity に絞ると**分母が 0** になる。
+> → equity 件数が `NULL`／`0` のときは「未充填」と判断して**従来の分母
+> （active 全体）へ縮退**する。充填前の active 3,715 件は集合として内国普通株と
+> ほぼ一致する（ETF/ETN/PRO/外国株は P4b で入る +725 行の側にある）ので、
+> 縮退しても意味が変わらない。
+> **かつこの縮退は fail-closed**: 充填せずに P4b を実行すると分母が active 全体の
+> ままなので (c) は 0.833 で発火して止まる。これは誤検知ではなく「充填は P4b の
+> 前提条件」という表明で、`assert_instrument_type_backfilled()` が同じことを
+> 先に原因の言葉で止める。
+>
+> **`instrument_type='equity'` の充填述語は `isListedEquity` と一致させること。**
+> (c) の分子は `isListedEquity`（「内国株式」かつ プライム|スタンダード|グロース
+> かつ 4文字コード）を通った件数。PRO Market の内国株を `equity` に入れると
+> 分母が分子より構造的に大きくなり、(c) が恒久的に 0.98 を割る。
+>
+> （`tests/test_universe_guards.py` に (c) の縮退・(d1)/(d2) の役割分担・
+> 遷移期の挙動を仕様として固定済み。**設計書と食い違っていた「+707 / active
+> 4,422」は 2026-05-31 版の data_j による数字で、テスト側の docstring だけが
+> それを引いていた。基準日ごとに定数を分けて解消した**）
+
+#### 対向改修（kabulab-cf 側。stockStock からは触れない）
+
+D4 を直したのは stockStock の `cloud_store/universe_guards.py` だが、**実際に月次で
+throw するのは kabulab-cf の `src/cron/universe.ts`** であって、stockStock 側には
+まだ呼び出し元が無い。別リポジトリなので stockStock からは変更しない。
+kabulab-cf 側に必要な改修は次の 3 点で、**P4b より前に入れる**。
+
+1. `assertUniverseCoverage` の引数に `existingEquityActiveCount` を足し、(c) の
+   分母をそれに切り替える。`NULL`／`0` は「未充填」として従来の分母へ縮退させる
+   （fail-closed。上の遷移期の節と同じ挙動）
+2. (d) を (d1)/(d2) に割る。(d2) の分子は `deactivatedIds` のうち
+   `instrument_type='equity'` の件数
+3. 分母を数える SELECT を追加する
+   （`SELECT COUNT(*) FROM core_stocks WHERE is_active = 1 AND instrument_type = 'equity'`）
+
+stockStock 側の実装と定数（`MIN_EXISTING_COVERAGE` / `MAX_DEACTIVATION_RATIO`）は
+`universe_guards.py` の行番号つきコメントで手動同期している。**この二重実装自体が
+`docs/TARGET-ARCHITECTURE.md` §「共有の同期」で「やめる」と決めた対象**であり、
+D4 はその手動同期を 1 回ぶん増やしている。契約ファイルからの生成へ移すまでの
+暫定である点を明示しておく。
 
 | 追加列 | 型 | 説明 | ライセンス |
 |---|---|---|---|
