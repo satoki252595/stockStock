@@ -30,6 +30,13 @@ ALLOWED: frozenset[str] = frozenset(
         "tests/fixtures/edinet/documents_error_401.json",
         # 取得失敗時の応答断片。stooq のデータそのものではない
         "tests/fixtures/prices/stooq_challenge_response.html",
+        # 銘柄コード契約の言語横断テストベクタ（kabulab-cf と同一バイト列で共有）。
+        # 取得物ではなく手書きの契約定義で、収録しているのは境界値のコード文字列
+        # （大半は "07203" / "A130" / "1234567" のような合成値）と説明文だけ。
+        # personal-only 列（market / sector17 / sector33 / instrument_type /
+        # license_tag / src_source / quality）の値は 1 つも含まない。
+        # JPX/TDnet/日証金のデータセットの再配布にはあたらないので追跡してよい。
+        "tests/fixtures/contracts/stock-code-vectors.json",
     }
 )
 
