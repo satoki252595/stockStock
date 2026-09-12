@@ -113,6 +113,160 @@ class TestSelectionLogic:
         assert tidy_to_financial_record(tidy_frame([]), "7203", prov()) is None
 
 
+class TestSummaryOfBusinessResultsElements:
+    """EDINET の「主要な経営指標等の推移」由来の要素を拾えること。
+
+    2026-09-12 に手元の EDINET CSV 原本 120 書類で実測したところ、
+    `eps` / `bps` / `equity_ratio_pct` / `dps` は **1件も取れていなかった**
+    （抽出率 0%）。EDINET は当該節の要素に `...SummaryOfBusinessResults`
+    接尾辞を付けるが、候補にそれが1つも無かったため。
+    投資CF も 0% で、原因は綴り違い（EDINET の実名は `Investing` ではなく
+    **`Investment`**）。営業CF・財務CF は 78% 取れていたので気づきにくかった。
+
+    接尾辞つきの要素は Current / Prior1〜4 の **5年度ぶん**が並び、さらに
+    連結と `_NonConsolidatedMember` が両方出る。当期・連結を選べていないと
+    4年前の値や単体の値を静かに拾うので、その選択をここで固定する。
+    （実データのコンテキストを確認して作った構造テスト。値は架空）
+    """
+
+    def _five_years(self, element: str, *, instant: bool) -> list[dict]:
+        """実データと同じ形: 5年度 × (連結 / 単体) を並べる。"""
+        kind = "Instant" if instant else "Duration"
+        rows = []
+        for year, value in ((0, "100"), (1, "91"), (2, "92"), (3, "93"), (4, "94")):
+            prefix = "CurrentYear" if year == 0 else f"Prior{year}Year"
+            dates = (
+                {"instant_date": "2026-03-31", "period_end": "2026-03-31"}
+                if instant
+                else {"period_end": "2026-03-31"}
+            ) if year == 0 else {}
+            rows.append(
+                {
+                    "element": f"jpcrp_cor:{element}",
+                    "context_ref": f"{prefix}{kind}",
+                    "consolidated": "連結",
+                    "value": value,
+                    **dates,
+                }
+            )
+            rows.append(
+                {
+                    "element": f"jpcrp_cor:{element}",
+                    "context_ref": f"{prefix}{kind}_NonConsolidatedMember",
+                    "consolidated": "単体",
+                    "value": f"-{value}",
+                    **dates,
+                }
+            )
+        return rows
+
+    def test_eps_は当期連結を選ぶ(self) -> None:
+        tidy = tidy_frame(
+            self._five_years("BasicEarningsLossPerShareSummaryOfBusinessResults", instant=False)
+        )
+        rec = tidy_to_financial_record(tidy, "7203", prov())
+        assert rec.eps == 100.0
+
+    def test_bps_は当期連結を選ぶ(self) -> None:
+        tidy = tidy_frame(
+            self._five_years("NetAssetsPerShareSummaryOfBusinessResults", instant=True)
+        )
+        rec = tidy_to_financial_record(tidy, "7203", prov())
+        assert rec.bps == 100.0
+
+    def test_自己資本比率は小数を_パーセント_へ換算する(self) -> None:
+        tidy = tidy_frame(
+            [
+                {
+                    "element": "jpcrp_cor:EquityToAssetRatioSummaryOfBusinessResults",
+                    "context_ref": "CurrentYearInstant",
+                    "consolidated": "連結",
+                    "value": "0.725",
+                    "instant_date": "2026-03-31",
+                    "period_end": "2026-03-31",
+                },
+                {
+                    "element": "jpcrp_cor:EquityToAssetRatioSummaryOfBusinessResults",
+                    "context_ref": "Prior4YearInstant",
+                    "consolidated": "連結",
+                    "value": "0.111",
+                },
+            ]
+        )
+        rec = tidy_to_financial_record(tidy, "7203", prov())
+        assert rec.equity_ratio_pct == pytest.approx(72.5)
+
+    def test_投資CF_は_Investment_綴りで拾う(self) -> None:
+        """EDINET の実名は Investing ではなく Investment。"""
+        tidy = tidy_frame(
+            [
+                {
+                    "element": "jppfs_cor:NetCashProvidedByUsedInInvestmentActivities",
+                    "context_ref": "CurrentYearDuration",
+                    "consolidated": "連結",
+                    "value": "-2392000000",
+                    "period_end": "2026-03-31",
+                },
+                {
+                    "element": "jppfs_cor:NetCashProvidedByUsedInInvestmentActivities",
+                    "context_ref": "Prior1YearDuration",
+                    "consolidated": "連結",
+                    "value": "-1",
+                },
+            ]
+        )
+        rec = tidy_to_financial_record(tidy, "7203", prov())
+        assert rec.cf_investing == -2392000000.0
+
+    def test_接尾辞なしの要素を優先する(self) -> None:
+        """本表の値があるなら「主要な経営指標等の推移」より本表を採る。"""
+        tidy = tidy_frame(
+            [
+                {
+                    "element": "tse-ed-t:BasicEarningsPerShare",
+                    "context_ref": "CurrentYearDuration",
+                    "consolidated": "連結",
+                    "value": "37.8",
+                    "period_end": "2026-03-31",
+                },
+                {
+                    "element": "jpcrp_cor:BasicEarningsLossPerShareSummaryOfBusinessResults",
+                    "context_ref": "CurrentYearDuration",
+                    "consolidated": "連結",
+                    "value": "999",
+                },
+            ]
+        )
+        rec = tidy_to_financial_record(tidy, "7203", prov())
+        assert rec.eps == 37.8
+
+    def test_当期が無ければ過去年度で埋めない(self) -> None:
+        """Prior しか無いときに 4 年前の値を拾わないこと（§3-1 推定禁止）。"""
+        tidy = tidy_frame(
+            [
+                # レコード自体は成立させる（当期の売上はある）
+                {
+                    "element": "jppfs_cor:NetSales",
+                    "context_ref": "CurrentYearDuration",
+                    "consolidated": "連結",
+                    "value": "1000",
+                    "period_end": "2026-03-31",
+                },
+                # EPS は前期ぶんしか無い
+                {
+                    "element": "jpcrp_cor:BasicEarningsLossPerShareSummaryOfBusinessResults",
+                    "context_ref": "Prior1YearDuration",
+                    "consolidated": "連結",
+                    "value": "91",
+                },
+            ]
+        )
+        rec = tidy_to_financial_record(tidy, "7203", prov())
+        assert rec is not None
+        assert rec.net_sales == 1000.0
+        assert rec.eps is None
+
+
 class TestDerivations:
     def test_period_end_from_dei(self):
         tidy = tidy_frame([
