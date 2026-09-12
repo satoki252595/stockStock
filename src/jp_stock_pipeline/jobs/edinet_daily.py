@@ -263,14 +263,23 @@ def _process_document(
             disclosure_type="本決算" if doc_type_code in ("120", "130") else None,
             disclosed_at=record.disclosed_at,
         )
-        if fin is not None and not ctx.persist(
-            fin,
-            lambda: upsert.upsert_financial_summary(
-                ctx.client, ctx.settings, fin, master_id
-            ),
-            label=f"③{doc_id}",
-        ):
-            raise RuntimeError(f"③ を Notion/ローカル両系統に書けず: {doc_id}")
+        # `fin is not None` は明示ガードにする。`if fin is not None and not
+        # ctx.persist(...)` の形だと、Cloudflare への書き込みを「raise の次の行」に
+        # 足すと到達不能になり、外側インデントに足すと fin=None を踏む。
+        if fin is not None:
+            if not ctx.persist(
+                fin,
+                lambda: upsert.upsert_financial_summary(
+                    ctx.client, ctx.settings, fin, master_id
+                ),
+                label=f"③{doc_id}",
+            ):
+                raise RuntimeError(f"③ を Notion/ローカル両系統に書けず: {doc_id}")
+            # Cloudflare 正本 (D1 jss_financials)。器だけあって 0 行だった表への
+            # 唯一の writer。⑤原本とは raw_sha256 で結ぶ。
+            ctx.cloud_financial_summary(
+                fin, doc_id=doc_id, raw_sha256=tidy_artifact.sha256
+            )
 
     if tidy_artifact is not None:
         _export_kabumcp_cache(ctx, tidy_artifact, doc_id)
