@@ -142,6 +142,22 @@ class CloudSink:
         return True
 
 
+    def prefetch_stock_ids(self, codes: list[str]) -> int | None:
+        """③ の書込で使う `core_stocks.id` をまとめて先に解決しておく。
+
+        任意の最適化。失敗しても per-code 解決へ落ちるだけなので、ここは
+        例外を外へ出さない（呼び出し側にエラー処理を書かせない）。
+        """
+        if not self.enabled or not self.settings.d1_enabled():
+            return None
+        try:
+            return financials.prefetch_stock_ids(
+                self.d1, codes, cache=self._stock_ids
+            )
+        except D1Error as exc:
+            logger.warning("core_stocks.id の一括解決に失敗（個別解決へ）: %s", exc)
+            return None
+
     def upsert_financial_summary(
         self,
         record: "FinancialSummaryRecord",

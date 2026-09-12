@@ -53,7 +53,7 @@ from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
 from ..licensing import LicenseTag, strictness_rank
-from .d1 import D1Error
+from .d1 import MAX_BOUND_PARAMS, D1Error
 from .schema import FINANCIALS_PK
 
 if TYPE_CHECKING:
@@ -135,6 +135,9 @@ MERGE_COLUMNS: tuple[str, ...] = tuple(
 STOCK_ID_SQL = "SELECT id FROM core_stocks WHERE code = ? LIMIT 1"
 
 COUNT_SQL = f"SELECT COUNT(*) AS n FROM {TABLE}"
+
+# 1 リクエストで引くコード数。バインド上限 100 に少し余裕を残す。
+STOCK_ID_BATCH = 90
 
 
 def _license_rank_sql(expression: str) -> str:
@@ -271,6 +274,48 @@ def resolve_stock_id(
     return stock_id
 
 
+def prefetch_stock_ids(
+    store: "D1Store", codes: list[str], *, cache: dict[str, int | None]
+) -> int:
+    """複数コードの `core_stocks.id` を **1 リクエストにまとめて**解決する。
+
+    往復回数を減らすためだけの最適化で、**走査行は増えない**（`code IN (...)` も
+    `core_stocks_code_unique` の索引エントリ引きなので、引いたコード数と同じ
+    行数しか読まない）。D1 の課金軸は走査行なので、
+    `SELECT id, code FROM core_stocks` を丸ごと読む「全件マップ」は採らない
+    （4,445 行 × 毎時 11 回 = 48,895 行/日 になり、必要なのが 61 件でも払う）。
+
+    `tdnet_hourly` は同一日の一覧を毎時まるごと再処理するので、繁忙日
+    （短信 1,000 件超）の 1 回の実行で per-code SELECT が 1,000 往復になる。
+    本番実測の往復 1 回 ≒ 202 ms（4,755 行を 1 行ずつで約 16 分）だと 3.4 分で、
+    30 分 cap の同ジョブにそのまま乗る。12 リクエストへ畳めば 2.4 秒で済む。
+
+    戻り値は問い合わせたコード数（キャッシュに載っていたものを除く）。
+    """
+    wanted = sorted({c for c in codes if c and c not in cache})
+    if not wanted:
+        return 0
+    for start in range(0, len(wanted), STOCK_ID_BATCH):
+        chunk = wanted[start : start + STOCK_ID_BATCH]
+        if len(chunk) > MAX_BOUND_PARAMS:  # pragma: no cover - 定数で保証済み
+            raise D1Error(f"financials: バインド上限超過 {len(chunk)}")
+        placeholders = ", ".join("?" for _ in chunk)
+        rows = store.query(
+            f"SELECT id, code FROM core_stocks WHERE code IN ({placeholders})",
+            list(chunk),
+        )
+        found = {
+            str(r["code"]): int(r["id"])
+            for r in rows
+            if r.get("id") is not None and r.get("code") is not None
+        }
+        for code in chunk:
+            # 見つからなかったコードも None で覚える。覚えないと per-code SELECT へ
+            # 落ちて、まとめた意味が無くなる（ETF・優先株は実在する）。
+            cache[code] = found.get(code)
+    return len(wanted)
+
+
 def write(store: "D1Store", rows: list[list[Any]]) -> int:
     """行を D1 へ流す。**投げたチャンクの行数**を返す（反映行数ではない）。
 
@@ -317,11 +362,13 @@ __all__ = [
     "LICENSE_COLUMN",
     "MERGE_COLUMNS",
     "OVERWRITE_COLUMNS",
+    "STOCK_ID_BATCH",
     "STOCK_ID_SQL",
     "TABLE",
     "UNKNOWN_CONSOLIDATED",
     "build_upsert_sql",
     "count_rows",
+    "prefetch_stock_ids",
     "record_to_row",
     "resolve_stock_id",
     "write",

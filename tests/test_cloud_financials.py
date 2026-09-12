@@ -532,3 +532,95 @@ class TestDatasetLicenseTag:
             [LicenseTag.COMMERCIAL_OK, LicenseTag.FACTUAL_CITE]
         ).value
         assert source.license_tag == LicenseTag.FACTUAL_CITE.value
+
+
+class TestPrefetchStockIds:
+    """繁忙日の往復回数を削るための一括解決（走査行は増やさない）。"""
+
+    def test_one_request_resolves_many_codes(self) -> None:
+        store = FakeStore()
+        store.con.execute("INSERT INTO core_stocks (id, code) VALUES (12, '6758')")
+        store.con.commit()
+        cache: dict[str, int | None] = {}
+        assert F.prefetch_stock_ids(store, ["7203", "6758"], cache=cache) == 2
+        assert len(store.sqls) == 1
+        assert cache == {"7203": 11, "6758": 12}
+
+    def test_misses_are_cached_so_they_do_not_fall_back_per_code(self) -> None:
+        """覚えないと per-code SELECT へ落ちてまとめた意味が無くなる。"""
+        store = FakeStore()
+        cache: dict[str, int | None] = {}
+        F.prefetch_stock_ids(store, ["1234"], cache=cache)
+        assert cache == {"1234": None}
+        F.resolve_stock_id(store, "1234", cache=cache)
+        assert len(store.sqls) == 1
+
+    def test_already_cached_codes_are_not_queried_again(self) -> None:
+        store = FakeStore()
+        cache: dict[str, int | None] = {"7203": 11}
+        assert F.prefetch_stock_ids(store, ["7203"], cache=cache) == 0
+        assert store.sqls == []
+
+    def test_batches_stay_within_the_bind_limit(self) -> None:
+        store = FakeStore()
+        codes = [f"{1000 + i}" for i in range(200)]
+        cache: dict[str, int | None] = {}
+        assert F.prefetch_stock_ids(store, codes, cache=cache) == 200
+        # 90 件/回 → 200 件は 3 回。1 件ずつなら 200 回だった。
+        assert len(store.sqls) == 3
+        assert len(cache) == 200
+
+    def test_blank_codes_are_dropped(self) -> None:
+        store = FakeStore()
+        cache: dict[str, int | None] = {}
+        assert F.prefetch_stock_ids(store, ["", None], cache=cache) == 0
+        assert store.sqls == []
+
+    def test_full_table_map_is_not_used(self) -> None:
+        """`SELECT id, code FROM core_stocks` は 4,445 行を毎回読む。
+
+        D1 の課金軸は走査行なので、必要なのが 61 件でも全件マップは高くつく。
+        """
+        store = FakeStore()
+        cache: dict[str, int | None] = {}
+        F.prefetch_stock_ids(store, ["7203"], cache=cache)
+        assert "WHERE code IN (?)" in store.sqls[0]
+
+
+class TestTdnetFinancialPredicate:
+    """事前解決と実処理が同じ条件を見ていること。
+
+    食い違うと「先に解決したコード」と「実際に使うコード」がずれ、per-code
+    SELECT に落ちる。静かに遅くなるだけなので気付けない。
+    """
+
+    def _record(self, **kw):
+        from jp_stock_pipeline.models import DisclosureRecord
+
+        prov = Provenance(
+            source=Source.TDNET,
+            license_tag=LicenseTag.FACTUAL_CITE,
+            data_date=date(2026, 6, 25),
+            fetched_at=datetime(2026, 6, 25, tzinfo=JST),
+        )
+        base = dict(
+            doc_id="D1",
+            title="2026年3月期 決算短信",
+            disclosed_at=datetime(2026, 6, 25, 15, 0, tzinfo=JST),
+            code="7203",
+            doc_type="短信",
+            source_url="https://example/d",
+            has_xbrl=True,
+            provenance=prov,
+        )
+        base.update(kw)
+        return DisclosureRecord(**base)
+
+    def test_matches_only_tanshin_with_a_reachable_xbrl(self) -> None:
+        from jp_stock_pipeline.jobs.tdnet_hourly import _has_financial_xbrl
+
+        urls = {"D1": "https://example/x.zip"}
+        assert _has_financial_xbrl(self._record(), urls) is True
+        assert _has_financial_xbrl(self._record(doc_type="決算説明資料"), urls) is False
+        assert _has_financial_xbrl(self._record(has_xbrl=False), urls) is False
+        assert _has_financial_xbrl(self._record(), {}) is False
