@@ -12,7 +12,7 @@
 6. **変換は値不変** (§5.2): 型変換・縦持ち化・文字コード正規化のみ。値の修正・丸め・補完禁止
 7. **dry-run** (§3-6): 全ジョブは `--dry-run` で Notion に書き込まずに動作する
 8. **テストフィクスチャは実レスポンスのみ** (§3-6): 捏造禁止。取得不能（要APIキー等）なら `tests/conftest.py fixture_path()` の skip 機構を使い、`scripts/capture_*.py` に取得スクリプトを置く
-9. **銘柄コード正規化は `contracts/stock_code.py` だけ**: 正規表現も 5 文字→4 文字の切り出しもモジュール内に書かない。3 操作（`normalize_stock_code` / `parse_stock_code` / `source_code_to_ticker`）を使い分ける。期待値は共有テストベクタ `tests/fixtures/contracts/stock-code-vectors.json` が正で、kabulab-cf `src/shared/jpx/stock-code.ts` と同一バイト列のファイルを共有する（CI の `cross-repo-contract` ジョブが diff する）
+9. **銘柄コード正規化は `contracts/stock_code.py` だけ**（下の「既知例外」2 件を除く。新しい例外を作らない）: 正規表現も 5 文字→4 文字の切り出しも他モジュールに書かない。3 操作（`normalize_stock_code` / `parse_stock_code` / `source_code_to_ticker`）を使い分ける。期待値は共有テストベクタ `tests/fixtures/contracts/stock-code-vectors.json` が正で、kabulab-cf `src/shared/jpx/stock-code.ts` と同一バイト列のファイルを共有する（CI の `cross-repo-contract` ジョブが diff する）
 
 ## 銘柄コード契約
 
@@ -32,6 +32,27 @@
 `"2593"` 同社普通株。本番に両方が実在する）。TDnet は実測で全件末尾 `"0"`
 だが、**EDINET については末尾 `"0"` 限定の実測根拠が無い**（生 `secCode` を
 保存する表が無く分布が取れない）。
+
+### 既知例外（レビュー時に見つかった未解決分）
+
+この 2 系統は正準実装へ寄せていない。**寄せ忘れではなく、寄せられない/寄せると
+壊れる理由がある。** 不変条件9 を読んで「もう 1 箇所も無い」と思わないこと。
+
+1. **`worker/src/shared/routes.ts` の `isValidCode`**（公開 API / MCP の入力検証）。
+   worker は別言語・別ビルドで Python を import できないため、正規表現リテラルを
+   持つしかない。代わりに `worker/test/stock-code-contract.test.ts` が共有テスト
+   ベクタの `canonical_regex` と**リテラルを直接突合**して固定する。
+   ここは**正規化しない**（URL パスがキャッシュキー・D1 述語になる面なので、
+   表記揺れを吸収すると同じ銘柄に複数の URL ができる）。
+2. **`collectors/jpx_margin.py` の `parse_margin_text`**（と kabulab-cf
+   `services/vwap-analysis/lib/margin.ts` の `parseMarginText`）。JPX 信用残 PDF の
+   5 文字コードを `[:4]` / `.slice(0, 4)` で**無条件に切っている**＝本 PR が
+   「取り違え」と呼んだ規則そのものが残っている。`source_code_to_ticker` に
+   寄せなかった理由: 信用銘柄には ETF/REIT が含まれ、これらの検査文字は `"0"` で
+   ない可能性が高い（TDnet では ETF `1671` が `"16714"`）。末尾 `"0"` 限定に
+   すると正当な行を大量に落としうるため、**実 PDF で検査文字の分布を測るまで
+   触らない**。フィクスチャは規約上コミットできず該当テストは常時 skip なので、
+   回帰検知はゼロのまま。種類株が信用残に現れれば同じ取り違えが起きる。
 
 ## コアモジュール（実装済み・変更時は要注意）
 

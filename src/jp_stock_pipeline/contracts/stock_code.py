@@ -43,10 +43,26 @@ import re
 # 両言語で固定するため (`\d` は Python では Unicode 数字も拾うため意味も違う)。
 STOCK_CODE_RE = re.compile(r"^[0-9]{3}[0-9A-Z]$")
 
-# 全角英数字 (U+FF10-FF19 / U+FF21-FF3A / U+FF41-FF5A) → 半角のオフセット。
+# 全角英数字 → 半角のオフセットと、変換対象の 3 レンジ。
+# TypeScript 側の正規表現リテラル `/[０-９Ａ-Ｚａ-ｚ]/g` と**同じ文字集合**にする。
+# 以前は U+FF10-U+FF5A を 1 本の連続範囲で変換していたため、レンジの隙間にある
+# 全角記号 (U+FF1A-U+FF20 の `：；＜＝＞？＠` 等) まで半角化し、同じ入力で
+# normalize の答えが TS と割れていた (実測: "７２０３：" → Python "7203:" /
+# TS "7203："). 妥当性判定は両者 None なので今日は無害だが、normalize の出力は
+# kabulab-cf 側で core_stocks に書く値そのもの。
 _FULLWIDTH_OFFSET = 0xFEE0
-_FULLWIDTH_START = "０"
-_FULLWIDTH_END = "ｚ"
+_FULLWIDTH_ALNUM_RE = re.compile(r"[\uff10-\uff19\uff21-\uff3a\uff41-\uff5a]")
+
+# JS の `String.prototype.trim()` が落とす文字集合 (WhiteSpace ∪ LineTerminator)。
+# Python の `str.strip()` の既定はこれと一致しない: U+FEFF (BOM) を落とさず、
+# 逆に U+001C-U+001F / U+0085 を落とす。UTF-8-sig の CSV 先頭セルには BOM が
+# 実際に付くので、既定のままでは同じ入力で TS が "7203" を、Python が None を
+# 返す (= 片方だけ銘柄を取りこぼす) 割れになる。明示集合で揃える。
+_JS_TRIM_CHARS = (
+    "\t\n\v\f\r \u00a0\u1680"
+    + "".join(chr(c) for c in range(0x2000, 0x200B))  # U+2000-U+200A (Zs)
+    + "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
 
 # 取込ソース (TDnet company_code / EDINET secCode) の 5 文字形式で受理する検査文字。
 SOURCE_CHECK_CHAR = "0"
@@ -65,12 +81,9 @@ def normalize_stock_code(code: str | None) -> str:
     """
     if code is None:
         return ""
-    text = str(code).strip()
-    half = "".join(
-        chr(ord(ch) - _FULLWIDTH_OFFSET)
-        if _FULLWIDTH_START <= ch <= _FULLWIDTH_END
-        else ch
-        for ch in text
+    text = str(code).strip(_JS_TRIM_CHARS)
+    half = _FULLWIDTH_ALNUM_RE.sub(
+        lambda m: chr(ord(m.group(0)) - _FULLWIDTH_OFFSET), text
     )
     return half.upper()
 

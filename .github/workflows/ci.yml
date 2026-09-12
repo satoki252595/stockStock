@@ -67,6 +67,9 @@ jobs:
   #  - しない: ベクタに無い入力での一致。実装の等価性そのものではない。
   #  - しない: 相手リポに変更を強制すること。片側でベクタを変えるともう片側の
   #    CI が赤くなる（意図した結合）が、赤いまま main にマージする権限は残る。
+  #  - する: 相手リポからベクタが消えたら落ちること。相手ファイル不在で緑に
+  #    なるのは**自 main にもまだベクタが無い移行期だけ**に限っている
+  #    （無条件に通すと、相手がファイルを消した瞬間に突合が緑のまま無効化される）。
   cross-repo-contract:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -79,14 +82,29 @@ jobs:
           path: .peer-kabulab-cf
           persist-credentials: false
       - name: 共有テストベクタを突合
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
         run: |
           set -euo pipefail
           MINE=tests/fixtures/contracts/stock-code-vectors.json
           PEER=.peer-kabulab-cf/tests/fixtures/contracts/stock-code-vectors.json
           test -f "$MINE" || { echo "::error::$MINE が無い"; exit 1; }
           if [ ! -f "$PEER" ]; then
-            # 2 リポへ同時に入れる移行期は、相手の main に届くまでここを通す。
-            # 相手側が入ったら未検出ではなく必ず diff されるようになる。
+            # 移行期の例外はここだけ。**自リポの main にまだベクタが無い間**に
+            # 限って通す。両リポへ入り終わった後 (= 自 main にファイルがある) の
+            # 相手側の欠落は「導入途中」ではなく「共有の破棄」なので必ず落とす。
+            # 無条件に exit 0 にすると、相手がファイルを移動・改名した瞬間に
+            # この突合が「緑のまま無効化」され、乖離検出を謳ったジョブが
+            # 何も見ていない状態になる。
+            if ! git fetch --depth=1 origin "$DEFAULT_BRANCH" >/dev/null 2>&1; then
+              echo "::error::自リポ $DEFAULT_BRANCH を取得できず、移行期か共有破棄かを判別できない。"
+              exit 1
+            fi
+            if git cat-file -e "FETCH_HEAD:$MINE" 2>/dev/null; then
+              echo "::error::自リポ $DEFAULT_BRANCH には $MINE があるのに相手リポに無い。"
+              echo "::error::共有テストベクタの片側削除・移動を疑うこと（移行期の猶予は既に終了している）。"
+              exit 1
+            fi
             echo "::warning::相手リポに $PEER が無い（両リポへの導入が完了していない）。突合をスキップ。"
             exit 0
           fi

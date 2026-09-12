@@ -105,6 +105,22 @@
       "note": "末尾空白は trim。本番データに空白入りは0件 (with_space=0)。"
     },
     {
+      "id": "bom-prefixed",
+      "input": "\ufeff7203",
+      "normalize": "7203",
+      "parse": "7203",
+      "source_to_ticker": "7203",
+      "note": "先頭 BOM (U+FEFF)。UTF-8-sig の CSV 先頭セルには実際に付く。JS の trim() は U+FEFF を落とすが Python の str.strip() は落とさないため、ここを固定しないと同じ入力で TS が \"7203\"・Python が null に割れる (実測)。Python 側は JS の trim 集合を明示して揃えている。"
+    },
+    {
+      "id": "fullwidth-punctuation-gap",
+      "input": "７２０３：",
+      "normalize": "7203：",
+      "parse": null,
+      "source_to_ticker": null,
+      "note": "半角化するのは全角英数字の 3 レンジ (FF10-FF19 / FF21-FF3A / FF41-FF5A) だけで、その隙間の全角記号 (FF1A-FF20 の ：；＜＝＞？＠ 等) は変換しない。Python 側が FF10-FF5A を 1 本の連続範囲で変換していたため \"7203:\" を返して TS と割れていた (実測)。妥当性判定は両言語とも null なので今日は無害だが、normalize の出力は kabulab-cf 側で core_stocks に書く値そのもの。"
+    },
+    {
       "id": "alpha-first",
       "input": "A130",
       "normalize": "A130",

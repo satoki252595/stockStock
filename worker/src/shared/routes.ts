@@ -17,9 +17,23 @@ export function parseLimit(raw: string | undefined, fallback = 100): number {
   return Math.min(n, MAX_LIMIT);
 }
 
-/** 4桁の銘柄コードだけ受ける。索引が効かない述語を外から作らせない。 */
+/**
+ * 4文字の銘柄コードだけ受ける。索引が効かない述語を外から作らせない。
+ *
+ * パターンは銘柄コード契約の正準形 (docs/CONTRACTS.md 不変条件9)。worker は
+ * 別言語・別ビルドなので `contracts/stock_code.py` を import できないため、
+ * **共有テストベクタの `canonical_regex` と一致しているか**を
+ * `worker/test/stock-code-contract.test.ts` が固定している。
+ *
+ * 以前は `/^[0-9A-Z]{4}$/` で、1-3 桁目の英字 (`A130` / `ABCD`) まで通していた。
+ * JPX の付番体系に無い形なので、索引は引けても必ず 0 件になる述語を公開 API が
+ * 受けていたことになる。正準形へ寄せて 400 で返す。
+ *
+ * 正規化 (小文字化・全角半角) は**しない**: URL パスをそのままキャッシュキー・
+ * D1 述語に使う面なので、表記揺れを吸収すると同じ銘柄に複数の URL ができる。
+ */
 export function isValidCode(code: string): boolean {
-  return /^[0-9A-Z]{4}$/.test(code);
+  return /^[0-9]{3}[0-9A-Z]$/.test(code);
 }
 
 /**
