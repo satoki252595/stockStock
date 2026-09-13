@@ -5,6 +5,11 @@ on:
   schedule:
     - cron: "0 12 * * 1-5"
   workflow_dispatch:
+    inputs:
+      date:
+        description: "対象日 YYYY-MM-DD。空なら定期実行と同じく当日"
+        required: false
+        default: ""
 
 concurrency:
   group: edinet_daily
@@ -41,7 +46,17 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
-        run: nix develop -c uv run python -m jp_stock_pipeline.jobs.edinet_daily
+          # 手動実行で日付を指定したときだけ使う。inputs をシェルへ直接展開しない
+          # （値は環境変数で渡し、下で形式を検査する）。定期実行では空。
+          TARGET_DATE: ${{ inputs.date }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "${TARGET_DATE:-}" ]; then
+            [[ "$TARGET_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "::error::date は YYYY-MM-DD で指定する"; exit 1; }
+            args=(--date "$TARGET_DATE")
+          fi
+          nix develop -c uv run python -m jp_stock_pipeline.jobs.edinet_daily "${args[@]}"
 
       # 失敗に気づく唯一の経路。これまで 14 workflow に `if: failure()` も
       # webhook も 0 行で、EDINET が 11 営業日空振りしても、JPX の 404 で
