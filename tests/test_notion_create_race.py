@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import copy
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -509,3 +509,40 @@ class TestRequestCount:
         assert page_id.startswith("dry-run-")
         assert len(queries) == 1  # 作成前の検索だけ
         assert [op.op for op in dry_client.ops] == ["create_page"]
+
+
+class TestDisclosureMapWindowIsJstDay:
+    """④ の事前マップの窓が JST の 1 日であること（#13 の重複の 95% の原因）。"""
+
+    def _window(self, day):
+        captured = {}
+
+        class _Cap:
+            def query_database(self, _db_id, filter=None, **_kw):
+                captured["filter"] = filter
+                return []
+
+        upsert.load_disclosure_page_map(_Cap(), settings(), disclosed_date=day)
+        conds = captured["filter"]["and"]
+        return (
+            datetime.fromisoformat(conds[0]["date"]["on_or_after"]),
+            datetime.fromisoformat(conds[1]["date"]["before"]),
+        )
+
+    def test_9時前の開示が窓に入る(self) -> None:
+        """JST 08:00 の開示は UTC では前日 23:00。日付だけの境界だと漏れていた。"""
+        start, end = self._window(date(2026, 9, 11))
+        early = datetime(2026, 9, 11, 8, 0, tzinfo=JST)
+        assert start <= early < end
+
+    def test_境界にオフセットが付いている(self) -> None:
+        """日付だけの文字列は Notion が UTC の 0 時として比べるので渡さない。"""
+        start, end = self._window(date(2026, 9, 11))
+        assert start.utcoffset() == timedelta(hours=9)
+        assert end.utcoffset() == timedelta(hours=9)
+        assert end - start == timedelta(days=1)
+
+    def test_前日の深夜と翌日の0時は窓の外(self) -> None:
+        start, end = self._window(date(2026, 9, 11))
+        assert not (start <= datetime(2026, 9, 10, 23, 59, tzinfo=JST) < end)
+        assert not (start <= datetime(2026, 9, 12, 0, 0, tzinfo=JST) < end)

@@ -717,8 +717,8 @@ class TestDisclosurePrefetch:
         assert captured["db_id"] == "db-disc"
         # 半開区間 [2026-06-28, 2026-06-29)
         conds = captured["filter"]["and"]
-        assert conds[0] == {"property": S.DISC_PROP_DISCLOSED_AT, "date": {"on_or_after": "2026-06-28"}}
-        assert conds[1] == {"property": S.DISC_PROP_DISCLOSED_AT, "date": {"before": "2026-06-29"}}
+        assert conds[0] == {"property": S.DISC_PROP_DISCLOSED_AT, "date": {"on_or_after": "2026-06-28T00:00:00+09:00"}}
+        assert conds[1] == {"property": S.DISC_PROP_DISCLOSED_AT, "date": {"before": "2026-06-29T00:00:00+09:00"}}
 
     def test_load_disclosure_page_map_no_date_sends_no_filter(self):
         settings = make_settings()

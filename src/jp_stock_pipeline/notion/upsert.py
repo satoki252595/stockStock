@@ -26,6 +26,7 @@ from datetime import date, datetime, timedelta
 
 from ..config import Settings
 from ..models import (
+    JST,
     DisclosureRecord,
     FinancialSummaryRecord,
     PriceTechnicalRecord,
@@ -720,13 +721,30 @@ def load_price_page_map(client: NotionClient, settings: Settings) -> dict[str, s
     return _oldest_page_ids(pages, code_of)
 
 
+def _jst_day_start(day: date) -> str:
+    """JST のその日の 0:00 を、オフセット付きの ISO 8601 で返す（④ の事前マップの窓の境界）。
+
+    ④ の開示日時は `2026-09-11T08:00:00+09:00` のように JST のオフセット付きで入る。
+    ここへ日付だけ（`"2026-09-11"`）を渡すと、Notion はそれを **UTC の 0:00** として
+    比べるので、**JST 0:00〜9:00 の開示が前日扱いになって窓から漏れる**。一方の呼び出し側は
+    `record.disclosed_at.date()`（JST の日付）で「窓の内側」と判定して `page_resolved=True`
+    を立てるので、マップに無い = 新規とみなして**検索せずに create する**。毎時の
+    `tdnet_hourly` がその日に走るたびに 1 ページずつ増えていた。
+
+    2026-09-13 の読み取り専用監査で、④ の重複 423 docID / 余分 1,312 行のうち
+    366 docID / 1,253 行（95%）がこの形（実行ごとに 30 分以上あけて増える、開示日時は
+    JST 08:00 / 08:30 など 9 時前）だった。同じ分に 2 ページできる競合・再送型は 40 行。
+    """
+    return datetime(day.year, day.month, day.day, tzinfo=JST).isoformat()
+
+
 def load_disclosure_page_map(
     client: NotionClient, settings: Settings, *, disclosed_date: date | None = None
 ) -> dict[str, str]:
     """④ の {書類管理番号(docID): page_id} を一括取得する (§8.3 per-record 検索排除)。
 
     ④ は無制限に増える追記型のため、disclosed_date を渡して **その日の開示のみ** に
-    絞る（[d, d+1) の半開区間。DISC_PROP_DISCLOSED_AT は date 型）。開示ジョブは対象日の
+    絞る（JST の [d 0:00, d+1 0:00) の半開区間。境界の理由は `_jst_day_start`）。開示ジョブは対象日の
     一覧を処理し doc_id は開示日に生成されるので、その日のウィンドウに対象 doc_id の
     既存行が必ず入る＝date-scoped でも create/update を取り違えない。呼び出し側は
     record.disclosed_at.date() が disclosed_date と一致するレコードにのみ page_resolved を
@@ -738,8 +756,8 @@ def load_disclosure_page_map(
         nxt = disclosed_date + timedelta(days=1)
         flt = {
             "and": [
-                {"property": S.DISC_PROP_DISCLOSED_AT, "date": {"on_or_after": disclosed_date.isoformat()}},
-                {"property": S.DISC_PROP_DISCLOSED_AT, "date": {"before": nxt.isoformat()}},
+                {"property": S.DISC_PROP_DISCLOSED_AT, "date": {"on_or_after": _jst_day_start(disclosed_date)}},
+                {"property": S.DISC_PROP_DISCLOSED_AT, "date": {"before": _jst_day_start(nxt)}},
             ]
         }
     pages = client.query_database(settings.db_id("disclosures"), filter=flt)
