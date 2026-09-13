@@ -653,8 +653,8 @@ class TestPrefetchedPageMap:
             c, "db-master", {"k": 1}, {"p": 1}, existing_page_id=None, page_resolved=True
         )
         assert pid == "created-1"
-        assert ("query", "db-master") not in c.calls  # 未収録キーは検索せず create
-        assert ("create", "db-master") in c.calls
+        # 未収録キーは作成前に検索せず create する。作成後の 1 回は重複の再確認 (#13)
+        assert c.calls == [("create", "db-master"), ("query", "db-master")]
 
     def test_unresolved_falls_back_to_query(self):
         # page_resolved=False（マップ取得失敗の degrade）→ 従来どおり per-record 検索
@@ -717,8 +717,8 @@ class TestDisclosurePrefetch:
         assert captured["db_id"] == "db-disc"
         # 半開区間 [2026-06-28, 2026-06-29)
         conds = captured["filter"]["and"]
-        assert conds[0] == {"property": S.DISC_PROP_DISCLOSED_AT, "date": {"on_or_after": "2026-06-28"}}
-        assert conds[1] == {"property": S.DISC_PROP_DISCLOSED_AT, "date": {"before": "2026-06-29"}}
+        assert conds[0] == {"property": S.DISC_PROP_DISCLOSED_AT, "date": {"on_or_after": "2026-06-28T00:00:00+09:00"}}
+        assert conds[1] == {"property": S.DISC_PROP_DISCLOSED_AT, "date": {"before": "2026-06-29T00:00:00+09:00"}}
 
     def test_load_disclosure_page_map_no_date_sends_no_filter(self):
         settings = make_settings()
