@@ -420,13 +420,24 @@ def run_financials(client: NotionClient, settings: Settings, apply: bool, limit:
         [{"property": S.FIN_PROP_DISCLOSURE_TYPE, "select": {"equals": DISCLOSURE_TYPE_SECOND_QUARTER}}],
         S.FIN_PROP_PERIOD_END, windows,
     )
+    # Notion は存在しない select の選択肢でフィルタすると 400 を返す（2026-09-13 に本番の
+    # dry-run で実測: 'select option "中間" not found'）。選択肢がまだ無ければ「中間」の行も
+    # 無いので、検索せず衝突 0 として扱う。
+    interim_exists = DISCLOSURE_TYPE_INTERIM in option_names(
+        client.retrieve_database(db_id), S.FIN_PROP_DISCLOSURE_TYPE
+    )
     interim = scan_windows(
         client, db_id,
         [{"property": S.FIN_PROP_DISCLOSURE_TYPE, "select": {"equals": DISCLOSURE_TYPE_INTERIM}}],
         S.FIN_PROP_PERIOD_END, windows,
-    )
+    ) if interim_exists else {}
     plan = plan_financials(second_quarter.values(), interim.values())
-    report: dict = {"counts": plan.counts, "conflicts": plan.conflicts[:50]}
+    report: dict = {"counts": plan.counts, "conflicts": plan.conflicts[:50],
+                    "interim_option_exists": interim_exists}
+    if apply and not interim_exists:
+        raise MigrationError(
+            "③「開示種別」に選択肢「中間」が無い。先に --target options --apply を流す"
+        )
     # 連結区分のキー (B): 書き手が採用するので書き換えない。数えるだけ。
     try:
         empty = client.query_database(
@@ -455,6 +466,10 @@ def run_disclosures(client: NotionClient, settings: Settings, apply: bool, limit
         client, db_id, base, S.DISC_PROP_DISCLOSED_AT, year_windows(DISC_SCAN_START, DISC_SCAN_END)
     )
     plan = plan_disclosures(pages.values())
+    if apply and DOC_TYPE_HALFYEAR not in option_names(
+        client.retrieve_database(db_id), S.DISC_PROP_DOC_TYPE
+    ):
+        raise MigrationError("④「書類種別」に選択肢「半期報告」が無い。先に --target options --apply を流す")
     report: dict = {"counts": plan.counts,
                     "estimated_minutes": round(len(plan.updates) / settings.notion_rps / 60, 1)}
     if apply:

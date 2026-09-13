@@ -240,3 +240,51 @@ class TestScanWindows:
             (date(2024, 6, 30), date(2025, 1, 1)),
             (date(2025, 1, 1), date(2026, 1, 1)),
         ]
+
+
+class _FinClient:
+    """③ の読み取りだけを持つフェイク。存在しない選択肢のフィルタは Notion と同じく失敗させる。"""
+
+    def __init__(self, options, pages):
+        self.options, self.pages, self.updates = options, pages, []
+
+    def retrieve_database(self, db_id):
+        return {"properties": {S.FIN_PROP_DISCLOSURE_TYPE: {"type": "select", "select": {
+            "options": [{"id": n, "name": n} for n in self.options]}}}}
+
+    def query_database(self, db_id, *, filter, strict):
+        conds = filter["and"] if "and" in filter else [filter]
+        for cond in conds:
+            name = (cond.get("select") or {}).get("equals")
+            if name is not None and name not in self.options:
+                raise RuntimeError(f'select option "{name}" not found')
+        wanted = next((c["select"]["equals"] for c in conds
+                       if c.get("property") == S.FIN_PROP_DISCLOSURE_TYPE), None)
+        if wanted is None:
+            return []
+        start = conds[-2]["date"]["on_or_after"]
+        end = conds[-1]["date"]["before"]
+        return [p for p in self.pages
+                if p["properties"][S.FIN_PROP_DISCLOSURE_TYPE]["select"]["name"] == wanted
+                and start <= p["properties"][S.FIN_PROP_PERIOD_END]["date"]["start"] < end]
+
+    def update_page(self, page_id, properties):
+        self.updates.append(page_id)
+
+
+class TestRunFinancialsBeforeOptionsExist:
+    SETTINGS = type("S", (), {"notion_rps": 2.5, "db_id": staticmethod(lambda key: "db-fin")})()
+
+    def test_dry_run_works_without_the_interim_option(self, mig):
+        client = _FinClient(["本決算", "2Q"], [fin_page("a", "2Q", "2025-09-30")])
+        report = mig.run_financials(client, self.SETTINGS, apply=False, limit=None)
+        assert report["counts"]["updates"] == 1
+        assert report["interim_option_exists"] is False
+        assert client.updates == []
+
+    def test_apply_refuses_until_the_option_exists(self, mig):
+        client = _FinClient(["本決算", "2Q"], [fin_page("a", "2Q", "2025-09-30")])
+        with pytest.raises(mig.MigrationError, match="options"):
+            mig.run_financials(client, self.SETTINGS, apply=True, limit=None)
+        assert client.updates == []
+
