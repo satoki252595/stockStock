@@ -16,7 +16,8 @@
 | 6 | **kabulab-cf `/otakara-yutai` の掲載文（description）を公開面から外す** |
 | 7 | vwap リポジトリはアーカイブ（実施済み: vwap `79642b6`） |
 | 8 | 全面正本化は「stockStock が同等以上を書けるようになってから writer を切り替える」段階を踏む |
-| 9 | **（2026-09-13）日次取込（kabulab-cf `src/cron/daily.ts`）と、それを読む公開面の母集団を `is_active=1 AND instrument_type='equity'` に絞る**（kabulab-cf PR #30）。公開面に ETF / REIT / 出資証券を出さないのは**ユーザー未回答の暫定前提**（「残る判断事項」を参照）。+725 行の INSERT は P5 完了後・P6 直前のまま動かさない（§2.1） |
+| 9 | **（2026-09-13）日次取込（kabulab-cf `src/cron/daily.ts`）と、それを読む公開面の母集団を `is_active=1 AND instrument_type='equity'` に絞る**（kabulab-cf PR #30。2026-09-13 マージ済み）。**公開面に ETF / REIT / 出資証券を出さない**（2026-09-13 にユーザーが承認した決定）。+725 行（非普通株 9 行の削除後の再計測では +734）の INSERT は P5 完了後・P6 直前のまま動かさない（§2.1） |
+| 10 | **（2026-09-13）非普通株 9 銘柄（`reit_fund` 8 / `investment_certificate` 1）の kabulab-cf D1 の行を、元データから削除した**（2026-09-13 18:33 UTC に実行）。`core_stocks` 9 行と、子表 15 表（行があったのは 13 表）の 1,049 行、計 1,058 行。退避は git 管理外。範囲外として残したのは `jss_*` / Notion / R2。ユーザーの指示の文言は「元データから削除しましょう」。コード指定の詳細ページは 404 になる（P4b「副作用の明示」、承認 A27） |
 
 ## 確定した前提（2026-09-11 追記・本文の U1/U2 を解決）
 
@@ -1369,7 +1370,7 @@ D1 の課金軸は**走査行数**で `LIMIT` では下がらない。自由な 
 | `jss_index_symbols` / `jss_dataset_freshness` / `jss_writer_claims` / `jss_column_license` | 約350 | — | 2.0 MB |
 | **合計** | | | **約500 MB** |
 
-> 注（2026-09-13）: `core_stock_financials` と `swing_stock_indicators` を日次で書く対象は `is_active=1 AND instrument_type='equity'` の行だけになった（約 3,700 行。kabulab-cf PR #30。止まった旧行は消さずに残る）。上表の 4,445 は安全側の上限として残す。
+> 注（2026-09-13）: `core_stock_financials` と `swing_stock_indicators` を日次で書く対象は `is_active=1 AND instrument_type='equity'` の行だけになった（約 3,700 行。kabulab-cf PR #30。非普通株 9 銘柄の行は 2026-09-13 に削除した（決定 10）。上場廃止などで対象外になった行は残る）。上表の 4,445 は安全側の上限として残す。
 
 | プラン | 1DB上限 | 5年後の占有 | 判定 |
 |---|---|---:|---|
@@ -1874,7 +1875,9 @@ stockStock 側の UPSERT は `SET` 句を**ホワイトリストで列挙**す�
 
 **母集団拡張は2段に割る（重要）。** `core_stocks` を 3,818→4,543 に拡張した直後から、kabulab-cf の `daily.ts` が `is_active=true` の全件を処理対象にする。つまり切替が済んでいない状態で **725件**が**旧 writer**の処理対象に入り、yfinance 取得と D1 rows written が約1.19倍、PER/PBR/ROE を持たない 725行が `core_stock_financials` と `swing_stock_indicators` に NULL で積まれる。
 
-→ **第1段: `instrument_type` 列の追加と既存行への充填**。列の追加は P4a（2026-09-12）で行った。値の充填は 2026-09-13 に kabulab-cf #27 が `src/cron/universe.ts` で行った（語彙は 6 語: `equity` / `foreign` / `pro_market` / `etf_etn` / `reit_fund` / `investment_certificate`。既存 active 行のうち非普通株の 9 行にも区分どおりの語が入った）。**第2段: +725行の INSERT を、R2 `daily/` の writer 交代の直前に行う。** これとは別に、kabulab-cf の `daily.ts` の対象を `is_active=1 AND instrument_type='equity'` に絞る改修を第2段より先に入れた（kabulab-cf PR #30）。このため第2段の INSERT で旧 writer の処理対象は増えない（§2.1）。
+→ **第1段: `instrument_type` 列の追加と既存行への充填**。列の追加は P4a（2026-09-12）で行った。値の充填は 2026-09-13 に kabulab-cf #27 が `src/cron/universe.ts` で行った（語彙は 6 語: `equity` / `foreign` / `pro_market` / `etf_etn` / `reit_fund` / `investment_certificate`。既存 active 行のうち非普通株の 9 行にも区分どおりの語が入った。この 9 行は同日 18:33 UTC に、ユーザーの指示で子表の行ごと削除した。決定 10）。**第2段: +725行（削除後の再計測では +734）の INSERT を、R2 `daily/` の writer 交代の直前に行う。** これとは別に、kabulab-cf の `daily.ts` の対象を `is_active=1 AND instrument_type='equity'` に絞る改修を第2段より先に入れた（kabulab-cf PR #30）。このため第2段の INSERT で旧 writer の処理対象は増えない（§2.1）。
+
+> 注（2026-09-14）: 725 / 4,543 は、非普通株 9 行が `core_stocks` にある状態（2026-09-12、total 3,818）で測った値。削除後の `core_stocks`（total 3,810 / active 3,700）と data_j（基準日 2026-08-31）の集合差は INSERT **734**・P4b 後の総数 **4,544** で、上の「約1.19倍」は (3,700 + 734) / 3,700 = 1.198 になる（結論は変わらない）。P4b の実施時に集合差を測り直す（P4b 節）。
 
 #### 2.2 `prices_daily` — 毎営業日 19:30 JST（`cron: "30 10 * * 1-5"` 現行維持）
 
@@ -1907,7 +1910,7 @@ stockStock 側の UPSERT は `SET` 句を**ホワイトリストで列挙**す�
 11. Notion ② upsert（ベストエフォート）
 ```
 
-**手順 1 で母集団を 2 つに分ける理由（2026-09-13）**: kabulab-cf の日次取込と公開面の一覧は、PR #30 で `is_active=1 AND instrument_type='equity'` に絞った。R2 `daily/` と同じ全種別の母集団で D1 の断面も書くと、P6 で D1 の断面がまた ETF / REIT に広がる。R2 `daily/` は外部読者のために ETF 1321 などを含む全種別が要る（P6「母集団の罠」）。D1 の断面は、公開面が普通株だけを読む前提なので equity だけでよい。
+**手順 1 で母集団を 2 つに分ける理由（2026-09-13）**: kabulab-cf の日次取込と公開面の一覧は、PR #30 で `is_active=1 AND instrument_type='equity'` に絞った。R2 `daily/` と同じ全種別の母集団で D1 の断面も書くと、P6 で D1 の断面がまた ETF / REIT に広がる。R2 `daily/` は外部読者のために ETF を含む全種別が要る（P6「母集団の罠」）。D1 の断面は、公開面が普通株だけを読む前提なので equity だけでよい。
 
 **なぜ `period` を単純に `3mo` へ落としてはいけないか（実コード根拠）**: `transform/technicals.py` は `sma75` に75本、`sma200` に200本、`week52_high/low` に `span_days >= _WEEK52_CALENDAR_DAYS(364)`（暦日）を要求し、満たさなければ `None` を返す。`3mo` ≒ 62営業日 / 92暦日なので、**D1 に足す `sma200` / `week52_high` / `week52_low` と既存 `sma75` が全4,445銘柄で恒久的に NULL になる**。さらに `has_probable_split` の既定 `lookback=_WEEK52_TRADING_DAYS(260)` の窓が62本に縮み、3ヶ月より古い分割を永久に検出できなくなるため、「分割検出時のみ `Ticker.splits` を叩く」設計そのものが機能せず `splits` 配列が固定化する。転送量が 1/8 になるのは事実だが、②断面の半分と分割検出を代償にする。
 
@@ -2341,7 +2344,7 @@ converted CSV を600件サンプルした平均は 1,061行/doc・359 KB/doc。3
 | 7 | `yutai_monthly` に D1 書込を追加（保護列のテストを先に書く） | 保護4列が変化しないことを SELECT で確認 |
 | 8 | `master_sync` に data_j.xlsx + `instrument_type`（列追加のみ）+ **4条件ガード** | dry-run で `instrument_type` 別件数を `stocks.json` と突合。ガードの発火テスト |
 | 9 | `prices_daily`: 履歴子DB廃止 + R2 merge 経路 + マージ後系列でのテクニカル計算 + D1 断面 | **既存 `daily/{code}.json` を1件も壊さない**（GET→書き戻しの往復テスト）。sma75/sma200/week52 が NULL にならないこと |
-| 10 | `master_sync` の母集団 **+725件** INSERT（**9 の直前**） | 日次取込と読み手が active かつ equity に絞られていること（kabulab-cf PR #30） |
+| 10 | `master_sync` の母集団 **+725件**（非普通株 9 行の削除後の再計測では +734。実施時に測り直す）INSERT（**9 の直前**） | 日次取込と読み手が active かつ equity に絞られていること（kabulab-cf PR #30）。取込の code→id も同じ母集団に絞られていること（kabulab-cf PR #31） |
 | 11 | `export_weekly` の入力を R2 `daily/` へ、トラックAを D1 へ | 生成 Parquet の行数・期間が従来と一致 |
 | 12 | `edinet_daily` / `tdnet_hourly` に R2 原本 + `jss_*`。TDnet PDF 取得を追加 | `jss_raw_files` と R2 の突合 |
 | 13 | `reconcile_weekly` を整合チェックへ改修 | 意図的に不整合を作って検出できるか |
@@ -2862,11 +2865,11 @@ kabulab-cf の日次 cron は「①マスタの active 全件」を処理対象�
 > **2026-09-13 決着: 答えは「両方」。** 当初は「INSERT を P6 直前に置く」か「kabulab-cf の処理対象を絞る」かの二択として、どちらを採るかは実装時に決めてよいとしていた。実際には両方を採る。
 >
 > - **絞り込みは今入れた**（kabulab-cf PR #30）。日次取込と、それを読む公開面の母集団を `is_active=1 AND instrument_type='equity'` にした
-> - **+725 行の INSERT は P5 完了後・P6 直前のまま**（P4b 節）
+> - **+725 行（削除後の再計測では +734）の INSERT は P5 完了後・P6 直前のまま**（P4b 節）
 >
-> 前提になる `instrument_type` の充填は、2026-09-13 に kabulab-cf #27 が `src/cron/universe.ts` で済ませた。語彙は 6 語（`equity` / `foreign` / `pro_market` / `etf_etn` / `reit_fund` / `investment_certificate`。正本は kabulab-cf `src/shared/jpx/instrument-type.ts`）で、同日の月次同期の後、active 行の NULL は 0。本番の active 3,709 行の内訳は `equity` 3,700 / `reit_fund` 8 / `investment_certificate` 1（8421 信金中央金庫）。
+> 前提になる `instrument_type` の充填は、2026-09-13 に kabulab-cf #27 が `src/cron/universe.ts` で済ませた。語彙は 6 語（`equity` / `foreign` / `pro_market` / `etf_etn` / `reit_fund` / `investment_certificate`。正本は kabulab-cf `src/shared/jpx/instrument-type.ts`）で、同日の月次同期の後、active 行の NULL は 0。本番の active 3,709 行の内訳は `equity` 3,700 / `reit_fund` 8 / `investment_certificate` 1 だった。非普通株の 9 行は同日 18:33 UTC に、ユーザーの指示で子表の行ごと削除した（決定 10）。削除後の `core_stocks` は total 3,810 / active 3,700（すべて `equity`）/ inactive 110。
 >
-> 倍率の基準は **(active 3,709 + 725) / 3,709 = 1.195**。上の「約1.19倍」はこの値を指す。絞り込みが入っていれば、P4b の INSERT で日次取込の対象と公開面の件数は増えない。増えるのは、`is_active` の索引を外側のループに使うクエリが読む索引の項目だけ（約 +19.5%）。
+> 倍率の基準は **(active 3,709 + 725) / 3,709 = 1.195**。上の「約1.19倍」はこの値を指す。削除後の数字では **(3,700 + 734) / 3,700 = 1.198** で、結論は変わらない（725 / 4,543 は非普通株 9 行が `core_stocks` にある状態で測った値。削除後の集合差は INSERT 734・総数 4,544。P4b の実施時に測り直す）。絞り込みが入っていれば、P4b の INSERT で日次取込の対象と公開面の件数は増えない。増えるのは、`is_active` の索引を外側のループに使うクエリが読む索引の項目だけ（約 +19.5%）。
 
 ---
 
@@ -3208,22 +3211,20 @@ kabulab-cf の日次 cron は断面テーブルと同時に RSI パーセンタ�
 
 **母集団（2026-09-13 追記。kabulab-cf PR #30 の絞り込みを受けて）**
 
-旧 writer（kabulab-cf `daily.ts`）が `core_stock_financials` を書く母集団は `is_active=1 AND instrument_type='equity'` になった。非普通株 9 行（`reit_fund` 8 / `investment_certificate` 1）の断面は `data_date` 2026-09-11 のまま止まる。新 writer と G-fin はこれに合わせる。
+旧 writer（kabulab-cf `daily.ts`）が `core_stock_financials` を書く母集団は `is_active=1 AND instrument_type='equity'` になった。非普通株 9 行（`reit_fund` 8 / `investment_certificate` 1）は、止まった行として残るのではなく、2026-09-13 18:33 UTC に `core_stocks` ごと削除した（決定 10。`core_stock_financials` の 9 行も子表として一緒に消えた）。新 writer と G-fin はこれに合わせる。
 
 1. **新 writer が D1 断面を書く母集団は active かつ equity とする。** 旧 writer と母集団が違うと、G-fin-2 の分子と分母が別の集合になる
-2. **G-fin-1 の呼び出しは基準日の組を必須にし、比べる集合は equity に限る。** 基準日を渡さないと、09-11 のまま止まった非普通株の旧行と新 writer の値を比べて誤って落ちる
-3. **G-fin-2 の分母は「旧 writer が当日の `data_date` で書いた equity の行数」とする。** 表の総行数 3,764 ではない。3,764 には止まった行が含まれるので、それを分母にすると構造的に 99.5% に届かない。2026-09-13 の実測（SELECT のみ、rows_read 11,347）では、3,764 行の内訳は次のとおり:
+2. **G-fin-1 の呼び出しは基準日の組を必須にし、比べる集合は equity に限る。** 基準日を渡さないと、止まった旧行（上場廃止や月次同期で対象外になった行）と新 writer の値を比べて誤って落ちる
+3. **G-fin-2 の分母は「旧 writer が当日の `data_date` で書いた equity の行数」とする。** 表の総行数 3,755 ではない。総行数には止まった行が含まれるので、それを分母にすると構造的に 99.5% に届かない。非普通株 9 行の削除後の実測（2026-09-14、SELECT のみ、rows_read 11,265）では、3,755 行の内訳は次のとおり:
 
    | `is_active` | `instrument_type` | `data_date` | 行数 |
    |---|---|---|---:|
    | 1 | `equity` | 2026-09-11 | 3,699 |
-   | 1 | `reit_fund` | 2026-09-11 | 8 |
-   | 1 | `investment_certificate` | 2026-09-11 | 1 |
    | 0 | NULL | 〜2026-08-07（上場廃止で止まった行） | 49 |
    | 0 | NULL | 2026-09-11（09-13 の月次同期で対象外化） | 7 |
 
-   絞り込みの後も旧 writer が書き続けるのは equity の約 3,700 行で、残りの 65 行（49 + 7 + 9）は止まる
-4. **新 writer の対象コード解決（EDINET コードリスト由来）には、8421 などの非普通株が入る。** D1 断面を書く前に `core_stocks` の `is_active=1 AND instrument_type='equity'` で絞る
+   旧 writer が書き続けるのは equity の約 3,700 行で、止まった行は 56 行（上場廃止 49 + 09-13 の月次同期で対象外になった 7）。削除前の 2026-09-13 の実測（rows_read 11,347）は 3,764 行で、差の 9 行は削除した非普通株の断面（`reit_fund` 8 / `investment_certificate` 1）
+4. **新 writer の対象コード解決（EDINET コードリスト由来）には、非普通株が入る。** 削除した 9 銘柄は今は `core_stocks` に無いが、P4b で別の id の行として戻る。D1 断面を書く前に `core_stocks` の `is_active=1 AND instrument_type='equity'` で絞る
 
 ---
 
@@ -3245,13 +3246,27 @@ kabulab-cf の日次 cron は断面テーブルと同時に RSI パーセンタ�
 > **どの基準日の data_j で測ったかを必ず併記すること。** 基準日が変われば
 > 数字も変わる（2026-05-31 版では 707 / 80 / 4,525 だった）。余剰 109 行の扱い
 > （残す / `is_active=0` にする / 最新 data_j で自然解消を待つ）は P4b の設計時に決める。
+>
+> **2026-09-14 追記（非普通株 9 行の削除後）**: 上の 725 / 4,543 は、非普通株 9 行が
+> `core_stocks` にある状態で測った値。2026-09-13 18:33 UTC にこの 9 行を削除したので
+> （決定 10）、削除後の `core_stocks`（total 3,810 / active 3,700）と同じ data_j
+> （基準日 2026-08-31）の集合差は **INSERT 734・P4b 後の総数 4,544** になる。
+> P4b の実施時に、そのときの data_j と `core_stocks` で集合差を測り直す。
 
 P5 完了後、P6 の直前に実施する（§2.1）。
 
 - 銘柄種別（`equity` / `foreign` / `pro_market` / `etf_etn` / `reit_fund` / `investment_certificate`。語彙の正本は kabulab-cf `src/shared/jpx/instrument-type.ts`）を持つ行を足し、母集団を 4,445 にする。既存行への充填は 2026-09-13 に kabulab-cf #27 で済んでいる。
 - これは P6 で「stockStock の母集団で日足を上書きして ETF を更新停止させる」事故を**型で防ぐ**ための前提。
-- **副作用の明示**（2026-09-13 改訂）: ~~001/003/004/005 の一覧件数が +725行になる~~ → **公開面の件数は変わらない。** kabulab-cf PR #30 で、日次取込と公開面の一覧の母集団を `is_active=1 AND instrument_type='equity'` に絞った。そのため +725 行はどの一覧にも出ない。これは「公開面に ETF / REIT / 出資証券を出さない」という**ユーザー未回答の暫定前提**に依存する（「残る判断事項」）。002 も同じ述語に揃えたので、優待のある J-REIT 8 件と 8421 は、P4b を待たずに（kabulab-cf PR #30 のマージ時点で）一覧から消える。ETF/REIT/PRO に PER/PBR/ROE が存在しない問題（「欠損」ではなく「対象外」として扱う値が品質区分に無い）は、断面に非普通株を入れないので当面は表に出ない。公開面に出すと決めたときに再検討する。
-- ~~kabulab-cf の日次 cron が拡張母集団を掴む副作用（取得 1.16倍・NULL 行の積み上がり）を受け入れるか、処理対象を内国普通株に絞る改修を同時に入れるかを選ぶ。~~ → **2026-09-13 決着: 絞る。** 絞り込みは P4b に先立って kabulab-cf PR #30 で入れた（§2.1）。「1.16倍」は古い +627 基準の数字なので取り消す。+725 基準の倍率は (active 3,709 + 725) / 3,709 = 1.195 だが、絞り込みの後は日次取込の対象が増えないので、この増分は発生しない。
+- **削除した非普通株 9 銘柄のコードは P4b で戻す**（2026-09-14 追記）。9 コードは data_j に載っているので、P4b の INSERT で**別の id** の行として戻る。除外はしない。P6 のガード（「対象コード集合 ⊇ R2 に既に存在する日足キー集合」）と R2 `daily/` の母集団（`stocks.json`）が、全種別を `core_stocks` に戻すことを前提にしているため。除外するなら P6 ガードか `stocks.json` の設計変更が要り、今回の範囲外。戻った行は `instrument_type` が `equity` ではないので、日次取込にも公開面にも出ない（決定 9）。
+- **前提作業: kabulab-cf PR #31**（取込の code→id を active かつ equity に絞る。優待の取込で `core_stocks` に行を足さない。2026-09-14 時点で未マージ）。これが無いと、P4b で `core_stocks` に入った ETF 等と戻った 9 コードについて、TDnet 開示・EDINET 有報の取込が自動で始まる。
+- **`core_stocks_migrate --state-dump` は削除後に取る。** `--compare-to` に渡す適用前の状態は、削除後の `core_stocks`（total 3,810 / active 3,700）でなければならない。削除前の状態を基準にすると、削除した 9 行が P4b の差分に混ざる。
+- **`jss_financials` で `stock_id` が NULL の行の再解決を検討する。** `cloud_store/financials.resolve_stock_id` は、コードが `core_stocks` に無ければ `stock_id` を NULL にして書く。P4b より前に書いた行のうち、削除した 9 コードや ETF 等の行は NULL のまま残り、P4b で `core_stocks` に行が入っても自動では埋まらない。P4b の後に code から id を引き直すかを決める。
+- **副作用の明示**（2026-09-13 改訂・2026-09-14 追記）: ~~001/003/004/005 の一覧件数が +725行になる~~ → **公開面の件数は変わらない。** kabulab-cf PR #30 で、日次取込と公開面の一覧の母集団を `is_active=1 AND instrument_type='equity'` に絞った。そのため P4b で INSERT する行はどの一覧にも出ない。「公開面に ETF / REIT / 出資証券を出さない」は、2026-09-13 にユーザーが承認した決定（決定 9）。
+  - 002 も同じ述語に揃えたので、優待のある非普通株 9 件（`reit_fund` 8 / `investment_certificate` 1）は、P4b を待たずに（kabulab-cf PR #30 のマージ時点で）一覧から消えた。
+  - さらにこの 9 件は、ユーザーの指示で元データからも削除した（決定 10、2026-09-13 18:33 UTC、承認 A27）。コード指定の詳細ページは 404 になる。ir-catalog の TDnet 開示 108 件も、一覧・検索・詳細から消えた。
+  - **P4b で 9 コードが別の id で戻っても、優待・過去の開示・有報は戻らない。** 子表の行は削除済みで、新しい id には紐づかない（退避は git 管理外。「残るリスクと未確認事項」E）。
+  - ETF/REIT/PRO に PER/PBR/ROE が存在しない問題（「欠損」ではなく「対象外」として扱う値が品質区分に無い）は、断面に非普通株を入れないので当面は表に出ない。公開面に出す方針に変えたときに再検討する。
+- ~~kabulab-cf の日次 cron が拡張母集団を掴む副作用（取得 1.16倍・NULL 行の積み上がり）を受け入れるか、処理対象を内国普通株に絞る改修を同時に入れるかを選ぶ。~~ → **2026-09-13 決着: 絞る。** 絞り込みは P4b に先立って kabulab-cf PR #30 で入れた（§2.1）。「1.16倍」は古い +627 基準の数字なので取り消す。+725 基準の倍率は (active 3,709 + 725) / 3,709 = 1.195（非普通株 9 行の削除後の数字では (3,700 + 734) / 3,700 = 1.198）だが、絞り込みの後は日次取込の対象が増えないので、この増分は発生しない。
 
 ---
 
@@ -3281,7 +3296,7 @@ P5 完了後、P6 の直前に実施する（§2.1）。
 → P4b 完了を前提に、**書く前に「対象コード集合 ⊇ R2 に既に存在する日足キー集合」を検査し、満たさなければ1件も書かずに異常終了**する。
 
 > **2026-09-13 追記（kabulab-cf PR #30 の絞り込みとの関係）**
-> - 現行の R2 `daily/` は、kabulab-cf の vwap-ingest が `stocks.json` から書く**別の経路**で、`core_stocks` を読む日次取込（`daily.ts`）とは関係しない。今回の絞り込みの影響を受けないので、ETF 1321 の更新も G-daily-4 もそのまま成り立つ
+> - 現行の R2 `daily/` は、kabulab-cf の vwap-ingest が `stocks.json` から書く**別の経路**で、`core_stocks` を読む日次取込（`daily.ts`）とは関係しない。今回の絞り込みの影響を受けないので、ETF の更新も G-daily-4 もそのまま成り立つ
 > - 新 writer では、R2 `daily/` の PUT は全種別、**D1 断面への upsert は `is_active=1 AND instrument_type='equity'` に限る**（§2.2 の確定処理順 手順 1）。同じ母集団で両方を書くと、P6 で D1 の断面がまた ETF / REIT に広がる
 
 **検証（shadow 200件・全銘柄種別を網羅）**
@@ -3497,7 +3512,7 @@ D1 の内訳で従来試算とのずれが大きい2点: 原本索引は R2 キ�
 | A9 | P4a | ①マスタへの列追加と既存3,818行への銘柄種別充填（列追加は P4a で済。**銘柄種別の充填は kabulab-cf #27 で済**） | 可逆 |
 | A10 | P5 | ②断面の writer 切替 | 可逆 |
 | A11 | P5 | kabulab-cf 日次 cron の**部分停止改修**（分割フラグの追加。P5 のブロッカー） | 可逆 |
-| A12 | P4b | **+725行 INSERT**。前提として kabulab-cf の絞り込み改修（A26）が入っているので、公開面の件数と旧 writer の処理対象は変わらない | 可逆 |
+| A12 | P4b | **+725行 INSERT**（削除後の再計測では +734。実施時に測り直す）。前提として kabulab-cf の絞り込み改修（A26）が入っているので、公開面の件数と旧 writer の処理対象は変わらない | 可逆 |
 | A13 | P6 | per-code 日足の writer 切替（外部読者2つが直読） | 可逆 |
 | A14 | P6 | kabulab-cf の日足/5分足の cron 分離改修と日足 cron 停止 | 可逆 |
 | A15 | P6/S5 | 007 の信用残 API を per-code 読みへ変更（互換シム廃止の前提） | 可逆 |
@@ -3511,7 +3526,8 @@ D1 の内訳で従来試算とのずれが大きい2点: 原本索引は R2 キ�
 | A23 | PX | vwap リポジトリの Archived 化 + ユニバース再生成の停止（**参照切りが先**） | 可逆 |
 | A24 | S1 前 | **既存公開 API の personal-only 無認証配布の是正**（認証を掛ける / 内部ホストへ移す） | 可逆 |
 | A25 | S1 | 公開 API / 公開面を立ち上げるという意思決定 | 可逆 |
-| A26 | P4b 前 | kabulab-cf の日次取込と読み手を普通株に絞る（お宝優待から J-REIT 8 件と 8421 が消える。kabulab-cf PR #30） | 可逆 |
+| A26 | P4b 前 | kabulab-cf の日次取込と読み手を普通株に絞る（お宝優待から非普通株 9 件が消える。kabulab-cf PR #30。2026-09-13 マージ済み） | 可逆 |
+| A27 | P4b 前 | 非普通株 9 銘柄の行を kabulab-cf D1 から削除（ir-catalog の開示 108 件を含む。優待の LLM 派生値 19 行は再取得できず、JSONL の退避と Time Travel 30 日で戻す）。2026-09-13 18:33 UTC に実行済み（決定 10） | 条件付き可逆 |
 
 ---
 
@@ -3534,7 +3550,10 @@ D1 の内訳で従来試算とのずれが大きい2点: 原本索引は R2 キ�
 - 【R2 の公開オブジェクトに追加キーを入れてよいか】実読の結果、007 の日足・5分足 API は R2 の本文をバイト単位で素通しし（passthrough）、信用残 API は行オブジェクトを丸ごとスプレッドする（{week, ...row}）。したがって R2 に足したキーはそのまま無認証で公開される。設計が足す予定だった銘柄種別（JPX data_j.xls 由来＝personal-only）・銘柄表記名・ISIN・ライセンス・writer は全て公開面の拡大になり、信用残のペイロードは5→17フィールドで約3.4倍になる。本計画の既定は「これらを公開オブジェクトに入れない（母集団事故の防止は PUT 前のコード側ガードで行う）」。入れたい場合は 007 を素通しから許可キーのホワイトリスト再構成に変える改修が先に必要で、CPU とコードが増える。どちらを採るか。
 - 【Notion をサブとして書き続けるか】ジョブ所要時間の見積りが Notion 分を含むかどうかで 3〜5倍変わる（①月次 3分 vs 60〜73分、⑨月次 43分 vs 153〜178分、②日次 17〜21分 vs 77〜94分）。取り込み層の設計は Notion を落とした数字、Notion 層の設計は書き続ける前提で、両者が矛盾している。書き続けるなら全ジョブの timeout をこの2列表から引き直す必要があり、特に ⑨月次は 180分ではマージンが 2〜27分しかない。断面（①②⑧⑨）を毎日/毎月 Notion にも書くのか、鮮度カタログだけにするのかの方針決定が要る。
 - 【みんかぶ優待の扱いを、公認照会の結果を待って決めるか】逐条確認の結論は「規約内に personal-only を緩める根拠は存在しない」で、本計画はタグ維持を前提に P3 の公開面是正（掲載文を公開画面・公開APIの6箇所から外す）を組んでいる。もし後から公認が得られる、あるいは法務確認が通ってタグが変わると、この是正が不要になり掲載文を公開面に戻す逆方向の作業が発生する。公認の申請窓口・条件は規約にも関連法規ページにも明記がなく、運営会社への個別照会が必要。P3 着手前に照会するか、タグ維持で先に進めるか。
-- 【ETF / REIT / 出資証券を公開面に出すか】（2026-09-13 追加・未回答）スクリーニング・銘柄検索・一覧に出すかどうか。暫定前提は「出さない」。kabulab-cf PR #30 は、この前提で日次取込と公開面の一覧を `is_active=1 AND instrument_type='equity'` に絞った。その結果、お宝優待の一覧・ジャンル・スクリーニング・ホーム件数から J-REIT 8 件と 8421 が消える。出す場合は日次取込の対象も広げる必要がある（広げないと、日次データが止まった行を一覧に出すことになる）。P4b 後に全種別を対象にすると、取込は +19.5%（(3,709 + 725) / 3,709 = 1.195）。代案として、対象を「equity、または active かつ is_yutai」に広げる案もある（今は +9 銘柄。P4b 後の件数は未測定）。
+- 【ETF / REIT / 出資証券を公開面に出すか】→ **2026-09-13 決着: 出さない**（ユーザーが承認。決定 9）。kabulab-cf PR #30（マージ済み）が、日次取込と公開面の一覧を `is_active=1 AND instrument_type='equity'` に絞った。さらに、優待のある非普通株 9 銘柄（`reit_fund` 8 / `investment_certificate` 1）の行は、ユーザーの指示で元データから削除した（決定 10。コード指定の詳細ページは 404）。方針を変えて出す場合は日次取込の対象も広げる必要がある（広げないと、日次データが止まった行を一覧に出すことになる）。P4b 後に全種別を対象にすると、取込は約 +20%（削除前の数字で (3,709 + 725) / 3,709 = 1.195、削除後の数字で (3,700 + 734) / 3,700 = 1.198。725 / 734 は P4b の実施時に集合差を測り直す）。
+  - **P4b では 9 コードを戻す**（除外しない）。P6 のガードと R2 `daily/` の母集団（`stocks.json`）が、全種別を `core_stocks` に戻すことを前提にしている。除外するなら P6 ガードか `stocks.json` の設計変更が要り、今回の範囲外（P4b 節）
+  - P4b の前提作業として kabulab-cf PR #31 を入れる（取込の code→id を active かつ equity に絞り、優待の取込で `core_stocks` に行を足さない）
+
 ---
 
 # 残るリスクと未確認事項
@@ -3596,6 +3615,7 @@ D1 の内訳で従来試算とのずれが大きい2点: 原本索引は R2 キ�
 | **TDnet 一覧 JSON の同日別内容スナップショットが 23件 発生している経緯** | ローカルの保存実装は同一 (scope, date) の3つ目の別内容で例外を投げるはずなので、別経路の書込が存在する可能性がある |
 | **vwap リポジトリの未コミット差分7ファイル（+132/−34）の内容** | 捨てると吸収されていない改修が消える可能性 |
 | **R2 の IA 遷移が Class A に計上されるか / IA からの公開配信の取得課金** | コスト試算に未計上 |
+| **優待の LLM 派生値に R2 の退避が無い**（2026-09-14 追加） | 削除した非普通株 9 銘柄の優待の LLM 派生値（要約 19 行・推定値 6 行）は再取得できない。写しは git 管理外のローカルの JSONL だけで、ほかに戻す手段は D1 の Time Travel（30 日）しかない。`jobs/yutai_backup.py` は一度も実行されていないので、R2 `backup/yutai/` に写しは無い。削除前の状態を R2 へ退避してから通常の実行をすると、削除後の最初の実行は「前回退避より減った」ガードで止まるので `--allow-shrink` が要る。ローカルの JSONL は R2 スナップショット（`cloud_store/yutai.EXPORT_COLUMNS`）と列が違うので、そのままでは R2 の退避の代わりにならない |
 
 ## F. 「やらないと決めたが、やらないことのリスク」
 
