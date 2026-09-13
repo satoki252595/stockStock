@@ -273,6 +273,31 @@ class NotionClient:
             return {}
         return self._call(self._client.pages.retrieve, page_id=page_id)
 
+    def list_page_property_items(self, page_id: str, property_id: str) -> list[dict]:
+        """ページの 1 プロパティを「プロパティ取得 API」で全件読む（読み取りのみ）。
+
+        ページオブジェクトの relation は 25 件を超えると has_more が立ち、残りが載らない。
+        全件が要る処理（④重複の集約・バックアップ）はこちらで読み直す。
+        戻り値は property_item の配列（relation なら各要素の ["relation"]["id"]）。
+        出典: https://developers.notion.com/reference/retrieve-a-page-property
+        """
+        if self._client is None:
+            return []
+        results: list[dict] = []
+        cursor: str | None = None
+        while True:
+            kwargs: dict[str, Any] = {"page_id": page_id, "property_id": property_id}
+            if cursor:
+                kwargs["start_cursor"] = cursor
+            resp = self._call(self._client.pages.properties.retrieve, **kwargs)
+            if resp.get("object") != "list":
+                # 単一値プロパティ（number 等）は list ではなく property_item を 1 つ返す
+                return [resp]
+            results.extend(resp.get("results", []))
+            if not resp.get("has_more"):
+                return results
+            cursor = resp.get("next_cursor")
+
     def retrieve_database(self, database_id: str) -> dict:
         if self._client is None:
             return {}
