@@ -283,3 +283,17 @@ class TestQueryTruncation:
             rows = client.query_database("db", strict=True)
         assert len(rows) == 1
         assert not [r for r in caplog.records if "打ち切られた" in r.message]
+
+
+def test_list_page_property_items_follows_cursor(client):
+    """relation が 25 件を超えるページは、プロパティ取得 API を next_cursor で最後まで読む。"""
+    first = {"object": "list", "has_more": True, "next_cursor": "c2",
+             "results": [{"object": "property_item", "type": "relation", "relation": {"id": "a"}}]}
+    second = {"object": "list", "has_more": False, "next_cursor": None,
+              "results": [{"object": "property_item", "type": "relation", "relation": {"id": "b"}}]}
+    calls = sdk_responses(client, [(200, first, {}), (200, second, {})])
+    items = client.list_page_property_items("page-1", "prop%3A1")
+    assert [i["relation"]["id"] for i in items] == ["a", "b"]
+    assert len(calls) == 2
+    assert calls[0].method == "GET" and "/pages/page-1/properties/" in str(calls[0].url)
+    assert "start_cursor=c2" in str(calls[1].url)
