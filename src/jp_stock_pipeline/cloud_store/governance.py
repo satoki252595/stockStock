@@ -130,8 +130,6 @@ def _row_tag(source: str, evidence: str) -> TableLicense:
 _YAHOO = "Yahoo Finance 日足からの派生（licensing.inherit で personal-only を継承）"
 # 子表 14 本の実測根拠。
 _CHILD = "cloud_store/core_stocks.CHILD_TABLES（2026-09-12 本番実測）"
-# 統合監査の実測表。
-_AUDIT = "docs/CLOUDFLARE-CONSOLIDATION.md §1（2026-09-11 本番実測の行数つき）"
 
 TABLE_LICENSE: dict[str, TableLicense] = {
     # --- ①銘柄マスタ: 1 行に混在する唯一の表 -------------------------------
@@ -158,8 +156,6 @@ TABLE_LICENSE: dict[str, TableLicense] = {
     ),
     "otakara_stock_financials": _uniform(LicenseTag.PERSONAL_ONLY, _YAHOO, _CHILD),
     "otakara_stock_scores": _uniform(LicenseTag.PERSONAL_ONLY, _YAHOO, _CHILD),
-    "finmath_price_snapshot": _uniform(LicenseTag.PERSONAL_ONLY, _YAHOO, _AUDIT),
-    "finmath_daily_ohlcv": _uniform(LicenseTag.PERSONAL_ONLY, _YAHOO, _AUDIT),
     # --- kabulab-cf 所有の開示・優待 ---------------------------------------
     # 開示メタ（いつ・誰が・何を）は事実として引用でき、原文は出さない。
     # `cloud_store/datasets.py` の tdnet_disclosures も factual-cite で宣言済み。
@@ -251,9 +247,44 @@ TABLE_LICENSE: dict[str, TableLicense] = {
 # 行タグで判定する表は `license_tag` 列を持っていなければ嘘になる。
 ROW_TAG_COLUMN = "license_tag"
 
-# 本番（`_cf_KV` を除く）の表数。2026-09-13 の実測で 30 表 375 列あり、
-# `TABLE_LICENSE` はその 31 表すべてを登録している。
-OBSERVED_TABLE_COUNT = 31
+# 本番（`_cf_KV` を除く）の表数。2026-09-13 の実測は 31 表だったが、そのうち
+# `RETIRED_TABLES` の 2 表は DROP する前提で地図から外したので、ここは
+# **DROP 後に残る 29 表**の数。`TABLE_LICENSE` はその 29 表すべてを登録している。
+OBSERVED_TABLE_COUNT = 29
+
+# 削除すると決めて地図から外した表 → 理由。
+#
+# ## なぜ `TABLE_LICENSE` から消すだけにしないのか（切り替えの窓）
+#
+# 地図の変更（このリポジトリの main）と本番の `DROP TABLE`（人が手で流す）は
+# 同時には起きない。単に消すだけだと:
+#
+# - 地図が先に入り、本番にまだ表がある間 → 「地図に無い表が本番にある」warning
+#   が毎日出る。削除予定だと分かっている表を「未登録の表」と同じ文言で報告すると、
+#   本物の未登録（対向リポジトリが表を足した）と区別できない
+# - `TABLE_LICENSE` に残したまま本番が先に消える → 「地図にあって本番に無い表」
+#   で **failure**（`ops_check.yml` が Issue を立てる）
+#
+# ここに載せた表は、本番に**あっても無くても failure にしない**。あれば
+# 「削除予定の表がまだ本番にある」を warning で出す（DROP の流し忘れが見える）。
+# DROP が終わった後もこの宣言は残してよい。同名の表が本番へ戻ってきたら同じ
+# warning で気付ける（地図の外の表は「公開してよいと決まっていない」= 公開しない
+# 扱いなので、ライセンス上も漏れる方向には倒れない）。
+#
+# 採らなかった案: `TableKind.RETIRED` を足して `TABLE_LICENSE` に残す。
+# `TABLE_LICENSE` は共有契約 `d1-license-map.json` へそのまま出るので、
+# 契約の読み手（kabulab-cf の TypeScript 側）に 6 つ目の kind を教える変更が
+# 対向リポジトリにまで波及する。削除の窓のためだけに契約の語彙を増やさない。
+RETIRED_TABLES: dict[str, str] = {
+    "finmath_price_snapshot": (
+        "kabulab-cf PR #23 で読み取りを core_stock_financials へ振り替え、読み書きが 0 に"
+        "なった。kabulab-cf drizzle/d1/0012 で DROP する（全 3,759 行は DROP 前に退避）"
+    ),
+    "finmath_daily_ohlcv": (
+        "kabulab-cf PR #23 で swing_daily_ohlcv / swing_market_context へ振り替え、読み書きが"
+        " 0 になった。kabulab-cf drizzle/d1/0012 で DROP する（全 3,490 行は DROP 前に退避）"
+    ),
+}
 
 # 本番 `sqlite_master` から除く名前。SQLite と D1 の内部表。
 _INTERNAL_PREFIXES = ("sqlite_", "_cf_", "d1_", "__drizzle")
@@ -603,7 +634,17 @@ def coverage(observed: dict[str, str | None]) -> CoverageReport:
     columns_by_table = {name: ddl_columns(ddl) for name, ddl in live.items()}
     total_columns = sum(len(c) for c in columns_by_table.values())
 
-    unknown = sorted(set(live) - set(TABLE_LICENSE))
+    retiring = sorted(set(live) & set(RETIRED_TABLES))
+    if retiring:
+        # fail open。DROP の前にこの宣言が入った窓でも赤くしない
+        # （`RETIRED_TABLES` のコメント）。流し忘れは名前で見えるようにする。
+        warnings.append(
+            f"削除予定の表がまだ本番にある: {retiring}"
+            "（`governance.RETIRED_TABLES`。DROP を流したら消える。"
+            "地図の外なので公開しない扱いのまま）"
+        )
+
+    unknown = sorted(set(live) - set(TABLE_LICENSE) - set(RETIRED_TABLES))
     if unknown:
         # fail open。対向リポジトリの migration ごとに毎日赤くする検査は
         # 読まれなくなる。名前を出して追随 PR を促す側に倒す。
@@ -613,6 +654,12 @@ def coverage(observed: dict[str, str | None]) -> CoverageReport:
             " TableKind.UNCLASSIFIED で登録してよい。宣言が無い表の列は"
             "「公開してよいと決まっていない」= 公開しない扱いになる）"
         )
+
+    both = sorted(set(TABLE_LICENSE) & set(RETIRED_TABLES))
+    if both:
+        # 「削除予定」と「区分あり」を同時に主張すると、本番から消えたときに
+        # failure になるかどうかが宣言の読み方次第になる。
+        failures.append(f"地図と削除予定の両方に載っている表: {both}")
 
     vanished = sorted(set(TABLE_LICENSE) - set(live))
     if vanished:
@@ -690,6 +737,7 @@ __all__ = [
     "writer_claim_problems",
     "writer_claim_rows",
     "OBSERVED_TABLE_COUNT",
+    "RETIRED_TABLES",
     "ROW_TAG_COLUMN",
     "TABLE_LICENSE",
     "CoverageReport",

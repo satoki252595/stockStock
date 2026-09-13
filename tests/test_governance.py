@@ -168,12 +168,14 @@ class TestFailOpenClosedBoundary:
 
 # 本番 D1 (`kabulab-cf`) の表名スナップショット。2026-09-13 に読み取り専用の
 # `SELECT name FROM sqlite_master WHERE type='table'` で取得した 32 件から、
-# 内部表 `_cf_KV` を除いた 31 件（`p_momentum` は同日 0011 で追加）。`TABLE_LICENSE` の登録漏れを検出するために
+# 内部表 `_cf_KV` を除いた 31 件（`p_momentum` は同日 0011 で追加）のうち、
+# DROP する `finmath_price_snapshot` / `finmath_daily_ohlcv`（kabulab-cf
+# drizzle/d1/0012。`governance.RETIRED_TABLES`）を除いた 29 件。`TABLE_LICENSE` の登録漏れを検出するために
 # **宣言とは独立した観測値**として置く（宣言から導くとテストが自明になる）。
 PROD_TABLE_NAMES: frozenset[str] = frozenset(
     {
         "core_stock_annual_financials", "core_stock_financials", "core_stocks",
-        "finmath_daily_ohlcv", "finmath_price_snapshot", "ir_disclosures",
+        "ir_disclosures",
         "jss_column_license", "jss_dataset_freshness", "jss_financials",
         "jss_index_symbols", "jss_job_runs", "jss_raw_files", "jss_supply_latest",
         "jss_writer_claims", "jss_xbrl_documents", "jss_xbrl_elements",
@@ -184,6 +186,63 @@ PROD_TABLE_NAMES: frozenset[str] = frozenset(
         "yutai_benefits", "yutai_genres",
     }
 )
+
+
+class TestRetiredTables:
+    """削除する表を地図から外した後、本番の DROP の前後どちらでも赤くしない。
+
+    地図の変更（main へのマージ）と本番の `DROP TABLE`（人が手で流す）は同時に
+    起きないので、両方の順序を固定する。
+    """
+
+    def test_削除予定の表は地図に載っていない(self) -> None:
+        assert set(G.RETIRED_TABLES) == {"finmath_price_snapshot", "finmath_daily_ohlcv"}
+        assert not set(G.RETIRED_TABLES) & set(G.TABLE_LICENSE)
+        assert not set(G.RETIRED_TABLES) & PROD_TABLE_NAMES
+
+    def test_DROP_前_本番に残っていても失敗させず名前つきで警告する(self) -> None:
+        """地図の変更が先に入った窓。未登録の表と同じ文言にしない。"""
+        observed = dict(_observed())
+        for name in G.RETIRED_TABLES:
+            observed[name] = f"CREATE TABLE {name} (id INTEGER PRIMARY KEY, code TEXT)"
+        report = G.coverage(observed)
+        assert report.clean, report.failures
+        retiring = [w for w in report.warnings if "削除予定の表がまだ本番にある" in w]
+        assert len(retiring) == 1, report.warnings
+        for name in G.RETIRED_TABLES:
+            assert name in retiring[0], name
+        assert not [w for w in report.warnings if "地図に無い表" in w], report.warnings
+
+    def test_DROP_後_本番に無くても失敗させない(self) -> None:
+        observed = dict(_observed())
+        for name in G.RETIRED_TABLES:
+            observed.pop(name, None)
+        report = G.coverage(observed)
+        assert report.clean, report.failures
+        assert not [w for w in report.warnings if "削除予定" in w], report.warnings
+
+    def test_削除予定と地図の両方に載せたら失敗させる(self, monkeypatch) -> None:
+        """本番から消えたときに failure かどうかが読み方次第になるのを防ぐ。"""
+        monkeypatch.setitem(
+            G.TABLE_LICENSE,
+            "finmath_daily_ohlcv",
+            G._uniform(LicenseTag.PERSONAL_ONLY, "Yahoo", "テスト"),
+        )
+        report = G.coverage(_observed())
+        assert not report.clean
+        assert any("両方に載っている" in f for f in report.failures), report.failures
+
+    def test_本物の未登録の表は従来どおり地図に無い表として警告する(self) -> None:
+        """削除予定の除外が未知の表の検出まで黙らせていないこと。"""
+        observed = dict(
+            _observed(),
+            finmath_price_snapshot="CREATE TABLE finmath_price_snapshot (id INTEGER)",
+            swing_new_table="CREATE TABLE swing_new_table (a TEXT)",
+        )
+        report = G.coverage(observed)
+        unknown = [w for w in report.warnings if "地図に無い表" in w]
+        assert len(unknown) == 1 and "swing_new_table" in unknown[0], report.warnings
+        assert "finmath_price_snapshot" not in unknown[0]
 
 
 class TestProductionSnapshot:
@@ -247,7 +306,7 @@ class TestClassification:
         """`licensing.inherit` の規則（最も厳しいタグを継承）と一致すること。"""
         for table in (
             "swing_daily_ohlcv", "swing_stock_indicators", "rsi_percentile",
-            "otakara_stock_scores", "finmath_daily_ohlcv", "core_stock_financials",
+            "otakara_stock_scores", "core_stock_financials",
         ):
             assert G.TABLE_LICENSE[table].tag is LicenseTag.PERSONAL_ONLY, table
 
