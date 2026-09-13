@@ -794,6 +794,10 @@ class TestOpsCheckIssueLifecycle:
         assert "success()" in cond
         for step_id in ids:
             assert f"steps.{step_id}.outcome == 'success'" in cond, step_id
+        # 各項が揃っていても `||` で繋ぐと 1 層だけ緑で閉じる。`always()` は
+        # キャンセル時にも走る。どちらも上の包含チェックだけでは素通りする。
+        assert "||" not in cond
+        assert "always()" not in cond
 
     def test_title_is_shared_and_matched_exactly(self):
         text = self._text()
