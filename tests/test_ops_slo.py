@@ -474,6 +474,32 @@ class TestNotRefreshed:
                 slo.SLO_BY_DATASET, {}, {"core_stocks": "更新しない理由"}
             )
 
+    def test_矛盾した宣言では_import_時に落ちる(self, monkeypatch) -> None:
+        """`validate_declarations` を関数として試すだけでは、import 時の呼び出しを
+        消しても緑のままになる（矛盾した宣言で ops_check が黙って起動する）。
+
+        slo.py の本文を別名のモジュールとして、宣言だけ矛盾させて実行する。
+        """
+        import sys
+        import types
+        from pathlib import Path
+
+        path = Path(slo.__file__)
+        src = path.read_text(encoding="utf-8")
+        original = "ACCEPTED_RED: dict[str, str] = {}"
+        assert original in src, "ACCEPTED_RED の定義行が変わったらこのテストも直す"
+        src = src.replace(
+            original,
+            'ACCEPTED_RED: dict[str, str] = {"yutai_benefits": "矛盾させるための受容理由"}',
+        )
+        name = "jp_stock_pipeline.cloud_store._slo_contradiction_probe"
+        module = types.ModuleType(name)
+        module.__package__ = "jp_stock_pipeline.cloud_store"
+        module.__file__ = str(path)
+        monkeypatch.setitem(sys.modules, name, module)
+        with pytest.raises(ValueError, match="両方に入っている"):
+            exec(compile(src, str(path), "exec"), module.__dict__)
+
     def test_現在の宣言は矛盾していない(self) -> None:
         slo.validate_declarations(slo.SLO_BY_DATASET, slo.ACCEPTED_RED, slo.NOT_REFRESHED)
 

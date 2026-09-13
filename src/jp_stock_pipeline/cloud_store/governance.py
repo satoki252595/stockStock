@@ -494,6 +494,16 @@ WRITER_CLAIMS: tuple[WriterClaim, ...] = tuple(
 #   誰かが宣言外の writer を名乗っている（kabulab-cf 側の手作業・REST 直叩き等）
 #   ので、宣言へ足すか行を消すかを人が決める。
 #
+# ## 宣言を外す・改名するときの順序（2 段目で生まれた罠）
+#
+# `WRITER_CLAIMS` から (dataset, column_group) を外す／改名する PR を入れると、
+# prune しないので**旧キーの行が本番に残り、次の ops_check から毎日失敗**する。
+# 行を先に消してもだめで、マージ前の旧コードが次の実行で upsert し直す。
+# 順序は「PR をマージ → その次の ops_check が走る前に旧キーを DELETE」。
+# 間に合わなければ 1 回赤くなって Issue が立ち、DELETE 後の緑で自動的に閉じる。
+# 採らなかった案: 宣言外の claim を自動 prune する — 本番行の由来（kabulab-cf の
+# 手作業など）を推測で消すことになる（上の「prune しない」と同じ理由）。
+#
 # ## 2 段目へ上げた根拠
 #
 # 当初の条件は (1) 既存行の中身が判明 (2) 食い違う行の整理 PR (3) kabulab-cf 側にも
