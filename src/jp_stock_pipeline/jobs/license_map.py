@@ -56,10 +56,12 @@ personal-only なら害は無いが、`commercial-ok` の孤児が残ると「�
 ## writer の排他宣言も同じ扱いにする
 
 `jss_writer_claims` も本番 4 行に対して**照合コードが両リポジトリに 0 行**
-だった。投入と照合をここで行うが、**照合は warning から始める**。claim を投入
-するのも書込ジョブなので、「claim が無ければ例外」を先に入れると claim 行の
-無い DB への最初の実行が必ず異常終了してブートストラップ不能になる
-（`governance.CLAIM_MISMATCH_IS_FAILURE` に fail へ上げる条件を書いてある）。
+だった。投入と照合をここで行う。照合は warn → fail の 2 段リリースで、
+**2026-09-13 から 2 段目**（食い違い・宣言漏れ・宣言外の claim でジョブを失敗
+させる。1 段目の本番実行では warning 0 件だった）。claim を投入するのも
+書込ジョブなので、**照合は必ず投入のあと**に行う。「claim が無ければ例外」を
+投入より前に置くと claim 行の無い DB への最初の実行が必ず異常終了して
+ブートストラップ不能になる（根拠と戻し方は `governance.CLAIM_MISMATCH_IS_FAILURE`）。
 
 `jss_writer_claims` の孤児も **prune しない**。本番の既存 4 行がどの dataset を
 指しているかは本レーンからは読めず、推測で消すと読めない情報を壊す。
@@ -176,16 +178,17 @@ def _check_coverage(store: D1Store, ctx: JobContext) -> None:
 
 
 def _sync_writer_claims(store: D1Store, ctx: JobContext) -> None:
-    """writer の排他宣言を投入して照合する（warn → fail の 2 段リリースの 1 段目）。
+    """writer の排他宣言を投入して照合する（warn → fail の 2 段リリースの 2 段目）。
 
     本番の既存 4 行はすべて `column_group='all'` / `writer='stockStock'` で、
     照合コードは**両リポジトリに 0 行**だった。しかも両方が書く `core_stocks` は
     誰の所有でもなかった。
 
-    **claim が無いときに例外で落とす検査を先に入れてはいけない。** claim を
-    投入するのも書込ジョブなので、claim 行の無い DB に対する最初の実行が必ず
-    異常終了しブートストラップ不能になる。だから 1 段目は投入と warning だけで、
-    fail へ上げる条件は `governance.CLAIM_MISMATCH_IS_FAILURE` のコメントにある。
+    **順序が仕様: 投入 → 読み直し → 照合。** claim を投入するのも書込ジョブなので、
+    照合を投入より前に置くと claim 行の無い DB に対する最初の実行が必ず異常終了し
+    ブートストラップ不能になる。この順序なら、2 段目でも初回は投入した行を読み
+    直して一致し成功する。投入のあとでも残る差分（upsert が届いていない・宣言外の
+    claim がある）だけが失敗になる。
     """
     try:
         store.upsert(
@@ -208,7 +211,9 @@ def _sync_writer_claims(store: D1Store, ctx: JobContext) -> None:
     logger.info(
         "writer claim: 宣言 %d 件を投入（照合は %s）",
         len(G.WRITER_CLAIMS),
-        "失敗にする" if G.CLAIM_MISMATCH_IS_FAILURE else "warning のみ（2 段リリースの1段目）",
+        "一致。食い違い・宣言漏れは失敗にする（2 段リリースの2段目）"
+        if G.CLAIM_MISMATCH_IS_FAILURE
+        else "warning のみ（2 段リリースの1段目に戻している）",
     )
     ctx.add_success()
 

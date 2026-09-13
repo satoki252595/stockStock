@@ -476,27 +476,47 @@ WRITER_CLAIMS: tuple[WriterClaim, ...] = tuple(
     ]
 )
 
-# 照合を warn で始める（fail へ上げる条件はこの定数のコメントに書く）。
+# 照合は warn → fail の 2 段リリース。**2026-09-13 から 2 段目（失敗にする）。**
 #
-# **claim が無いときに例外で落とす検査を先に入れてはいけない。** claim を投入する
-# のも書込ジョブなので、claim 行の無い DB に対する最初の実行が必ず異常終了し、
-# ブートストラップ不能になる（鶏と卵）。加えて本番の既存 4 行の中身
-# （どの dataset が `all` / `stockStock` で入っているか）は本レーンからは読めず、
-# 推測で prune すると読めない情報を壊す。
+# ## ブートストラップ（1 段目から変えていない不変条件）
 #
-# **fail へ上げる条件**: (1) 既存 4 行の (dataset, column_group, writer) が判明し、
-# (2) この宣言と食い違う行を整理する PR が入り、(3) kabulab-cf 側にも同じ照合が
-# 入ったとき（片側だけの規律にしない。設計書 §1.3-2）。そのとき
-# `CLAIM_MISMATCH_IS_FAILURE = True` にする。
+# **claim が無いときに例外で落とす検査を、投入より前に置いてはいけない。** claim を
+# 投入するのも書込ジョブなので、claim 行の無い DB に対する最初の実行が必ず異常終了し、
+# ブートストラップ不能になる（鶏と卵）。`jobs/license_map._sync_writer_claims` は
+# **投入 → 読み直し → 照合** の順で、失敗にするのは照合の結果だけである。したがって
+# 2 段目でも、行の無い DB への初回は投入した 18 行を読み直して一致し、成功する。
 #
-# (1) は 2026-09-13 の読み取り照会で済んだ。本番の 4 行は
-# `jss_financials` / `jss_raw_files` / `jss_supply_latest` / `jss_xbrl_documents`
-# の `('all', 'stockStock')` で、**下の宣言と完全に一致する**（`jss_` 表は
-# すべて `all` / `stockStock` で宣言してある）。つまり (2) の整理は不要で、
-# 残っているのは (3) の kabulab-cf 側の照合だけである。
-# 同じ照会で `jss_column_license` の既存 7 行も宣言 16 行の部分集合だと確認した
-# ので、初回実行の孤児削除は 0 行・`sector33` のタグ更新 1 行だけになる。
-CLAIM_MISMATCH_IS_FAILURE = False
+# ## 2 段目で失敗になるもの（= 投入のあとでも残る差分）
+#
+# - `claim が実表に無い` / `writer が食い違う`: 投入の直後に読み直しているので、
+#   **upsert が届いていない**ことを意味する。黙って次回に期待しない。
+# - `宣言に無い claim が実表にある`: upsert では消えない（prune しない）。
+#   誰かが宣言外の writer を名乗っている（kabulab-cf 側の手作業・REST 直叩き等）
+#   ので、宣言へ足すか行を消すかを人が決める。
+#
+# ## 2 段目へ上げた根拠
+#
+# 当初の条件は (1) 既存行の中身が判明 (2) 食い違う行の整理 PR (3) kabulab-cf 側にも
+# 同じ照合、の 3 つだった。
+#
+# - (1)(2): 2026-09-13 の読み取り照会で、既存 4 行は `jss_financials` /
+#   `jss_raw_files` / `jss_supply_latest` / `jss_xbrl_documents` の
+#   `('all', 'stockStock')` で宣言と完全一致し、整理は不要だった。
+# - 1 段目の本番実行（run 34750652448）は「宣言 18 件を投入」で**食い違いの
+#   warning が 0 件**。本番 `jss_writer_claims` は 18 行。2 段目へ上げても今日の
+#   本番は赤くならない。
+# - (3) kabulab-cf 側の照合は**まだ無い**（2026-09-13 に origin/main を
+#   `git grep writer_claim` して 0 件）。それでも上げたのは、stockStock 側の照合を
+#   失敗にするかどうかは kabulab-cf 側の有無と独立に決められるから（待っても
+#   stockStock の検知力が上がるわけではない）。「片側だけの規律にしない」は
+#   kabulab-cf 側に照合を入れる別の作業として残っている。
+#
+# ## 定数を消さずに True で残す理由
+#
+# 本番で予期しない赤が出たときの戻し方を 1 行の変更にしておくため。
+# 採らなかった案: 定数と warning 分岐を削除する — 戻すときに分岐を書き直す
+# ことになり、急いで戻す場面で差分が大きくなる。
+CLAIM_MISMATCH_IS_FAILURE = True
 
 WRITER_CLAIMS_SQL = "SELECT dataset, column_group, writer FROM jss_writer_claims"
 
@@ -524,8 +544,9 @@ def writer_claim_rows() -> list[list[object]]:
 def writer_claim_problems(observed_rows: list[dict]) -> tuple[list[str], list[str]]:
     """実表の claim を宣言と突き合わせる。`(failures, warnings)` を返す。
 
-    `CLAIM_MISMATCH_IS_FAILURE` が False の間はすべて warning になる
-    （2 段リリースの 1 段目。上の定数のコメントに fail へ上げる条件がある）。
+    `CLAIM_MISMATCH_IS_FAILURE` が True（2 段目。2026-09-13 から）の間は
+    すべて failure になる。False に戻すとすべて warning になる（1 段目）。
+    **投入のあとに呼ぶこと**（前に呼ぶと、行の無い DB への初回が必ず失敗する）。
     """
     declared = {(c.dataset, c.column_group): c.writer for c in WRITER_CLAIMS}
     observed = {

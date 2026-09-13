@@ -94,7 +94,8 @@ class DatasetSource:
     db: str = DB_CANONICAL
 
 
-# dataset のキー集合は `slo.SLO_BY_DATASET` と**完全一致**させる
+# dataset のキー集合は `slo.SLO_BY_DATASET` と `slo.NOT_REFRESHED`（更新しないので
+# 判定はしないが観測は続けるデータセット）の**和と完全一致**させる
 # （tests/test_ops_slo.py が等号で検証する。片方だけ増えたら落ちる）。
 DATASET_SOURCES: tuple[DatasetSource, ...] = (
     DatasetSource(

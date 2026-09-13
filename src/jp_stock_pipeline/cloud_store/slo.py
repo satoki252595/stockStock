@@ -130,20 +130,20 @@ SLOS: tuple[FreshnessSlo, ...] = (
         "空くなら閾値を緩める（受容宣言に戻すのではなく）",
         business_days=True,
     ),
-    FreshnessSlo(
-        "yutai_benefits", 40 * _DAY, 50 * _DAY,
-        "実測 81.5日 = 赤。再構築の方針が決まるまで赤のまま",
-    ),
+    # yutai_benefits はここに無い。下の NOT_REFRESHED を参照。
 )
 
 SLO_BY_DATASET: dict[str, FreshnessSlo] = {s.dataset: s for s in SLOS}
 
-# 「赤だと分かっていて、今は直せない」データセット。
+# 「赤だと分かっていて、今は直せない」データセット（**いつか直す**赤）。
 #
-# 観測を配線しただけでは yutai_benefits（実測 81.96 日 / 赤閾値 50 日）が赤のまま
-# 残り、ops_check が**毎日** exit 1 して Issue にコメントが積まれる。それは
-# (1) 通知を見なくなる (2) 新しい赤が埋もれる の二重の害があるので、既知の赤は
-# 「宣言済み」として警告に落とす。
+# 既知の赤を毎日 exit 1 にすると Issue にコメントが積まれ、(1) 通知を見なくなる
+# (2) 新しい赤が埋もれる の二重の害がある。だから「宣言済み」として警告に落とす。
+#
+# **2026-09-13 に空になった。** 最後の 1 件だった `yutai_benefits` は「いつか直す
+# 赤」ではなく「そもそも更新しない」と決まったので `NOT_REFRESHED` へ移した。
+# 仕組みは残す（新しく「分かっていて今は直せない赤」が出たときの置き場で、
+# 置き場が無いと ops_check を黙らせる別の手段が生まれる）。
 #
 # **`financials` は 2026-09-13 に外した。** writer（`cloud_store/financials.py`）が
 # 出来たので、`jss_financials` が 0 行のままなら**それは本物の赤**である
@@ -157,14 +157,88 @@ SLO_BY_DATASET: dict[str, FreshnessSlo] = {s.dataset: s for s in SLOS}
 # 誰も外せなくなるため。受容期限（いつまで）は入れない: いつまで受容するかは
 # 投資判断の問題でユーザにしか決められないので、勝手な日付を置くと
 # 「期限が来たのでまた鳴る」だけになる。代わりに**何が決まれば外せるか**を書く。
-ACCEPTED_RED: dict[str, str] = {
+ACCEPTED_RED: dict[str, str] = {}
+
+# 「そもそも更新しない」データセット。**鮮度を判定しない**（観測は続ける）。
+#
+# `ACCEPTED_RED` と分けたのは意味が違うからである。受容済みの赤は「直るはず」の
+# 状態で、直ったら宣言を外せと ops_check が言う。こちらは**直る予定が無い**
+# ので、閾値を持たせること自体が嘘になる（旧 `yutai_benefits` の 40/50 日は
+# 「更新されない表」に対して何の意味も持たなかった）。だから `SLOS` から行ごと
+# 外し、閾値を残さない。
+#
+# ## 判定から外すのは「加齢」だけ
+#
+# `judge_observation` の (a)(b) は残す。0 行は `red`、測れていなければ
+# `unknown` のまま。**更新しないことと、消えてよいことは違う。** 優待は
+# 再取得不能な資産なので、表が空になった（kabulab-cf 側の全削除→再投入など）
+# ことは加齢と無関係に報告すべき異常である。
+#
+# ## 観測は続ける
+#
+# `datasets.DATASET_SOURCES` からは外さない。件数と as_of が
+# `jss_dataset_freshness` に残るのは有用で、ops_check のログにも「判定対象外」と
+# 理由つきで出す。`DATASET_SOURCES` のキー集合は `SLO_BY_DATASET` と
+# `NOT_REFRESHED` の**和**と等号で一致させる（片方だけ増えると「測っているが
+# 判定も除外もされていない」データセットが静かに生まれる）。
+#
+# **理由の文字列を必須にする**（`ACCEPTED_RED` と同じ理由: 理由の無い除外は消音と
+# 区別できない）。何が変われば判定に戻すかも書く。
+#
+# ## 採らなかった案
+#
+# - `ACCEPTED_RED` に残す: 「いつか直す」と読まれ、ops_check が直ったら外せと
+#   言う前提の区分に、直す予定の無いものが恒久的に居座る。区分の意味が崩れる。
+# - 閾値を無限大にして `SLOS` に残す: 判定は緑になり、「更新していない表」が
+#   ダッシュボード上で「新鮮」と読まれる。偽の緑を作る。
+# - 観測（`DATASET_SOURCES`）からも外す: 件数が見えなくなり、上の「空になった」を
+#   検知する手段が無くなる。
+NOT_REFRESHED: dict[str, str] = {
     "yutai_benefits": (
-        "実測 81.96 日。優待の一次ソース（みんかぶ）は規約上再取得できず、"
-        "kabulab-cf の LLM 推定値が再取得不能な資産として残っている。"
-        "①代替の一次ソースを決める か ②優待を「更新しないデータセット」として"
-        "SLO から外す のどちらを採るかが決まれば外せる"
+        "更新しないデータセット（2026-09-13 ユーザ判断）。優待の一次ソース"
+        "（みんかぶ）は規約上再取得できず、kabulab-cf の LLM 推定値が再取得不能な"
+        "資産として残っているだけで、2026-06-22 以降は更新していない。"
+        "代替の一次ソースを決めて writer を入れたら SLOS へ戻す"
     ),
 }
+
+
+def validate_declarations(
+    slos: dict[str, FreshnessSlo],
+    accepted_red: dict[str, str],
+    not_refreshed: dict[str, str],
+) -> None:
+    """判定・受容・除外の宣言が互いに矛盾していないか。矛盾していれば ValueError。
+
+    import 時に 1 回だけ呼ぶ。テストで検査するより前に、矛盾した宣言では
+    ops_check が起動しないようにする（黙って片方が勝つと、どちらの意図で
+    判定されたかがログから読めない）。
+    """
+    both = sorted(set(accepted_red) & set(not_refreshed))
+    if both:
+        raise ValueError(
+            f"ACCEPTED_RED と NOT_REFRESHED の両方に入っている: {both}"
+            "（「いつか直す赤」と「更新しない」は両立しない。どちらかに決める）"
+        )
+    judged_and_exempt = sorted(set(slos) & set(not_refreshed))
+    if judged_and_exempt:
+        raise ValueError(
+            f"SLOS に閾値があるのに NOT_REFRESHED にも入っている: {judged_and_exempt}"
+        )
+    unknown_red = sorted(set(accepted_red) - set(slos))
+    if unknown_red:
+        raise ValueError(f"SLOS に無いデータセットを ACCEPTED_RED で受容している: {unknown_red}")
+    for name, declared in (("ACCEPTED_RED", accepted_red), ("NOT_REFRESHED", not_refreshed)):
+        for dataset, reason in declared.items():
+            if not str(reason or "").strip():
+                raise ValueError(f"{name}[{dataset!r}] に理由が無い（理由の無い宣言は消音と区別できない）")
+
+
+validate_declarations(SLO_BY_DATASET, ACCEPTED_RED, NOT_REFRESHED)
+
+# 判定しないデータセットの判定結果。green / yellow / red / unknown のどれとも
+# 混ぜない（green に倒すと「新鮮」と読まれ、unknown に倒すと毎日鳴る）。
+VERDICT_NOT_REFRESHED = "not_refreshed"
 
 
 def age_hours(updated_at_epoch: int | None, *, now: datetime | None = None) -> float | None:
@@ -252,7 +326,7 @@ def _parse_data_date(value: date | str | None) -> date | None:
 
 
 def _base_datetime(
-    slo: FreshnessSlo, latest_data_date: date | str | None, source_epoch: int | None
+    lag_days: int, latest_data_date: date | str | None, source_epoch: int | None
 ) -> datetime | None:
     """加齢の起点（「あるべき到着時刻」）を決める。
 
@@ -261,7 +335,7 @@ def _base_datetime(
     """
     data_date = _parse_data_date(latest_data_date)
     if data_date is not None:
-        due = _add_business_days(data_date, slo.lag_days)
+        due = _add_business_days(data_date, lag_days)
         return datetime(due.year, due.month, due.day, tzinfo=JST)
     if source_epoch:
         return datetime.fromtimestamp(float(source_epoch), tz=UTC)
@@ -275,14 +349,22 @@ def observation_age_hours(
     source_epoch: int | None,
     now: datetime | None = None,
 ) -> float | None:
-    """判定に使う加齢時間。人向けメッセージ用に切り出してある。"""
+    """判定に使う加齢時間。人向けメッセージ用に切り出してある。
+
+    `NOT_REFRESHED` のデータセットも**暦時間で**返す（判定はしないが、ログで
+    「何日止まっているか」が見えるのは有用なので）。定義に無いものは None。
+    """
     slo = SLO_BY_DATASET.get(dataset)
-    if slo is None:
+    if slo is not None:
+        lag_days, business_days = slo.lag_days, slo.business_days
+    elif dataset in NOT_REFRESHED:
+        lag_days, business_days = 0, False
+    else:
         return None
-    base = _base_datetime(slo, latest_data_date, source_epoch)
+    base = _base_datetime(lag_days, latest_data_date, source_epoch)
     if base is None:
         return None
-    return elapsed_hours(base, now or datetime.now(UTC), business_days=slo.business_days)
+    return elapsed_hours(base, now or datetime.now(UTC), business_days=business_days)
 
 
 def judge_observation(
@@ -293,21 +375,27 @@ def judge_observation(
     row_count: int | None,
     now: datetime | None = None,
 ) -> str:
-    """観測結果から鮮度を判定する。green / yellow / red / unknown。
+    """観測結果から鮮度を判定する。green / yellow / red / unknown / not_refreshed。
 
     優先順（この順序が仕様。入れ替えると偽の緑・偽の unknown が出る）:
+      (0) SLOS にも NOT_REFRESHED にも無い → unknown（知らないものを緑にしない）。
       (a) row_count == 0 → **red**。測った結果ゼロ件は「分からない」ではなく異常。
-      (b) row_count is None → unknown。そもそも測れていない。
-      (c) データ基準日があればその加齢で判定（取得時刻は信じない）。
-      (d) 基準日の列が無い表だけ取得時刻の加齢で判定。
+          NOT_REFRESHED でも red（更新しないことと、消えてよいことは違う）。
+      (b) row_count is None → unknown。そもそも測れていない。NOT_REFRESHED でも同じ。
+      (c) NOT_REFRESHED → `VERDICT_NOT_REFRESHED`。加齢で判定しない。
+      (d) データ基準日があればその加齢で判定（取得時刻は信じない）。
+      (e) 基準日の列が無い表だけ取得時刻の加齢で判定。
     """
     slo = SLO_BY_DATASET.get(dataset)
-    if slo is None:
+    exempt = dataset in NOT_REFRESHED
+    if slo is None and not exempt:
         return "unknown"
     if row_count == 0:
         return "red"
     if row_count is None:
         return "unknown"
+    if slo is None:
+        return VERDICT_NOT_REFRESHED
     return slo.judge(
         observation_age_hours(
             dataset,

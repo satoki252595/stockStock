@@ -162,7 +162,7 @@
       "tag": null
     }
   },
-  "$writer_claim_note": "jss_writer_claims の column_group の語彙をここで固定する。PK が (dataset, column_group) なので、後から値を改名すると DELETE + INSERT の破壊的書換になる。宣言するのは「今日実際に writer が居る (dataset, column_group)」だけで、writer の居ない列群には行を作らない。core_stocks は base（行の作成と既存列）を kabulab-cf、enrich（P4a で足した 12 列を既存行の UPDATE だけで書く群）を stockStock とする。base を stockStock と宣言すると universe.ts の照合が毎回 throw して JPX 母集団同期が止まるので動かさない。enrich は 2026-09-13 から stockStock master_sync が sector33 を updated_at を進めずに埋める（残り 11 列は P4b）。照合は warn → fail の 2 段リリースで、1 段目では食い違いを warning にする（claim を投入するのも書込ジョブなので、claim 行の無い DB への最初の実行を異常終了させるとブートストラップ不能）。",
+  "$writer_claim_note": "jss_writer_claims の column_group の語彙をここで固定する。PK が (dataset, column_group) なので、後から値を改名すると DELETE + INSERT の破壊的書換になる。宣言するのは「今日実際に writer が居る (dataset, column_group)」だけで、writer の居ない列群には行を作らない。core_stocks は base（行の作成と既存列）を kabulab-cf、enrich（P4a で足した 12 列を既存行の UPDATE だけで書く群）を stockStock とする。base を stockStock と宣言すると universe.ts の照合が毎回 throw して JPX 母集団同期が止まるので動かさない。enrich は 2026-09-13 から stockStock master_sync が sector33 を updated_at を進めずに埋める（残り 11 列は P4b）。照合は warn → fail の 2 段リリースで、2026-09-13 から 2 段目（食い違い・宣言漏れ・宣言外の claim はジョブを失敗させる）。照合は必ず投入のあとに行う（claim を投入するのも書込ジョブなので、照合を投入より前に置くと claim 行の無い DB への最初の実行が異常終了してブートストラップ不能）。",
   "column_groups": {
     "all": "その表の全列を 1 writer が書く（分割の必要が無い表）",
     "base": "行の作成 + 基本列（INSERT / UPDATE の両方）",
