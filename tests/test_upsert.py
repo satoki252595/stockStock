@@ -653,8 +653,8 @@ class TestPrefetchedPageMap:
             c, "db-master", {"k": 1}, {"p": 1}, existing_page_id=None, page_resolved=True
         )
         assert pid == "created-1"
-        assert ("query", "db-master") not in c.calls  # 未収録キーは検索せず create
-        assert ("create", "db-master") in c.calls
+        # 未収録キーは作成前に検索せず create する。作成後の 1 回は重複の再確認 (#13)
+        assert c.calls == [("create", "db-master"), ("query", "db-master")]
 
     def test_unresolved_falls_back_to_query(self):
         # page_resolved=False（マップ取得失敗の degrade）→ 従来どおり per-record 検索

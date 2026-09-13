@@ -20,6 +20,7 @@ from .client import NotionClient
 from .upsert import (
     _PRICE_FIELD_TO_PROP,
     _find_page,
+    _is_older,
     _set,
     number_prop,
     provenance_properties,
@@ -140,12 +141,16 @@ def load_stock_master_state(
 ) -> dict[str, StockMasterState]:
     """① 全行の {銘柄コード: StockMasterState}。履歴ポインタも含む。"""
     pages = client.query_database(settings.db_id("stock_master"))
-    out: dict[str, StockMasterState] = {}
+    chosen: dict[str, tuple[dict, StockMasterState]] = {}
     for page in pages:
         parsed = parse_master_state(page)
-        if parsed:
-            out[parsed[0]] = parsed[1]
-    return out
+        if not parsed:
+            continue
+        current = chosen.get(parsed[0])
+        # 同じコードの重複ページはキー検索と同じ規則（最古）で 1 つに決める (#13)
+        if current is None or _is_older(page, current[0]):
+            chosen[parsed[0]] = (page, parsed[1])
+    return {code: state for code, (_page, state) in chosen.items()}
 
 
 def ensure_master_history_properties(client: NotionClient, settings: Settings) -> None:
@@ -257,7 +262,14 @@ def upsert_price_history(
     state: StockMasterState,
     extra_raw_page_ids: Iterable[str] | None = None,
 ) -> tuple[str, StockMasterState, bool]:
-    """履歴子DBへ冪等 upsert。戻り値=(page_id, 更新後state, 新規作成したか)。"""
+    """履歴子DBへ冪等 upsert。戻り値=(page_id, 更新後state, 新規作成したか)。
+
+    作成直後の重複収束 (#13, upsert.converge_created_page) はしない: 書き手は
+    prices_daily だけ（concurrency group で自身とは直列。履歴は既定オフで
+    --enable-history のときだけ書く）で、ほぼ毎行が新規作成のため、有効にすると
+    確認クエリが銘柄数ぶん（1 日約 3,800 回）増える。キー検索は upsert._find_page を
+    通るので、重複があっても最古のページを更新する規則は同じ。
+    """
     state = ensure_price_history_database(client, settings, state)
     if not state.history_db_id:
         raise RuntimeError("履歴子DB ID を確保できない")

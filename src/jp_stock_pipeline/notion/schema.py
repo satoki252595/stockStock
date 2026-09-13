@@ -767,7 +767,11 @@ _BLOCK_CHUNK = 80  # Notion API は1リクエスト最大100ブロック
 def ensure_catalog_page(
     client: NotionClient, settings: Settings, setup: SchemaSetup, db_ids: dict[str, str]
 ) -> str:
-    """データカタログページを冪等に作成 (子ページのタイトル一致で既存検出)。"""
+    """データカタログページを冪等に作成 (子ページのタイトル一致で既存検出)。
+
+    作成直後の重複収束 (#13) はしない: 手動のセットアップ CLI からだけ呼ばれ、
+    定期ジョブと並行しない。万一重複しても静的な説明ページで値は割れない。
+    """
     existing = setup.find_child_page(CATALOG_TITLE)
     if existing:
         logger.info("データカタログ既存: %s (内容は変更しない)", existing)

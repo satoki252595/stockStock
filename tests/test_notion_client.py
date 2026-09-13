@@ -88,7 +88,9 @@ def test_creation_rate_limit_still_retries_with_retry_after(client, operation, s
     lambda c: c.list_child_blocks("block"),
     lambda c: c.update_page("page", {}),
     lambda c: c.update_database("db", properties={}),
-], ids=["query-post", "get-page", "get-db", "list-blocks", "update-page", "update-db"])
+    lambda c: c.archive_page("page"),  # 何度 archive しても同じ結果なので再試行してよい
+], ids=["query-post", "get-page", "get-db", "list-blocks", "update-page", "update-db",
+        "archive-page"])
 def test_reads_and_property_overwrites_still_recover(client, operation):
     calls = sdk_responses(client, [
         httpx.ReadTimeout("timeout"),
@@ -163,6 +165,22 @@ def test_dry_run_creation_still_records_without_network(dry_client):
         assert operation(dry_client)["id"].startswith("dry-run-")
     assert dry_client.raw_api("POST", "file_uploads")["id"].startswith("dry-run-")
     assert len(dry_client.ops) == 4
+
+
+def test_archive_page_sends_archived_flag_only(client):
+    """archive は復元可能な削除（archived=true）だけを送り、プロパティは触らない (#13)。"""
+    calls = sdk_responses(client, [(200, {"id": "page", "archived": True}, {})])
+    client.archive_page("page")
+    assert len(calls) == 1
+    assert calls[0].method == "PATCH"
+    assert json.loads(calls[0].content) == {"archived": True}
+
+
+def test_dry_run_archive_is_recorded_without_network(dry_client):
+    dry_client.archive_page("page")
+    assert [(op.op, op.payload) for op in dry_client.ops] == [
+        ("archive_page", {"page_id": "page"})
+    ]
 
 
 class TestPostJsonErrorDetail:

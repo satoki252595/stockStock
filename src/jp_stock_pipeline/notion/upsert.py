@@ -20,7 +20,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 
 from ..config import Settings
@@ -353,14 +354,124 @@ def export_filter(dataset_name: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# 同じキーの重複ページの扱い (#13)
+#
+# Notion の DB には一意制約が無い。別プロセスが同時に「未存在」を読むと、それぞれが
+# create して同じキーのページが 2 つできる（Actions の concurrency はジョブ別で、
+# edinet_daily と tdnet_hourly は ③ のキーを共有する。手動 CLI や別ホストも排他しない）。
+# 共有ロック（concurrency group の共有）は採らない: GitHub は同じ group の保留中の
+# 実行を後から来た実行で取り消すので、1 日 1 回の edinet_daily が毎時の tdnet_hourly に
+# 取り消されうる。
+#
+# 代わりに次の 2 つで「重複ができても 1 つに収束する」ようにする。
+# 1. 正のページを決め打つ: キー検索は created_time 昇順で取り、最古を正とする。
+#    Notion の created_time は分単位に丸められるので、同じ時刻なら page id の辞書順で
+#    最小のものを正とする。すべての書き手が同じ規則で選ぶので、既に重複があっても
+#    更新先が書き手ごとに割れない。
+# 2. 作成直後に 1 回だけ再確認する: 自分が create したときだけ同じキーで再検索し、
+#    自分より正しいページがあれば、内容をそちらへ書き直してから自分が作ったページだけを
+#    archive する（復元可能）。呼び出し前から存在したページは archive しない。
+#    書き直しや archive に失敗しても例外にしない（重複が残るだけで、データは失わない）。
+# ---------------------------------------------------------------------------
+
+# キー検索の並び順。最古のページを先頭に置く。
+KEY_QUERY_SORTS: list[dict] = [{"timestamp": "created_time", "direction": "ascending"}]
+# キー検索 1 回で取る件数。同じ分に作られた重複を並べて page id で決め打つために
+# 複数件取る（リクエスト回数は 1 回のまま。重複が無ければ返るのは 1 件）。
+KEY_QUERY_PAGE_SIZE = 10
+
+
+@dataclass(frozen=True)
+class UpsertOutcome:
+    """_upsert_outcome の結果。重複の収束に関する情報を呼び出し側とテストへ返す (#13)。"""
+
+    page_id: str  # 以後使う page_id（正のページ）
+    created: bool = False  # この呼び出しで create したか
+    created_page_id: str | None = None  # create したページ（archive されていても入る）
+    duplicate_found: bool = False  # 自分より正しい同じキーのページが見つかった
+    rewritten: bool = False  # 正のページへ内容を書き直した
+    archived: bool = False  # 自分が作ったページを archive した
+    warning: str | None = None  # 収束できなかった理由（重複が残っている）
+
+
+def _page_order_key(page: dict) -> tuple[str, str] | None:
+    """正のページを決める並びのキー (created_time, 正規化した page id)。
+
+    created_time を持たない（テストダブル等）なら None。Notion は常に返す。
+    created_time は Notion が同じ書式 (ISO 8601, UTC) で返すので文字列で比べられる。
+    """
+    created = page.get("created_time")
+    page_id = page.get("id")
+    if not created or not page_id:
+        return None
+    return (str(created), _normalize_page_id(page_id))
+
+
+def _normalize_page_id(page_id: str) -> str:
+    return str(page_id).replace("-", "").lower()
+
+
+def _is_older(page: dict, other: dict) -> bool:
+    """page が other より正しい（古い）か。どちらかに並びのキーが無ければ True。
+
+    キーが無いときに True を返すのは、事前マップで従来どおり「後から来た行」を
+    採るため（created_time を返さないテストダブルでの挙動を変えない）。
+    """
+    page_key = _page_order_key(page)
+    other_key = _page_order_key(other)
+    if page_key is None or other_key is None:
+        return True
+    return page_key < other_key
+
+
+def oldest_page(pages: list[dict]) -> dict | None:
+    """同じキーのページ群から正のページ（最古。同じ時刻なら page id が最小）を選ぶ。
+
+    どれかが created_time を持たなければ並びを判断できないので先頭を返す
+    （クエリは created_time 昇順で頼んでいるので、先頭が最古の候補）。
+    """
+    if not pages:
+        return None
+    keys = [_page_order_key(page) for page in pages]
+    if any(key is None for key in keys):
+        return pages[0]
+    best = min(range(len(pages)), key=lambda i: keys[i])
+    return pages[best]
+
+
+def _oldest_page_ids(pages: Iterable[dict], key_of) -> dict[str, str]:
+    """ページ配列から {キー: 正のページの page_id} を組み立てる（事前マップ用）。
+
+    同じキーのページが複数あれば、キー検索と同じ規則（最古）で 1 つに決める。
+    事前マップと per-record 検索で更新先が食い違わないようにするため (#13)。
+    """
+    chosen: dict[str, dict] = {}
+    for page in pages:
+        key = key_of(page)
+        if not key:
+            continue
+        current = chosen.get(key)
+        if current is None or _is_older(page, current):
+            chosen[key] = page
+    return {key: page["id"] for key, page in chosen.items()}
+
+
+def _query_key(client: NotionClient, db_id: str, flt: dict) -> list[dict]:
+    return client.query_database(
+        db_id, filter=flt, sorts=KEY_QUERY_SORTS,
+        page_size=KEY_QUERY_PAGE_SIZE, max_pages=1,
+    )
+
+
 def _find_page_full(client: NotionClient, db_id: str, flt: dict) -> dict | None:
-    """キー検索でヒットした1件のページ全体（properties込み）を返す。
+    """キー検索で正のページ全体（properties込み）を返す。
 
     _find_page は id だけを返す。更新前に既存プロパティを読んで比較したい場合
     （#14: 開示日時ガード等）はこちらを使う。
+    同じキーのページが複数あれば最古を返す (#13。全書き手が同じページを更新する)。
     """
-    results = client.query_database(db_id, filter=flt, page_size=1, max_pages=1)
-    return results[0] if results else None
+    return oldest_page(_query_key(client, db_id, flt))
 
 
 def _find_page(client: NotionClient, db_id: str, flt: dict) -> str | None:
@@ -388,6 +499,7 @@ def _upsert(
     *,
     existing_page_id: str | None = None,
     page_resolved: bool = False,
+    rewrite_allowed: Callable[[dict], bool] | None = None,
 ) -> str:
     """キー検索 → update or create で冪等に書く (§8.1-6)。
 
@@ -398,20 +510,139 @@ def _upsert(
     ときは page_resolved=False にして従来の per-record 検索へフォールバックする。
     existing_page_id が（削除済み等で）実在しない場合は object_not_found を握って
     create へフォールバックし、事前マップと実DBのズレを自己修復する。
+
+    create したときだけ、同じキーで 1 回再検索して重複を収束させる
+    (#13, converge_created_page)。update の経路では追加の問い合わせをしない。
+    rewrite_allowed は収束時に正のページへ書き直してよいかの判定（③の開示日時ガード）。
     """
+    return _upsert_outcome(
+        client, db_id, flt, props,
+        existing_page_id=existing_page_id, page_resolved=page_resolved,
+        rewrite_allowed=rewrite_allowed,
+    ).page_id
+
+
+def _upsert_outcome(
+    client: NotionClient,
+    db_id: str,
+    flt: dict,
+    props: dict,
+    *,
+    existing_page_id: str | None = None,
+    page_resolved: bool = False,
+    rewrite_allowed: Callable[[dict], bool] | None = None,
+) -> UpsertOutcome:
+    """_upsert の本体。重複の収束結果まで返す。"""
     page_id = existing_page_id if page_resolved else _find_page(client, db_id, flt)
     if page_id:
         try:
             client.update_page(page_id, props)
-            return page_id
+            return UpsertOutcome(page_id=page_id)
         except APIResponseError as exc:
             # 事前マップの page_id が実在しない（削除済み等）→ create で自己修復
-            if page_resolved and getattr(exc, "code", "") == "object_not_found":
-                return client.create_page(
-                    parent={"database_id": db_id}, properties=props
-                )["id"]
-            raise
-    return client.create_page(parent={"database_id": db_id}, properties=props)["id"]
+            if not (page_resolved and getattr(exc, "code", "") == "object_not_found"):
+                raise
+    created = client.create_page(parent={"database_id": db_id}, properties=props)
+    return converge_created_page(
+        client, db_id, flt, created,
+        rewrite_props=props, rewrite_allowed=rewrite_allowed,
+    )
+
+
+def converge_created_page(
+    client: NotionClient,
+    db_id: str,
+    flt: dict,
+    created: dict,
+    *,
+    rewrite_props: dict | None,
+    rewrite_allowed: Callable[[dict], bool] | None = None,
+) -> UpsertOutcome:
+    """create した直後に同じキーで 1 回だけ再検索し、重複を 1 つに収束させる (#13)。
+
+    - 自分が正（最古。同じ時刻なら page id が最小）なら何もしない。自分より新しい
+      重複があっても触らない（それを作った書き手が自分で archive する）。
+    - 自分より正しいページがあれば、rewrite_props をそのページへ update で書き直し、
+      **この呼び出しで作ったページだけ**を archive する（復元可能）。呼び出し前から
+      あったページや、他の書き手が作ったページは archive しない。
+      rewrite_allowed が False を返したら書き直さない（③: 正のページの方が新しい開示）。
+      rewrite_props=None なら書き直さず archive だけする（⑤: 内容が同じと分かっている）。
+    - 書き直しに失敗したら archive しない（自分のページに値が残る）。archive に失敗
+      したら正のページを返す。どちらも例外にせず警告ログと warning で知らせる。
+    - dry-run 合成ID は何も書いていないので確認しない（追加の問い合わせもしない）。
+
+    同時に 2 つの書き手が作ったとき、両方が互いを見れば同じ規則で同じ正を選ぶので、
+    archive されるのは正でない側だけになる。
+    """
+    created_id = created["id"]
+    base = UpsertOutcome(page_id=created_id, created=True, created_page_id=created_id)
+    if real_page_id(created_id) is None:
+        return base
+    try:
+        results = _query_key(client, db_id, flt)
+    except Exception as exc:  # noqa: BLE001 - 確認できないだけ。書き込み自体は成功している
+        return _converge_warning(base, f"作成直後の再確認に失敗（重複の有無は未確認）: {exc}")
+
+    own_norm = _normalize_page_id(created_id)
+    own = next(
+        (page for page in results if _normalize_page_id(page.get("id", "")) == own_norm),
+        created,
+    )
+    others = [page for page in results if _normalize_page_id(page.get("id", "")) != own_norm]
+    if not others:
+        return base
+    pool = [own, *others]
+    if any(_page_order_key(page) is None for page in pool):
+        return _converge_warning(
+            base, "作成直後の再確認: created_time が無く正のページを決められない"
+        )
+    canonical = oldest_page(pool)
+    if canonical is own:
+        logger.info(
+            "同じキーの新しいページがある（作った側が収束させる）: db=%s 正=%s 他=%s",
+            db_id, created_id, [page["id"] for page in others],
+        )
+        return base
+
+    canonical_id = canonical["id"]
+    rewritten = False
+    if rewrite_props is not None and (rewrite_allowed is None or rewrite_allowed(canonical)):
+        try:
+            client.update_page(canonical_id, rewrite_props)
+            rewritten = True
+        except Exception as exc:  # noqa: BLE001 - 自分のページに値が残るので落とさない
+            return _converge_warning(
+                UpsertOutcome(
+                    page_id=created_id, created=True, created_page_id=created_id,
+                    duplicate_found=True,
+                ),
+                f"重複の収束: 正のページ {canonical_id} への書き直しに失敗。"
+                f"作ったページ {created_id} を残す: {exc}",
+            )
+    try:
+        client.archive_page(created_id)
+    except Exception as exc:  # noqa: BLE001 - 値は正のページにあるので落とさない
+        return _converge_warning(
+            UpsertOutcome(
+                page_id=canonical_id, created=True, created_page_id=created_id,
+                duplicate_found=True, rewritten=rewritten,
+            ),
+            f"重複の収束: 作ったページ {created_id} の archive に失敗（重複が残る）: {exc}",
+        )
+    logger.warning(
+        "同じキーのページが既にあったため、作ったページを archive して正へ寄せた: "
+        "db=%s 作成=%s 正=%s 書き直し=%s",
+        db_id, created_id, canonical_id, rewritten,
+    )
+    return UpsertOutcome(
+        page_id=canonical_id, created=True, created_page_id=created_id,
+        duplicate_found=True, rewritten=rewritten, archived=True,
+    )
+
+
+def _converge_warning(outcome: UpsertOutcome, message: str) -> UpsertOutcome:
+    logger.warning("%s", message)
+    return replace(outcome, warning=message)
 
 
 def find_stock_master_page(client: NotionClient, settings: Settings, code: str) -> str | None:
@@ -434,14 +665,12 @@ def _master_map_from_pages(pages: list[dict]) -> dict[str, str]:
     同じスキャン結果から EDINETコード逆引き (_edinet_map_from_pages) も作れるよう、
     取得と組み立てを分けている。
     """
-    out: dict[str, str] = {}
-    for page in pages:
+    def code_of(page: dict) -> str:
         rich = page.get("properties", {}).get(S.MASTER_PROP_CODE, {}).get("rich_text", [])
-        if rich:
-            code = rich[0].get("plain_text", "").strip()
-            if code:
-                out[code] = page["id"]
-    return out
+        return rich[0].get("plain_text", "").strip() if rich else ""
+
+    # 同じコードの重複ページはキー検索と同じ規則（最古）で 1 つに決める (#13)
+    return _oldest_page_ids(pages, code_of)
 
 
 def load_edinet_code_map(client: NotionClient, settings: Settings) -> dict[str, str]:
@@ -482,14 +711,13 @@ def load_price_page_map(client: NotionClient, settings: Settings) -> dict[str, s
     title[0].plain_text を読む（rich_text ではない。混同すると全件ミス→重複行）。
     """
     pages = client.query_database(settings.db_id("prices"))
-    out: dict[str, str] = {}
-    for page in pages:
+
+    def code_of(page: dict) -> str:
         title = page.get("properties", {}).get(S.PRICE_PROP_CODE, {}).get("title", [])
-        if title:
-            code = title[0].get("plain_text", "").strip()
-            if code:
-                out[code] = page["id"]
-    return out
+        return title[0].get("plain_text", "").strip() if title else ""
+
+    # 同じコードの重複ページはキー検索と同じ規則（最古）で 1 つに決める (#13)
+    return _oldest_page_ids(pages, code_of)
 
 
 def load_disclosure_page_map(
@@ -515,14 +743,13 @@ def load_disclosure_page_map(
             ]
         }
     pages = client.query_database(settings.db_id("disclosures"), filter=flt)
-    out: dict[str, str] = {}
-    for page in pages:
+
+    def doc_id_of(page: dict) -> str:
         rich = page.get("properties", {}).get(S.DISC_PROP_DOC_ID, {}).get("rich_text", [])
-        if rich:
-            doc_id = rich[0].get("plain_text", "").strip()
-            if doc_id:
-                out[doc_id] = page["id"]
-    return out
+        return rich[0].get("plain_text", "").strip() if rich else ""
+
+    # 同じ docID の重複ページはキー検索と同じ規則（最古）で 1 つに決める (#13)
+    return _oldest_page_ids(pages, doc_id_of)
 
 
 def upsert_stock_master(
@@ -678,31 +905,13 @@ def upsert_financial_summary(
     db_id = settings.db_id("financials")
     flt = financial_summary_filter(record.code, record.fiscal_period_end, record.disclosure_type)
     existing = _find_page_full(client, db_id, flt)
-    if existing is not None and record.disclosed_at is not None:
-        existing_disclosed_at = _read_date_prop(existing, S.FIN_PROP_DISCLOSED_AT)
-        if existing_disclosed_at is not None:
-            try:
-                is_older = existing_disclosed_at > record.disclosed_at
-            except TypeError:
-                # tz aware/naive 混在等で比較不能。安全側＝上書き許可のまま進む。
-                logger.warning(
-                    "③ 財務サマリ: 開示日の比較に失敗（型不一致）。上書きを許可して継続: "
-                    "%s %s %s 既存=%r 今回=%r",
-                    record.code, record.fiscal_period_end, record.disclosure_type,
-                    existing_disclosed_at, record.disclosed_at,
-                )
-                is_older = False
-            if is_older:
-                logger.info(
-                    "③ 財務サマリ: 既存(開示日=%s)より古い報告(開示日=%s)のため上書きしない: "
-                    "%s %s %s",
-                    existing_disclosed_at, record.disclosed_at,
-                    record.code, record.fiscal_period_end, record.disclosure_type,
-                )
-                return existing["id"]
+    if existing is not None and not financial_overwrite_allowed(existing, record):
+        return existing["id"]
     # existing は直前の _find_page_full で確定済み（prefetch マップ経由ではない
     # just-in-time の単発検索）なので、None の場合も含め page_resolved=True で渡し、
     # _upsert 内での _find_page 再クエリ（二重問い合わせ）を避ける。
+    # create 後の重複収束 (#13) で正のページへ書き直すときも同じガードを通す
+    # （同時に作られた別の書き手のページの方が新しい開示なら巻き戻さない）。
     return _upsert(
         client,
         db_id,
@@ -710,7 +919,41 @@ def upsert_financial_summary(
         financial_summary_properties(record, master_page_id),
         existing_page_id=existing["id"] if existing else None,
         page_resolved=True,
+        rewrite_allowed=lambda page: financial_overwrite_allowed(page, record),
     )
+
+
+def financial_overwrite_allowed(existing: dict, record: FinancialSummaryRecord) -> bool:
+    """③ の既存ページを record で上書きしてよいか（開示日時ガード #14）。
+
+    既存の開示日が record より新しければ False。どちらかが不明、または比較できない
+    （tz aware/naive 混在等）なら推測でブロックせず True（§3-1）。
+    """
+    if record.disclosed_at is None:
+        return True
+    existing_disclosed_at = _read_date_prop(existing, S.FIN_PROP_DISCLOSED_AT)
+    if existing_disclosed_at is None:
+        return True
+    try:
+        is_older = existing_disclosed_at > record.disclosed_at
+    except TypeError:
+        # tz aware/naive 混在等で比較不能。安全側＝上書き許可のまま進む。
+        logger.warning(
+            "③ 財務サマリ: 開示日の比較に失敗（型不一致）。上書きを許可して継続: "
+            "%s %s %s 既存=%r 今回=%r",
+            record.code, record.fiscal_period_end, record.disclosure_type,
+            existing_disclosed_at, record.disclosed_at,
+        )
+        return True
+    if is_older:
+        logger.info(
+            "③ 財務サマリ: 既存(開示日=%s)より古い報告(開示日=%s)のため上書きしない: "
+            "%s %s %s",
+            existing_disclosed_at, record.disclosed_at,
+            record.code, record.fiscal_period_end, record.disclosure_type,
+        )
+        return False
+    return True
 
 
 def upsert_disclosure(

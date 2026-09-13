@@ -36,9 +36,12 @@ from ..models import RawArtifact
 from . import schema as S
 from .client import NotionClient
 from .upsert import (
+    KEY_QUERY_PAGE_SIZE,
+    KEY_QUERY_SORTS,
     date_prop,
     files_prop,
     number_prop,
+    oldest_page,
     select_prop,
     text_prop,
     title_prop,
@@ -227,14 +230,21 @@ def _raw_row_properties(artifact: RawArtifact, uploads: list[tuple[str, str]]) -
 def find_raw_page_by_sha256(
     client: NotionClient, settings: Settings, sha256: str
 ) -> str | None:
-    """⑤ から SHA256 で既存行を探す (重複スキップ §8.1-2)。"""
+    """⑤ から SHA256 で既存行を探す (重複スキップ §8.1-2)。
+
+    同じ SHA256 の行が複数あれば最古を返す (#13。③④の原本 relation の張り先を揃える)。
+    ⑤ は作成直後の重複収束をしない: キーが内容のハッシュなので重複しても値は割れず、
+    収束の確認クエリは原本 1 件ごとに増える（edinet_daily は書類 1 件で最大 2 件）ため。
+    """
     results = client.query_database(
         settings.db_id("raw_files"),
         filter={"property": S.RAW_PROP_SHA256, "rich_text": {"equals": sha256}},
-        page_size=1,
+        sorts=KEY_QUERY_SORTS,
+        page_size=KEY_QUERY_PAGE_SIZE,
         max_pages=1,
     )
-    return results[0]["id"] if results else None
+    page = oldest_page(results)
+    return page["id"] if page else None
 
 
 def upload_raw_artifact(

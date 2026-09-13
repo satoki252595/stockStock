@@ -319,6 +319,16 @@ class NotionClient:
             return self._record("update_page", {"page_id": page_id, "properties": properties})
         return self._call(self._client.pages.update, page_id=page_id, properties=properties)
 
+    def archive_page(self, page_id: str) -> dict:
+        """ページを archive する（Notion のゴミ箱へ移す。復元可能な削除）。
+
+        同じ page_id を何度 archive しても結果は同じなので、update と同様に再試行してよい。
+        完全削除（ゴミ箱を空にする）はしない。
+        """
+        if self.dry_run:
+            return self._record("archive_page", {"page_id": page_id})
+        return self._call(self._client.pages.update, page_id=page_id, archived=True)
+
     def create_database(
         self,
         *,
