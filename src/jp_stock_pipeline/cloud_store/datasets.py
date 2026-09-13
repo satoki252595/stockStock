@@ -157,15 +157,13 @@ DATASET_SOURCES: tuple[DatasetSource, ...] = (
         dataset="core_stocks",
         store="D1",
         location="core_stocks",
-        # **stockStock のジョブ名を書かない。** この表の行を今日書いているのは
-        # kabulab-cf の `src/cron/universe.ts` だけで、stockStock 側は
-        # `core_stocks_migrate` が ALTER / CREATE INDEX しか出さず、値の充填は
-        # `cloud_store/core_stocks.build_column_update` が「組み立てて返す
-        # （実行しない）」設計である。ここに `master_sync` と書いていたので、
-        # `jss_dataset_freshness.writer` と `jss_writer_claims` の突合
-        # （設計書 §1.3-3）が食い違う状態だった。claim は
-        # `governance.WRITER_CLAIMS` の `core_stocks/base` が正で、P4b の
-        # writer 交代のときに両方を同じ PR で動かす。
+        # **stockStock のジョブ名を書かない。** この鮮度が測る `MAX(updated_at)`
+        # を進めるのは kabulab-cf の `src/cron/universe.ts`（claim の
+        # `core_stocks/base`）だけである。stockStock の `master_sync` は
+        # `sector33`（`core_stocks/enrich`）を埋めるが、`updated_at` を**進めない**
+        # 専用の UPDATE（`core_stocks.build_sector33_updates`）で書くので、
+        # この鮮度には現れない。ここに `master_sync` と書くと、測っている列の
+        # writer と名前が食い違う（以前そう書いていて §1.3-3 の突合が割れていた）。
         writer="kabulab-cf universe.ts",
         sql=(
             "SELECT NULL AS latest_date, MAX(updated_at) AS source_epoch,"
@@ -175,7 +173,8 @@ DATASET_SOURCES: tuple[DatasetSource, ...] = (
         note=(
             "データ基準日の列が無い（src_data_date は実測で全行 NULL）ので"
             "`updated_at` しか手が無い。ただしこの列は**行を書いた時刻**で"
-            "（`cloud_store/core_stocks.py` が `updated_at = (unixepoch())` を置く）、"
+            "（kabulab-cf の universe.ts が `updated_at = (unixepoch())` を置く。"
+            "stockStock の sector33 充填は `updated_at` を進めない）、"
             "データ自身の as_of ではない。writer が古い値を書き直すだけでも進むので"
             "「取得はできたが中身が更新されていない」は検知できない。"
             "`src_fetched_at` が埋まったらそちらへ寄せる（P4a 直後は全行 NULL で、"

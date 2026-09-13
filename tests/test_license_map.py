@@ -264,29 +264,46 @@ class TestWriterClaims:
             (c.dataset, c.column_group, c.writer) for c in G.WRITER_CLAIMS
         }
 
-    def test_core_stocks_は_kabulab_cf_から始める(self, monkeypatch) -> None:
-        """`writer='stockStock'` で入れると universe.ts の照合が毎回 throw して
+    def test_core_stocks_の_base_は_kabulab_cf_のまま(self, monkeypatch) -> None:
+        """`base` を `stockStock` で入れると universe.ts の照合が毎回 throw して
 
-        JPX 母集団同期が止まる。`core_stocks` の行を今日書いているのは
-        kabulab-cf の universe.ts だけで、stockStock 側は
-        `build_column_update` が「組み立てて返す（実行しない）」設計である。
+        JPX 母集団同期が止まる。`core_stocks` の行の作成と既存列を書くのは
+        kabulab-cf の universe.ts だけで、stockStock が書くのは enrich 群
+        （`sector33`）だけである。
         """
         store = _FakeStore()
         _wire(monkeypatch, store)
         assert license_map.main([], env=dict(_D1_ENV)) == 0
-        assert ("core_stocks", "base", "kabulab-cf") in self._claims(store)
-        assert not [c for c in self._claims(store)
-                    if c[0] == "core_stocks" and c[2] == "stockStock"]
+        claims = self._claims(store)
+        assert ("core_stocks", "base", "kabulab-cf") in claims
+        assert ("core_stocks", "base", "stockStock") not in claims
+        assert ("core_stocks", "enrich", "stockStock") in claims
 
-    def test_writer_が居ない列群は宣言しない(self) -> None:
-        """`core_stocks` の enrich 群（P4a の 12 列）は今日どのジョブも書かない。
+    def test_enrich_の宣言には実際の書込経路がある(self) -> None:
+        """writer が居ない群は宣言しない、という規律は enrich を宣言した今も守る。
 
-        writer が居ない群を宣言すると「列を足したが writer を入れ忘れて黙って
-        死ぬ」を検出できなくなる（`estimate_source_url` は 8,314 行すべて NULL
-        なのに `estimated_value` は 5,333 行ある、という状態が実在した）。
+        以前は「enrich 群は宣言しない」を固定していたが、その意図は
+        「writer が居ない群を宣言すると、列を足したが writer を入れ忘れて黙って
+        死ぬを検出できなくなる」（`estimate_source_url` は 8,314 行すべて NULL
+        なのに `estimated_value` は 5,333 行ある、という状態が実在した）である。
+        `master_sync` が `sector33` を書き始めたので enrich = stockStock を期待し、
+        その宣言が**実際に呼ばれる書込経路**に裏付けられていることを AST で確かめる
+        （docstring の言及を呼び出しと誤認しないよう Call ノードで見る）。
         """
-        groups = {(c.dataset, c.column_group) for c in G.WRITER_CLAIMS}
-        assert ("core_stocks", "enrich") not in groups
+        import ast
+        import pathlib
+
+        claims = {(c.dataset, c.column_group): c.writer for c in G.WRITER_CLAIMS}
+        assert claims[("core_stocks", "enrich")] == G.WRITER_STOCKSTOCK
+
+        jobs = pathlib.Path(cs.__file__).resolve().parent.parent / "jobs"
+        callers = set()
+        for path in sorted(jobs.glob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                    if node.func.attr == "build_sector33_updates":
+                        callers.add(path.name)
+        assert callers == {"master_sync.py"}, callers
 
     def test_all_を使わず_base_で始める(self) -> None:
         """PK が `(dataset, column_group)` なので後からの改名は破壊的書換になる。

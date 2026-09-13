@@ -3055,7 +3055,7 @@ kabulab-cf は `pnpm typecheck` 通過、本番 11 経路がすべて 200。
 （素の SQLite の既定は 500）。15 表の孤児検査を 1 文にまとめると必ず失敗するので
 3 文に分割している（`cloud_store/d1.MAX_COMPOUND_SELECT_TERMS`）。
 
-**P4a の範囲外にしたもの**: `instrument_type` / `sector33` / `sector17` の値の充填。
+**P4a の範囲外にしたもの**: `instrument_type` / `sector33` / `sector17` の値の充填（`sector33` は 2026-09-13 に下記「sector33 の充填」で解消。残りは P4b）。
 
 着手時点では供給源の JPX data_j が旧 URL (`.../data_j.xls`) で **HTTP 404** を返し、
 一次データを正規に取得できなかった（`core_stocks.MAX(updated_at)` は 2026-08-10 で、
@@ -3096,6 +3096,17 @@ kabulab-cf は `pnpm typecheck` 通過、本番 11 経路がすべて 200。
 この 2 つの事実（鮮度の基準が `updated_at` である / 充填が `updated_at` を進める）は `tests/test_core_stocks_migrate.py` の `TestFillWouldBlindTheFreshnessMonitor` が固定してあり、`build_column_update` を `jobs/` から呼び始めた時点で落ちる（AST の Call ノードで検出する）。
 
 なお `sector33` が全行 NULL のままなので、**kabulab-cf 側が公開面の業種を `sector` → `sector33` へ切り替えてよいのは充填の後**である（切り替えだけ先に入れると業種が全件空欄になる）。タグの修正（commercial-ok）と充填は別物であることに注意。
+
+##### sector33 の充填（2026-09-13 ユーザ承認）
+
+公開面は既に `core_stocks.sector33` を読んでおり「—」表示だったため、ユーザが「33業種で表示する」と決定した。上の前提条件は、**`updated_at` を進めない専用の UPDATE** で解いた（上の案 1・2 のどちらでもない 3 つ目の案）。
+
+- `cloud_store/core_stocks.build_sector33_updates` は `UPDATE core_stocks SET sector33 = ? WHERE code IN (...)` だけを組み立てる。`updated_at` を SET しないので、鮮度 `MAX(updated_at)` を進めるのは kabulab-cf の universe sync だけのまま。本番 `core_stocks` に trigger が無いことは `sqlite_master` で確認した
+- 値は `contracts/sector33.normalize_sector33` で東証33業種の名称へ揃える（`倉庫・運輸関連` → `倉庫・運輸関連業`、`外国法人・組合` → NULL）
+- 差分だけ書く。コードリストに現れない銘柄（REIT・インフラファンド等）は触らない
+- writer claim は `core_stocks/base = kabulab-cf`（不変）/ `core_stocks/enrich = stockStock`（新設）
+- 戻し方: `UPDATE core_stocks SET sector33 = NULL` と `jss_writer_claims` の `('core_stocks','enrich')` 行の削除
+- EDINET の業種は提出者の申告で、東証の割り当てではない。`sector`（JPX）との一致は表記ゆれ補正後で約 96.2%。残りは分類の違いで、直す対象ではない
 
 ---
 

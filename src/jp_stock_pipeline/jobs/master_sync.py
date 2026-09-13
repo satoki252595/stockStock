@@ -4,29 +4,40 @@
 原本(⑤)を Notion・ローカルの両系統に保存できなかった取得単位のみ構造化を書かず中止する
 （片系統に原本が残れば構造化は書く。① upsert 自体も Notion/ローカル独立 §7.1/§3-3）。
 
-## D1 `core_stocks.sector33` をこのジョブで充填しない理由
+## D1 `core_stocks.sector33` の充填（updated_at を進めない）
 
 `parse_codelist` が返す `StockMasterRecord.sector33` は EDINET コードリストの
-「提出者業種」で、出所とライセンス（commercial-ok）は 2026-09-13 に決着した。
-Notion ① とローカル ① へは既にこの値を書いている。
+「提出者業種」（commercial-ok）。Notion ① とローカル ① へは原文のまま書き、
+**D1 `core_stocks.sector33` へは東証33業種の名称へ正規化してから**書く
+（`contracts/sector33.py`。公開面が33業種で表示するため）。
 
-しかし **D1 `core_stocks.sector33` への UPDATE はここでは流さない**。
-`cloud_store/core_stocks.build_column_update` は `updated_at = (unixepoch())` を
-明示的に進めるので、月次でこのジョブが 3,818 行を充填すると
-`cloud_store/datasets.py` が `core_stocks` の鮮度に使っている `MAX(updated_at)`
-が**毎月必ず進む**。そうなると、kabulab-cf の月次 universe sync が死んでいても
-`core_stocks` の SLO（33 日で黄・46 日で赤）は発火しない。JPX の 404 で銘柄
-マスタが 33 日止まったのに誰も気づかなかった、という検知したかった事象を
-自分の書き込みで隠すことになる。
+以前はここで充填しなかった。`cloud_store/core_stocks.build_column_update` が
+`updated_at = (unixepoch())` を進めるので、月次に充填すると
+`cloud_store/datasets.py` が `core_stocks` の鮮度に使う `MAX(updated_at)` が
+**毎月必ず進み**、kabulab-cf の月次 universe sync が死んでいても SLO が発火
+しなくなるからである（JPX の 404 で銘柄マスタが 33 日止まったのに誰も気づか
+なかった事象を、自分の書き込みで隠す）。
 
-詳細と P4b が先に解くべき前提は `cloud_store/core_stocks.py` の
-「充填を P4b に置く理由」に書いてある。
+今回は `build_column_update` を使わず、**`sector33` だけを SET する専用の
+UPDATE**（`core_stocks.build_sector33_updates`）で解いた。`updated_at` を
+進めるのは kabulab-cf だけのままなので、鮮度の意味は変わらない。詳細は
+`cloud_store/core_stocks.py` の「sector33 の充填で updated_at を進めない理由」。
+
+- **差分だけ書く。** `SELECT code, sector33 FROM core_stocks` を 1 文読み、
+  値が変わる行だけ UPDATE する。初回 backfill の後は通常 0 文
+- **コードリストに現れない銘柄は触らない**（一時的な欠落で既存値を NULL に潰さない）
+- `--dry-run` は読むだけで書かない。`--limit` は部分取得なので読みもしない
+- D1 の失敗は `ctx.add_failure` に記録し、Notion / ローカルの同期は止めない
+- `ctx.cloud` を経由しない。runner は dry-run で `ctx.cloud` を張らないので、
+  依存すると dry-run で件数を出せない（`freshness_probe` と同じ）
 """
 
 from __future__ import annotations
 
 import logging
 
+from ..cloud_store import core_stocks
+from ..cloud_store.d1 import D1Error, D1Store
 from ..collectors import edinet_codelist
 from ..notion import upsert
 from .runner import JobContext, apply_limit, build_parser, main_exit, run_job
@@ -96,10 +107,76 @@ def execute(ctx: JobContext) -> None:
     # 7. 上場廃止検知 (§ Phase3): コードリストから消えた銘柄を listed=False にする
     #    (状態=上場廃止 の確定は一次開示が所有)。--limit 指定時は部分取得のため
     #    誤判定回避でスキップする。
+    # 8. D1 core_stocks.sector33 の充填も --limit では行わない。差分は「コードリストに
+    #    居る銘柄」だけを対象にするので部分取得でも既存値は潰れないが、部分取得で
+    #    本番へ書くと「一部だけ最新」の状態を作るため、上場廃止検知と同じ扱いにする。
     if ctx.args.limit:
         logger.info("--limit 指定のため上場廃止検知はスキップ (部分取得 § Phase3)")
+        logger.info("--limit 指定のため D1 core_stocks.sector33 の充填はスキップ (部分取得)")
         return
     _detect_delistings(ctx, fetched_codes, master_map, map_ok)
+    _sync_sector33(ctx, records)
+
+
+def _sector33_store(ctx: JobContext) -> D1Store | None:
+    """`core_stocks` がある D1 への接続。資格情報が無ければ None。
+
+    `KABULAB_D1_DATABASE_ID` があればそちらを使う（`freshness_probe` /
+    `core_stocks_migrate` と同じ解決。`core_stocks` は移行元 kabulab-cf 所有の表）。
+    """
+    settings = ctx.settings.cloud_store
+    if not settings.d1_enabled():
+        return None
+    return D1Store(
+        settings,
+        writer=JOB_NAME,
+        database_id=settings.kabulab_d1_database_id or settings.d1_database_id,
+    )
+
+
+def _sync_sector33(ctx: JobContext, records: list) -> None:
+    """EDINET「提出者業種」で D1 `core_stocks.sector33` の差分だけを埋める。
+
+    D1 未設定は失敗にしない。このジョブの主目的は Notion ① / ローカル ① の同期で、
+    D1 の資格情報が無い環境（手元・Notion 単独運用）でも従来どおり成功させる。
+    成否は `processed` に数えない（① の件数の意味を変えないため）。
+    """
+    store = _sector33_store(ctx)
+    if store is None:
+        logger.info("D1 未設定のため core_stocks.sector33 の充填はスキップ")
+        return
+    codelist = [(r.code, r.sector33) for r in _dedup_by_code(records)]
+    try:
+        current = store.query(core_stocks.SECTOR33_SNAPSHOT_SQL)
+    except D1Error as exc:
+        ctx.add_failure("core_stocks.sector33", f"現在値を読めない: {exc}")
+        return
+    changes = core_stocks.plan_sector33_updates(current, codelist)
+    statements = core_stocks.build_sector33_updates(changes)
+    to_null = sum(1 for v in changes.values() if v is None)
+    if ctx.settings.dry_run:
+        logger.info(
+            "dry-run: core_stocks.sector33 を書かない（変わる行 %d 件 / うち NULL %d 件"
+            " / UPDATE %d 文 / 読んだ行 %d 件）",
+            len(changes), to_null, len(statements), len(current),
+        )
+        return
+    written = 0
+    for sql, params in statements:
+        try:
+            store.query(sql, params)
+        except D1Error as exc:
+            # 途中の文で止める。書けた分は残るが、次回は差分から再計算するので収束する。
+            ctx.add_failure(
+                "core_stocks.sector33",
+                f"UPDATE 失敗（{written}/{len(changes)} 行まで適用済み）: {exc}",
+            )
+            return
+        written += len(params) - 1
+    logger.info(
+        "core_stocks.sector33: %d 行を更新（うち NULL %d 件 / %d 文 / 読んだ行 %d 件）",
+        written, to_null, len(statements), len(current),
+    )
 
 
 def _dedup_by_code(records: list) -> list:

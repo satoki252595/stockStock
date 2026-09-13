@@ -305,7 +305,7 @@ INDEX_SYMBOLS: tuple[tuple[str, str | None, str], ...] = (
 # | 列 | 書く writer | 一次ソース | タグ |
 # |---|---|---|---|
 # | `sector`   | kabulab-cf `src/cron/universe.ts`（`sector: r.sector33`） | JPX `data_j.xlsx` の33業種 | **personal-only** |
-# | `sector33` | stockStock `master_sync`（値の充填は P4b）                 | EDINET コードリストの「提出者業種」 | **commercial-ok** |
+# | `sector33` | stockStock `master_sync`（東証33業種の名称へ正規化して充填） | EDINET コードリストの「提出者業種」 | **commercial-ok** |
 #
 # stockStock 側の根拠は `collectors/edinet_codelist.py` の
 # `sector33=row[idx[_COL_SECTOR]]`（`_COL_SECTOR = "提出者業種"`）で、レコードの
@@ -316,10 +316,10 @@ INDEX_SYMBOLS: tuple[tuple[str, str | None, str], ...] = (
 # いなかった**。片方だけ直すと「JPX 由来の業種が commercial-ok として公開面に
 # 出る」に反転するので、2 列は必ず同時に扱う。
 #
-# `sector33` は 2026-09-13 時点で本番 3,818 行すべて NULL。タグが公開可に
-# なっても**中身が入るのは P4b の充填以降**なので、公開面の業種を
-# `sector` → `sector33` へ切り替えるのは充填の後でなければならない
-# （切り替えだけ先に入れると業種が全件空欄になる）。
+# `sector33` は 2026-09-13 まで本番 3,818 行すべて NULL で、同日から
+# `master_sync` が埋める（`cloud_store/core_stocks.build_sector33_updates`）。
+# EDINET の業種は提出者の申告なので `sector` と約 4% の銘柄で分類が違うが、
+# `sector` へ寄せてはいけない（寄せた値は JPX 由来 = personal-only になる）。
 MIXED_LICENSE_COLUMNS: dict[str, dict[str, LicenseTag]] = {
     "core_stocks": {
         # EDINET コードリスト由来 → commercial-ok

@@ -38,7 +38,7 @@
 `sector` = kabulab-cf が JPX `data_j.xlsx` の33業種を書く既存列 → personal-only /
 `sector33` = stockStock が EDINET「提出者業種」を書く新設列 → commercial-ok。
 2 列を 1 列へ統合してはいけない（タグの違う値が同居すると列単位で区別できない）。
-`sector33` は本番で全行 NULL なので、公開面の業種を切り替えるのは P4b の充填後。
+`sector33` は stockStock `master_sync` が東証33業種の名称へ正規化して埋める（2026-09-13〜。`updated_at` は進めない）。
 
 ## 銘柄コード契約
 
