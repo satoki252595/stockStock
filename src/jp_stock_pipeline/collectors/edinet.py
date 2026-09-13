@@ -212,6 +212,7 @@ def fetch_document(
         ext=ext,
         license_tag=LicenseTag.COMMERCIAL_OK,
         base_dir=settings.raw_data_dir,
+        doc_id=doc_id,
     )
 
 

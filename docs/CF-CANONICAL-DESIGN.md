@@ -328,6 +328,8 @@ raw/minkabu/yutai_monthly/2026/2026-09-01/ALL/_/5e8d3f20a1b7c964.json
 
 > **未確認（U8）**: `rawstore.save_raw` は primary + sha8 の2スロットしか持たず、3つ目の別内容で `ValueError` を投げる実装に見える（`rawstore.py:105` 付近）にもかかわらず、実測で250変種が存在する。別経路の書込がある可能性があり、`doc_id` 追加の実装前に調査が要る。
 
+**旧キー救済（fix/raw-doc-id-legacy-key）**: `doc_id` を `RawArtifact` へ追加した後も、収集側が `save_raw` に `doc_id` を渡すまでの間（2026-09-11〜）に書かれた EDINET csv/pdf・TDnet tdnet_xbrl の原本は、`doc_id` セグメントが `_` の「旧キー」のまま R2 にある。この期間を `cloud_store.sink.LEGACY_KEY_UNTIL`（切替日を含む）で区切り、それ以前の `data_date` に限って `upsert_raw_artifact` は doc_id 付きの新キーが無ければ旧キーを先に HEAD し、実在すれば PUT せずそのキーを索引する（R2 のオブジェクト数を増やさない）。結果として、旧キーで救済された行は **`jss_raw_files.doc_id` 列は埋まるが `r2_key` の `doc_id` セグメントは `_` のまま**残る。読み手は常に D1 の `r2_key` を辿るので実害は無いが、**索引の `r2_key` が正で、キー中の `doc_id` セグメントは信用しない**こと。`LEGACY_KEY_UNTIL` を過ぎた `data_date` では旧キーを HEAD しないため、以後の新規オブジェクトはキーとインデックスの `doc_id` が常に一致する。
+
 #### 3.3 日中に繰り返し取得する datatype の扱い
 
 `tdnet_list` は平日 9:00–19:00 の毎時取得（11回/日）で、同一 `data_date` について**内容が少しずつ異なるスナップショット**が最大11個生まれる。キーに sha256 が入っているので衝突はしないが、**旧設計の「同一内容の再取得 → 同一キー」という説明はこのケースを解いていない**。

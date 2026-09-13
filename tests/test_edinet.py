@@ -106,6 +106,30 @@ class TestErrorResponses:
             mod.fetch_document(_settings(tmp_path), "S100ABCD", 3)
 
 
+class TestFetchDocumentPassesDocId:
+    """jss_raw_files.doc_id が全行 NULL だった原因: save_raw に doc_id を渡していなかった。"""
+
+    def test_fetch_document_passes_doc_id_to_save_raw(self, tmp_path, monkeypatch):
+        class _Resp:
+            content = b"%PDF-1.4 fake body for test"
+            headers = {"Content-Type": "application/pdf"}
+
+        monkeypatch.setattr(mod, "fetch", lambda url, **kw: _Resp())
+        captured: dict = {}
+
+        def fake_save_raw(content, **kwargs):
+            captured.update(kwargs)
+            return "SENTINEL"
+
+        monkeypatch.setattr(mod, "save_raw", fake_save_raw)
+        settings = _settings(tmp_path)
+        result = mod.fetch_document(
+            settings, "S100ABCD", 2, code="7203", data_date=date(2026, 6, 25)
+        )
+        assert result == "SENTINEL"
+        assert captured["doc_id"] == "S100ABCD"
+
+
 class TestWithRealDocumentsList:
     """実 documents.json フィクスチャ（要APIキー取得）でのテスト。未取得は skip。"""
 

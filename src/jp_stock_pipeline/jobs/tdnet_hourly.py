@@ -87,6 +87,7 @@ def _process_financial_xbrl(
         ext="zip",
         license_tag=source_license(Source.TDNET),
         base_dir=ctx.settings.raw_data_dir,
+        doc_id=record.doc_id,
     )
     tidy = xbrl_to_csv.xbrl_zip_to_tidy(
         artifact.local_path.read_bytes(), record.code or "", record.doc_id
