@@ -555,8 +555,26 @@ def apply_group(client: NotionClient, db_id: str, group: dict, report: ApplyRepo
     if edited:
         return skip("計画後にコピーが編集された", pages=edited)
 
-    fill_relations(client, canonical)
     desired = group["desired_properties"]
+    # 関連付けは相手側（①銘柄マスタ・⑤原本の逆向きプロパティ）からも張れる。相手側からの変更で
+    # ④ の last_edited_time が進むかは Notion の文書に無く、上の照合だけでは「計画後にコピーへ
+    # 張られた原本」を見落として、そのコピーごとゴミ箱へ送りうる。そこで生きている全ページの
+    # 関連付けが計画の和集合に収まっているかを確かめる。ページは上のキー検索で読んでいるので、
+    # 追加のリクエストは has_more が立ったときだけ。
+    # 採らなかった案: 生きている和集合で計画の値を上書きして進める → 計画・レビューの外の値を書くことになる。
+    for live_page in live:
+        fill_relations(client, live_page)
+    for prop in RELATION_PROPS:
+        planned_ids = {_norm_id(r["id"]) for r in (desired.get(prop) or {}).get("relation", [])}
+        live_ids = {
+            _norm_id(r["id"])
+            for p in live
+            for r in (p.get("properties", {}).get(prop) or {}).get("relation") or []
+        }
+        extra = sorted(live_ids - planned_ids)
+        if extra:
+            return skip("計画後に関連付けが増えた", prop=prop, relation_ids=extra)
+
     canonical_unchanged = (
         canonical["last_edited_time"] == planned[canonical_key]["last_edited_time"]
     )

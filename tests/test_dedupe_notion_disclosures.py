@@ -416,6 +416,18 @@ class TestApply:
         assert report.skipped[0]["reason"] == "計画後に同じ書類管理番号のページが増えた"
         assert fake.archived_ids() == []
 
+    def test_relation_added_from_other_side_after_plan_is_skipped(self):
+        # ⑤ 側から計画後にコピーへ原本が張られ、コピーの last_edited_time は進まなかった場合。
+        # そのままだとコピーごとゴミ箱へ送り、正のページからその原本が辿れなくなる。
+        pages = three_copies()
+        plan = make_plan(pages)
+        fake = FakeNotion(pages)
+        fake.pages["cccc"]["properties"][S.PROP_RAW_RELATION]["relation"].append({"id": "r9"})
+        report = dd.apply_plan(fake, plan, check_backup=False)
+        assert report.skipped[0]["reason"] == "計画後に関連付けが増えた"
+        assert report.skipped[0]["relation_ids"] == ["r9"]
+        assert [c for c in fake.calls if c[0] in ("update", "archive")] == []
+
     def test_verify_mismatch_does_not_archive(self):
         pages = three_copies()
         fake = FakeNotion(pages)
@@ -472,6 +484,36 @@ class TestCanonicalIsNeverArchived:
         with pytest.raises(dd.PlanError):
             dd._archive_copy(fake, group, "zzzz")
         assert fake.archived_ids() == []
+
+    def test_archive_helper_rejects_canonical_even_if_listed_in_plan(self):
+        # validate_plan を通らない経路（計画を読み込んだ後に書き換わった等）でも、
+        # _archive_copy 自身が正のページを拒否する。上のテストは「計画外」の検査でも落ちるので、
+        # 正のページの検査だけを外したときに落ちるよう、正をアーカイブ対象に入れた計画で確かめる。
+        (group,) = make_plan(three_copies())["groups"]
+        group["archive_page_ids"].append("aaaa")
+        fake = FakeNotion(three_copies())
+        with pytest.raises(dd.PlanError, match="正のページを archive"):
+            dd._archive_copy(fake, group, "aaaa")
+        assert fake.archived_ids() == []
+
+    def test_validate_plan_rejects_canonical_listed_in_its_own_group(self):
+        # 別グループとの突き合わせではなく、同じグループ内の検査で止まることを確かめる
+        plan = make_plan(three_copies())
+        plan["groups"][0]["archive_page_ids"].append("aaaa")
+        with pytest.raises(dd.PlanError, match="正のページがアーカイブ対象に入っている: aaaa"):
+            dd.validate_plan(plan, check_backup=False)
+
+    def test_validate_plan_rejects_canonical_of_another_group(self):
+        pages = three_copies() + [
+            page("yyyy", created="2026-07-03T00:00:00.000Z", edited="2026-07-03T00:00:00.000Z",
+                 doc="TD2"),
+        ]
+        plan = make_plan(pages)
+        td1, td2 = plan["groups"]
+        td1["archive_page_ids"].append(td2["canonical_page_id"])
+        td1["pages"].append(next(p for p in td2["pages"] if p["id"] == td2["canonical_page_id"]))
+        with pytest.raises(dd.PlanError, match="別グループの正のページ"):
+            dd.validate_plan(plan, check_backup=False)
 
     def test_canonical_is_not_archived_across_many_runs(self):
         pages = three_copies()
