@@ -95,6 +95,20 @@ class _FakeStore(D1Store):
         }
 
 
+class _ClaimUpsertLostStore(_FakeStore):
+    """`jss_writer_claims` への upsert だけが届かない store。
+
+    投入の直後に読み直す設計なので、writer の食い違いや宣言漏れが照合に残るのは
+    「upsert が届かなかった」ときだけである。それを再現するための差し替え。
+    他の参照表は通常どおり投入する（そちらの失敗と混ざらないように）。
+    """
+
+    def upsert(self, table, columns, rows, *, conflict):
+        if table == "jss_writer_claims":
+            return 0
+        return super().upsert(table, columns, rows, conflict=conflict)
+
+
 def _wire(monkeypatch, store: _FakeStore) -> None:
     from jp_stock_pipeline.cloud_store import d1 as d1_module
 
@@ -327,22 +341,76 @@ class TestWriterClaims:
             "SELECT dataset, column_group, updated_at FROM jss_writer_claims"
         ) == first
 
-    def test_照合は_1_段目では失敗させない(self, monkeypatch) -> None:
+    def test_2_段リリースの_2_段目に上がっている(self) -> None:
+        """1 段目の本番実行（run 34750652448）は食い違い warning 0 件だった。"""
+        assert G.CLAIM_MISMATCH_IS_FAILURE is True
+
+    def test_行が無い_DB_への初回は投入してから照合して成功する(self, monkeypatch) -> None:
         """claim 行の無い DB への最初の実行を異常終了させない（鶏と卵）。
 
-        投入する側も書込ジョブなので、「claim が無ければ例外」を先に入れると
-        ブートストラップ不能になる。
+        以前は「1 段目では失敗させない」を固定していたが、その意図はブートストラップ
+        （投入する側も書込ジョブなので、照合を先にすると初回が必ず落ちる）である。
+        2 段目でもその意図は変わらないので、**失敗にしたうえで**初回が成功すること、
+        そして成功の理由が「投入 → 照合」の順序であることを SQL の順で確かめる。
         """
         store = _FakeStore()
         _wire(monkeypatch, store)
-        store.query(
-            "INSERT INTO jss_writer_claims (dataset, column_group, writer, updated_at)"
-            " VALUES ('core_stocks', 'all', 'stockStock', 0)"
-        )
+        assert self._claims(store) == set()
+        store.sql_log.clear()  # 上の確認用 SELECT をジョブの順序と混ぜない
         assert license_map.main([], env=dict(_D1_ENV)) == 0
+        log = store.sql_log
+        insert_at = next(
+            i for i, s in enumerate(log)
+            if s.lstrip().upper().startswith("INSERT") and "jss_writer_claims" in s
+        )
+        select_at = next(i for i, s in enumerate(log) if s == G.WRITER_CLAIMS_SQL)
+        assert insert_at < select_at, "照合が投入より前にある = 初回が落ちる順序"
 
-    def test_宣言に無い_claim_は消さずに報告する(self, monkeypatch, caplog) -> None:
-        """本番の既存 4 行の中身は本レーンから読めない。推測で消さない。"""
+    def test_本番と同じく宣言と一致していれば成功する(self, monkeypatch, caplog) -> None:
+        """本番の 18 行（宣言と一致）が既にある状態。warning も出さない。"""
+        store = _FakeStore()
+        _wire(monkeypatch, store)
+        for row in G.writer_claim_rows():
+            store.query(
+                "INSERT INTO jss_writer_claims (dataset, column_group, writer, updated_at)"
+                " VALUES (?, ?, ?, ?)",
+                row,
+            )
+        with caplog.at_level("WARNING"):
+            assert license_map.main([], env=dict(_D1_ENV)) == 0
+        assert "writer claim" not in caplog.text
+        assert "jss_writer_claims" not in caplog.text
+
+    def test_投入が届かず_writer_が食い違ったままなら落ちる(self, monkeypatch, caplog) -> None:
+        """投入の直後に読み直しているので、食い違いが残る = upsert が届いていない。
+
+        upsert だけを握りつぶした store で、実表に食い違う writer を置いておく。
+        """
+        store = _ClaimUpsertLostStore()
+        _wire(monkeypatch, store)
+        for dataset, group, writer, epoch in G.writer_claim_rows():
+            if (dataset, group) == ("core_stocks", "base"):
+                writer = G.WRITER_STOCKSTOCK  # 宣言は kabulab-cf
+            store.query(
+                "INSERT INTO jss_writer_claims (dataset, column_group, writer, updated_at)"
+                " VALUES (?, ?, ?, ?)",
+                [dataset, group, writer, epoch],
+            )
+        with caplog.at_level("WARNING"):
+            assert license_map.main([], env=dict(_D1_ENV)) == 1
+        assert "食い違う" in caplog.text
+        assert "core_stocks" in caplog.text
+
+    def test_投入が届かず宣言が実表に無ければ落ちる(self, monkeypatch, caplog) -> None:
+        """宣言漏れ。行の無い DB で upsert が届かなければ初回でも成功にしない。"""
+        store = _ClaimUpsertLostStore()
+        _wire(monkeypatch, store)
+        with caplog.at_level("WARNING"):
+            assert license_map.main([], env=dict(_D1_ENV)) == 1
+        assert "claim が実表に無い" in caplog.text
+
+    def test_宣言に無い_claim_は消さずに失敗として報告する(self, monkeypatch, caplog) -> None:
+        """誰かが宣言外の writer を名乗っている。推測で消さず、人に決めさせる。"""
         store = _FakeStore()
         _wire(monkeypatch, store)
         store.query(
@@ -350,11 +418,13 @@ class TestWriterClaims:
             " VALUES ('unknown_dataset', 'all', 'stockStock', 0)"
         )
         with caplog.at_level("WARNING"):
-            assert license_map.main([], env=dict(_D1_ENV)) == 0
+            assert license_map.main([], env=dict(_D1_ENV)) == 1
         assert ("unknown_dataset", "all", "stockStock") in self._claims(store)
         assert "unknown_dataset" in caplog.text
 
-    def test_列群を分けた表への_all_行は整理が必要だと言う(self, monkeypatch, caplog) -> None:
+    def test_列群を分けた表への_all_行は整理が必要だと言って落ちる(
+        self, monkeypatch, caplog
+    ) -> None:
         """`core_stocks/all` と `core_stocks/base` が同居すると主張が矛盾する。"""
         store = _FakeStore()
         _wire(monkeypatch, store)
@@ -363,25 +433,19 @@ class TestWriterClaims:
             " VALUES ('core_stocks', 'all', 'stockStock', 0)"
         )
         with caplog.at_level("WARNING"):
-            assert license_map.main([], env=dict(_D1_ENV)) == 0
+            assert license_map.main([], env=dict(_D1_ENV)) == 1
         assert "整理が必要" in caplog.text
 
-    def test_2_段目では宣言外の_claim_で落ちる(self, monkeypatch) -> None:
-        """切替が飾りでないこと（2 段目へ進めば実際に CI が赤くなる）。
-
-        投入のあとに読み直す形なので、writer の食い違いは upsert が届いた時点で
-        消える（届かなければ差分として残る = 書き込みが落ちたことの検出になる）。
-        実表に残り続けるのは**宣言に無い claim** なので、2 段目の効果はそこで
-        確かめる。
-        """
+    def test_1_段目へ戻せば同じ差分で落ちない(self, monkeypatch) -> None:
+        """戻し方が 1 行で済むことを固定する（定数を True で残した理由）。"""
         store = _FakeStore()
         _wire(monkeypatch, store)
-        monkeypatch.setattr(G, "CLAIM_MISMATCH_IS_FAILURE", True)
+        monkeypatch.setattr(G, "CLAIM_MISMATCH_IS_FAILURE", False)
         store.query(
             "INSERT INTO jss_writer_claims (dataset, column_group, writer, updated_at)"
             " VALUES ('core_stocks', 'all', 'stockStock', 0)"
         )
-        assert license_map.main([], env=dict(_D1_ENV)) == 1
+        assert license_map.main([], env=dict(_D1_ENV)) == 0
 
     @pytest.mark.parametrize("as_failure", [False, True])
     def test_段階で_failure_と_warning_が入れ替わる(self, monkeypatch, as_failure) -> None:

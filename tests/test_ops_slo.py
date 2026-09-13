@@ -108,6 +108,9 @@ def _jst_today() -> date:
 
 NOW = datetime(2026, 9, 12, 0, 0, tzinfo=UTC)
 
+# 観測ジョブが記録するデータセット（判定するもの + 判定しないが観測は続けるもの）。
+_OBSERVED = set(slo.SLO_BY_DATASET) | set(slo.NOT_REFRESHED)
+
 
 def _epoch_days_ago(days: float) -> int:
     return int((NOW - timedelta(days=days)).timestamp())
@@ -115,8 +118,13 @@ def _epoch_days_ago(days: float) -> int:
 
 class TestFreshnessSlo:
     def test_全データセットに閾値がある(self) -> None:
-        """閾値が無いと「33日古い」が異常か判定できない。"""
-        assert len(slo.SLOS) >= 7
+        """閾値が無いと「33日古い」が異常か判定できない。
+
+        `yutai_benefits` は「更新しない」と決まり閾値ごと `NOT_REFRESHED` へ移した
+        ので、`SLOS` 単独の件数は 6 になった。守りたいのは「観測する全データセットが
+        閾値を持つか、判定しない理由を持つか」なので、和で 7 件を下回らないことを見る。
+        """
+        assert len(slo.SLOS) + len(slo.NOT_REFRESHED) >= 7
         for s in slo.SLOS:
             assert s.green_hours < s.yellow_hours, s.dataset
             assert s.note, s.dataset
@@ -138,7 +146,6 @@ class TestFreshnessSlo:
             ("core_stocks", 33.0, "green"),       # 33.0日 = まだ緑（あと7日で黄）
             ("core_stocks", 41.0, "yellow"),
             ("core_stocks", 46.0, "red"),
-            ("yutai_benefits", 81.5, "red"),      # 81.5日 = 赤
             ("edinet_documents", 0.5, "green"),
             ("edinet_documents", 1.5, "yellow"),  # 36h
             ("edinet_documents", 3.0, "red"),
@@ -242,8 +249,16 @@ class TestDatasetManifest:
         """片方だけ増えると「閾値はあるが測っていない」「測っているが判定されない」
 
         のどちらかが静かに生まれる。等号で縛る。
+
+        判定しない（`NOT_REFRESHED`）データセットも観測は続けるので、マニフェストは
+        「判定する」と「判定しないと理由つきで宣言した」の**和**と一致させる。
+        両方に入る名前は import 時に `validate_declarations` が弾くので、和は
+        互いに素である。
         """
-        assert set(datasets.DATASET_SOURCE_BY_NAME) == set(slo.SLO_BY_DATASET)
+        assert not set(slo.SLO_BY_DATASET) & set(slo.NOT_REFRESHED)
+        assert set(datasets.DATASET_SOURCE_BY_NAME) == (
+            set(slo.SLO_BY_DATASET) | set(slo.NOT_REFRESHED)
+        )
 
     def test_SQLは1文の集約でUNIONを使わない(self) -> None:
         """D1 の compound SELECT 上限は 5。UNION を許すと構造的に抵触する。"""
@@ -331,14 +346,14 @@ class TestJudgeObservation:
         assert slo.judge("jsf_supply", fresh_epoch, now=NOW) == "green"
 
     def test_基準日の列が無い表は取得時刻で測る(self) -> None:
-        """core_stocks / yutai_benefits は日付列が無いのでこれしか手がない。"""
+        """core_stocks は日付列が無いのでこれしか手がない。"""
         assert slo.judge_observation(
             "core_stocks", latest_data_date=None, source_epoch=_epoch_days_ago(33.0),
             row_count=4445, now=NOW,
         ) == "green"
         assert slo.judge_observation(
-            "yutai_benefits", latest_data_date=None,
-            source_epoch=_epoch_days_ago(81.96), row_count=8314, now=NOW,
+            "core_stocks", latest_data_date=None, source_epoch=_epoch_days_ago(46.0),
+            row_count=4445, now=NOW,
         ) == "red"
 
     def test_読めない基準日は取得時刻へ落ちる(self) -> None:
@@ -428,6 +443,104 @@ class TestAcceptedRed:
         for dataset, reason in slo.ACCEPTED_RED.items():
             assert reason.strip(), dataset
             assert len(reason) > 20, dataset
+
+
+class TestNotRefreshed:
+    """「そもそも更新しない」データセット。判定から外すのは加齢だけ。"""
+
+    def test_優待は受容済みの赤ではなく更新しないデータセット(self) -> None:
+        """2026-09-13 のユーザ判断。いつか直す赤（ACCEPTED_RED）とは区分が違う。"""
+        assert "yutai_benefits" in slo.NOT_REFRESHED
+        assert "yutai_benefits" not in slo.ACCEPTED_RED
+        assert "yutai_benefits" not in slo.SLO_BY_DATASET, "閾値を残すと嘘の閾値になる"
+
+    def test_理由が必須(self) -> None:
+        for dataset, reason in slo.NOT_REFRESHED.items():
+            assert len(reason.strip()) > 20, dataset
+        with pytest.raises(ValueError, match="理由が無い"):
+            slo.validate_declarations(slo.SLO_BY_DATASET, {}, {"yutai_benefits": "  "})
+
+    def test_受容済みの赤と同時に宣言するとエラー(self) -> None:
+        with pytest.raises(ValueError, match="両方に入っている"):
+            slo.validate_declarations(
+                slo.SLO_BY_DATASET,
+                {"core_stocks": "直すまで受容する理由"},
+                {"core_stocks": "更新しない理由"},
+            )
+
+    def test_閾値があるのに判定対象外にするとエラー(self) -> None:
+        with pytest.raises(ValueError, match="SLOS に閾値がある"):
+            slo.validate_declarations(
+                slo.SLO_BY_DATASET, {}, {"core_stocks": "更新しない理由"}
+            )
+
+    def test_矛盾した宣言では_import_時に落ちる(self, monkeypatch) -> None:
+        """`validate_declarations` を関数として試すだけでは、import 時の呼び出しを
+        消しても緑のままになる（矛盾した宣言で ops_check が黙って起動する）。
+
+        slo.py の本文を別名のモジュールとして、宣言だけ矛盾させて実行する。
+        """
+        import sys
+        import types
+        from pathlib import Path
+
+        path = Path(slo.__file__)
+        src = path.read_text(encoding="utf-8")
+        original = "ACCEPTED_RED: dict[str, str] = {}"
+        assert original in src, "ACCEPTED_RED の定義行が変わったらこのテストも直す"
+        src = src.replace(
+            original,
+            'ACCEPTED_RED: dict[str, str] = {"yutai_benefits": "矛盾させるための受容理由"}',
+        )
+        name = "jp_stock_pipeline.cloud_store._slo_contradiction_probe"
+        module = types.ModuleType(name)
+        module.__package__ = "jp_stock_pipeline.cloud_store"
+        module.__file__ = str(path)
+        monkeypatch.setitem(sys.modules, name, module)
+        with pytest.raises(ValueError, match="両方に入っている"):
+            exec(compile(src, str(path), "exec"), module.__dict__)
+
+    def test_現在の宣言は矛盾していない(self) -> None:
+        slo.validate_declarations(slo.SLO_BY_DATASET, slo.ACCEPTED_RED, slo.NOT_REFRESHED)
+
+    def test_何日止まっていても判定対象外(self) -> None:
+        """81.96 日でも 800 日でも赤にも緑にもしない。"""
+        for days in (81.96, 800.0):
+            assert slo.judge_observation(
+                "yutai_benefits", latest_data_date=None,
+                source_epoch=_epoch_days_ago(days), row_count=8314, now=NOW,
+            ) == slo.VERDICT_NOT_REFRESHED
+        # 緑でも unknown でもない別の値であること（緑は「新鮮」と読まれ、
+        # unknown は ops_check が違反として毎日鳴らす）。
+        assert slo.VERDICT_NOT_REFRESHED not in ("green", "yellow", "red", "unknown")
+
+    def test_判定対象外でも0行は赤_測れなければunknown(self) -> None:
+        """更新しないことと、再取得不能な資産が消えてよいことは違う。"""
+        assert slo.judge_observation(
+            "yutai_benefits", latest_data_date=None, source_epoch=None,
+            row_count=0, now=NOW,
+        ) == "red"
+        assert slo.judge_observation(
+            "yutai_benefits", latest_data_date=None, source_epoch=None,
+            row_count=None, now=NOW,
+        ) == "unknown"
+
+    def test_加齢はログ用に暦時間で返す(self) -> None:
+        age = slo.observation_age_hours(
+            "yutai_benefits", latest_data_date=None,
+            source_epoch=_epoch_days_ago(10.0), now=NOW,
+        )
+        assert age == pytest.approx(240.0)
+
+    def test_定義に無いデータセットは判定対象外とも扱わない(self) -> None:
+        """未定義を「判定しない」へ倒すと、名前のタイプミスが黙って消える。"""
+        assert slo.judge_observation(
+            "yutai_benefit", latest_data_date=None, source_epoch=_epoch_days_ago(0),
+            row_count=1, now=NOW,
+        ) == "unknown"
+        assert slo.observation_age_hours(
+            "yutai_benefit", latest_data_date=None, source_epoch=_epoch_days_ago(0), now=NOW,
+        ) is None
 
 
 class TestFreshnessProbe:
@@ -525,7 +638,7 @@ class TestFreshnessProbe:
         freshness_probe.execute(ctx)
         assert ctx.failed == 0
         rows = store.query("SELECT dataset, license_tag FROM jss_dataset_freshness")
-        assert {r["dataset"] for r in rows} == set(slo.SLO_BY_DATASET)
+        assert {r["dataset"] for r in rows} == _OBSERVED
         assert all(r["license_tag"] for r in rows)
 
     def test_1表が壊れても他6件は記録されジョブは失敗する(self, monkeypatch) -> None:
@@ -543,7 +656,7 @@ class TestFreshnessProbe:
             r["dataset"]
             for r in store.query("SELECT dataset FROM jss_dataset_freshness")
         }
-        assert recorded == set(slo.SLO_BY_DATASET) - {"core_stocks"}
+        assert recorded == _OBSERVED - {"core_stocks"}
         assert code == 1, "1 件でも測れなければジョブ全体を失敗にする"
 
     def test_移行元の表は別DBから読み記録は正本へ書く(self, monkeypatch) -> None:
@@ -581,7 +694,7 @@ class TestFreshnessProbe:
             r["dataset"]
             for r in canonical.query("SELECT dataset FROM jss_dataset_freshness")
         }
-        assert recorded == set(slo.SLO_BY_DATASET), "記録先は正本 DB でなければならない"
+        assert recorded == _OBSERVED, "記録先は正本 DB でなければならない"
         assert legacy.query("SELECT COUNT(*) AS n FROM jss_dataset_freshness")[0]["n"] == 0
 
     def test_移行元DBが未設定なら正本へフォールバックする(self) -> None:
@@ -618,7 +731,10 @@ class TestOpsCheck:
     """判定ジョブ。何も書かず、異常だけを報告する。"""
 
     def _seed_freshness(self, store: _FakeStore, *, overrides=None) -> None:
-        """全 7 データセットを「宣言済みの赤 1 件 + 緑 6 件」で埋める。
+        """全 7 データセットを「判定対象外 1 件 + 緑 6 件」で埋める。
+
+        `yutai_benefits` は「更新しない」と決まり `slo.NOT_REFRESHED` へ移ったので、
+        82 日止まっていても判定されない（以前はここが「宣言済みの赤」だった）。
 
         `financials` は writer（`cloud_store/financials.py`）が出来たので
         `slo.ACCEPTED_RED` から外れた。したがって 0 行はもう「宣言済みの赤」では
@@ -637,7 +753,7 @@ class TestOpsCheck:
             "financials": (today, 12000, recent),
             "yutai_benefits": (
                 None, 8314, int((datetime.now(UTC) - timedelta(days=82)).timestamp()),
-            ),  # 宣言済みの赤（一次ソースが再取得不能で直せない）
+            ),  # 判定対象外（更新しないデータセット）
         }
         rows.update(overrides or {})
         for dataset, (latest, n, epoch) in rows.items():
@@ -739,12 +855,53 @@ class TestOpsCheck:
         assert problems == []
 
     def test_宣言済みの赤だけならexit0(self, monkeypatch) -> None:
-        """毎日必ず鳴る判定は通知を殺す。既知の赤は警告に落とす。"""
+        """毎日必ず鳴る判定は通知を殺す。既知の赤は警告に落とす。
+
+        本番の `ACCEPTED_RED` は空になった（優待は NOT_REFRESHED へ移った）が、
+        仕組みは残しているので、受容を差し込んで仕組みそのものを確かめる。
+        """
         store = _FakeStore()
-        self._seed_freshness(store)
+        self._seed_freshness(store, overrides={"core_stocks": (None, 4445, 1)})
         self._seed_probe_ok(store)
         _wire(monkeypatch, store, ops_check)
+        monkeypatch.setattr(slo, "ACCEPTED_RED", {"core_stocks": "テスト用の受容理由"})
         assert ops_check.main([], env=dict(_D1_ENV)) == 0
+
+    def test_判定対象外は何日止まっていてもexit0で理由をログに出す(
+        self, monkeypatch, caplog
+    ) -> None:
+        import logging
+
+        store = _FakeStore()
+        self._seed_freshness(store)  # yutai_benefits は 82 日前
+        self._seed_probe_ok(store)
+        _wire(monkeypatch, store, ops_check)
+        with caplog.at_level(logging.INFO):
+            assert ops_check.main([], env=dict(_D1_ENV)) == 0
+        lines = [r.getMessage() for r in caplog.records if "yutai_benefits" in r.getMessage()]
+        assert any("判定対象外" in m and slo.NOT_REFRESHED["yutai_benefits"] in m for m in lines)
+        # 毎日必ず出る行を warning にしない（読まれなくなる）
+        assert not [
+            r for r in caplog.records
+            if r.levelno >= logging.WARNING and "yutai_benefits" in r.getMessage()
+        ]
+
+    def test_判定対象外でも0行ならexit1(self, monkeypatch) -> None:
+        """再取得不能な資産が消えたことは加齢と無関係に報告する。"""
+        store = _FakeStore()
+        self._seed_freshness(store, overrides={"yutai_benefits": (None, 0, None)})
+        self._seed_probe_ok(store)
+        _wire(monkeypatch, store, ops_check)
+        assert ops_check.main([], env=dict(_D1_ENV)) == 1
+
+    def test_判定対象外でも鮮度表に載っていなければexit1(self, monkeypatch) -> None:
+        """観測は続けると宣言したので、観測が消えたら報告する。"""
+        store = _FakeStore()
+        self._seed_freshness(store)
+        store.query("DELETE FROM jss_dataset_freshness WHERE dataset = 'yutai_benefits'")
+        self._seed_probe_ok(store)
+        _wire(monkeypatch, store, ops_check)
+        assert ops_check.main([], env=dict(_D1_ENV)) == 1
 
     def test_宣言外の赤があればexit1(self, monkeypatch) -> None:
         store = _FakeStore()
@@ -771,16 +928,10 @@ class TestOpsCheck:
     def test_宣言済みが直ったら失敗させない(self, monkeypatch) -> None:
         """「宣言を外せる」は報告するが exit コードは落とさない。"""
         store = _FakeStore()
-        self._seed_freshness(
-            store,
-            overrides={
-                "yutai_benefits": (
-                    None, 8314, int(datetime.now(UTC).timestamp()) - 3600,
-                ),
-            },
-        )
+        self._seed_freshness(store)  # core_stocks は緑
         self._seed_probe_ok(store)
         _wire(monkeypatch, store, ops_check)
+        monkeypatch.setattr(slo, "ACCEPTED_RED", {"core_stocks": "テスト用の受容理由"})
         assert ops_check.main([], env=dict(_D1_ENV)) == 0
 
     def test_鮮度表へは何も書き込まない(self, monkeypatch) -> None:

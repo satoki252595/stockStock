@@ -14,6 +14,8 @@
 見なくなるため（設計書 §7.6）。**この原則は自分自身にも適用する**: 毎日必ず
 鳴る判定を作ったら、それは通知を殺すのと同じである。だから既知の赤は
 `slo.ACCEPTED_RED` で宣言して警告に落とし、空振り検知からは診断ジョブを除く。
+更新しないと決めたデータセット（`slo.NOT_REFRESHED`）は加齢を判定せず、
+「判定対象外」と理由をログに出す（0 行・測れないは引き続き違反にする）。
 """
 
 from __future__ import annotations
@@ -110,6 +112,24 @@ def _check_freshness(ctx: JobContext, store: D1Store, problems: list[str]) -> No
         basis = f"基準日 {latest_data_date}" if latest_data_date else "取得時刻"
         line = f"{dataset}: {verdict} ({basis}から {age_txt} / {row_count} 行)"
 
+        exempt_reason = slo.NOT_REFRESHED.get(dataset)
+        if verdict == slo.VERDICT_NOT_REFRESHED:
+            # 更新しないデータセット。件数と止まっている日数は出すが判定しない。
+            # info にするのは、毎日必ず出る warning は読まれなくなるから
+            # （`ACCEPTED_RED` の赤は「いつか直す」ので warning のまま）。
+            logger.info(
+                "%s: 判定対象外 (%sから %s / %s 行) ← 理由: %s",
+                dataset, basis, age_txt, row_count, exempt_reason,
+            )
+            continue
+        if exempt_reason is not None:
+            # 判定対象外でも 0 行（red）と測れない（unknown）は通す。
+            # 更新しないことと、再取得不能な資産が消えてよいことは違う。
+            line = f"{line} ← 判定対象外のデータセットだが加齢と無関係な異常"
+            problems.append(line)
+            logger.warning("%s（判定対象外の理由: %s）", line, exempt_reason)
+            continue
+
         reason = slo.ACCEPTED_RED.get(dataset)
         if reason is not None and verdict == "red":
             # 宣言済みの赤。ログには出すが終了コードは落とさない。
@@ -129,8 +149,11 @@ def _check_freshness(ctx: JobContext, store: D1Store, problems: list[str]) -> No
             continue
         logger.info("%s", line)
 
-    # SLO を定義しているのに鮮度表に載っていないデータセット
-    missing = sorted(set(slo.SLO_BY_DATASET) - {str(r.get("dataset") or "") for r in rows})
+    # SLO を定義している、または判定対象外として観測を続けると宣言しているのに
+    # 鮮度表に載っていないデータセット。判定対象外を外すと、観測が止まって
+    # 「0 行になった」を検知する手段が消えても静かなままになる。
+    expected = set(slo.SLO_BY_DATASET) | set(slo.NOT_REFRESHED)
+    missing = sorted(expected - {str(r.get("dataset") or "") for r in rows})
     if missing:
         problems.append(f"鮮度が記録されていないデータセット: {missing}")
 
@@ -193,7 +216,10 @@ def execute(ctx: JobContext) -> None:
         for p in problems:
             ctx.add_failure("slo", p)
         return
-    logger.info("SLO 違反なし（宣言済みの赤 %d 件は警告のみ）", len(slo.ACCEPTED_RED))
+    logger.info(
+        "SLO 違反なし（宣言済みの赤 %d 件は警告のみ・判定対象外 %d 件: %s）",
+        len(slo.ACCEPTED_RED), len(slo.NOT_REFRESHED), sorted(slo.NOT_REFRESHED),
+    )
     ctx.add_success()
 
 
