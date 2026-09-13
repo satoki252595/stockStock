@@ -34,6 +34,10 @@
           ];
           # uv には nix の Python を使わせる（環境の再現性を nix 側で固定）
           shellHook = ''
+            # wrangler が既定で書く ~/Library/Preferences/.wrangler/logs には D1 の応答
+            # (規約上公開できない本文を含みうる) が残るため、既定では書かない。デバッグ時は WRANGLER_WRITE_LOGS=true WRANGLER_LOG=debug を付ける。
+            export WRANGLER_WRITE_LOGS=false
+            export WRANGLER_LOG_PATH="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.wrangler/logs"
             export UV_PYTHON="${pkgs.python312}/bin/python3.12"
             export UV_PYTHON_DOWNLOADS=never
           '' + pkgs.lib.optionalString pkgs.stdenv.isLinux ''
