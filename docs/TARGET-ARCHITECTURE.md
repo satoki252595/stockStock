@@ -216,7 +216,7 @@ D1 jss_column_license: core_stocks の market / sector33 / sector17 / instrument
 
 補足として、`rsi_percentile.operating_margin_ttm` と `core_stock_financials.operating_margin` は **3,764 件すべて完全一致する**。同一ジョブが同時刻に書いているから一致しているだけで、片方の更新時刻がずれれば即座に食い違う。**投影の統合はこの種の「偶然の一致」への依存を消す。**
 
-**母集団は層ごとに違う（2026-09-13 追記。公開面に ETF / REIT を出さないという暫定前提に依存する）。** `core_stocks`（母集団）は P4b の +725 行 INSERT の後に全種別（`equity` / `foreign` / `pro_market` / `etf_etn` / `reit_fund` / `investment_certificate`）を持つ。一方、投影（`p_*`）と D1 の断面（`core_stock_financials` など）は `is_active=1 AND instrument_type='equity'` だけを持つ。kabulab-cf の日次取込と公開面の一覧は PR #KCPR でこの形に絞った。ETF は R2 の日足（`daily/{code}.json`）にだけ置き、D1 の断面と投影には入れない。ETF / REIT を公開面に出すと決めた場合は、投影と断面の母集団を広げ直す（§12 #9）。
+**母集団は層ごとに違う（2026-09-13 追記。公開面に ETF / REIT を出さないという暫定前提に依存する）。** `core_stocks`（母集団）は P4b の +725 行 INSERT の後に全種別（`equity` / `foreign` / `pro_market` / `etf_etn` / `reit_fund` / `investment_certificate`）を持つ。一方、投影（`p_*`）と D1 の断面（`core_stock_financials` など）は `is_active=1 AND instrument_type='equity'` だけを持つ。kabulab-cf の日次取込と公開面の一覧は PR #30 でこの形に絞った。ETF は R2 の日足（`daily/{code}.json`）にだけ置き、D1 の断面と投影には入れない。ETF / REIT を公開面に出すと決めた場合は、投影と断面の母集団を広げ直す（§12 #9）。
 
 ### 4.4 保存先の決定規則（課金軸で決める）
 
@@ -685,7 +685,7 @@ Notion は現状 ③財務サマリ 34,551 行 / ④開示 62,115 行と D1 よ�
 | **6** | **鮮度 SLO の実際の閾値。** §7.1 の数字はすべて「実測値 + 余裕」の仮置き | 投資判断にどれだけの鮮度が必要かはユーザにしか決められない。特に「銘柄マスタ 40 日」は月次ジョブが 1 回失敗すると即座に黄になる値であり、月次のままでよいか週次にするかもここで決まる |
 | **7** | **原本をどこまで残すか。** Yahoo 込みで年 6〜8 GB（gzip 後・推定）、5 年で 30〜40 GB、月 $0.30〜0.45 | 「5 年より古い yfinance 日次バッチは削除可」のような線を最初に引かないと「消せない」状態になる。ただし引いた時点で再現性はそこで切れる。**再現性は無限には買えない** |
 | **8** | **Notion の位置づけ。** 本設計は「人が見るダイジェストへ降格」としたが、実際に Notion で何を見ているか（銘柄ページか、ビューか、DS 用エクスポートか）が分からない | 降格させると prices_daily から 60〜73 分/run が消えるが、現在 Notion でしか見られないものがあるなら、その投影は残す必要がある |
-| **9** | **ETF / REIT / 出資証券を公開面（スクリーニング・検索・一覧）に出すか。**（2026-09-13 追加。未回答） | 暫定前提は「出さない」。kabulab-cf の日次取込と公開面の一覧は PR #KCPR で `is_active=1 AND instrument_type='equity'` に絞った（§4.3）。出す場合は日次取込の対象も広げる必要があり、P4b 後に全種別を対象にすると取込は +19.5%（(3,709 + 725) / 3,709） |
+| **9** | **ETF / REIT / 出資証券を公開面（スクリーニング・検索・一覧）に出すか。**（2026-09-13 追加。未回答） | 暫定前提は「出さない」。kabulab-cf の日次取込と公開面の一覧は PR #30 で `is_active=1 AND instrument_type='equity'` に絞った（§4.3）。出す場合は日次取込の対象も広げる必要があり、P4b 後に全種別を対象にすると取込は +19.5%（(3,709 + 725) / 3,709） |
 
 ---
 
