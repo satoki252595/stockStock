@@ -135,3 +135,53 @@ def source_code_to_ticker(code: str | None) -> str | None:
         head = normalized[:4]
         return head if STOCK_CODE_RE.match(head) else None
     return None
+
+
+# 信用残 PDF で「別の証券」として 5 文字のまま残す検査文字 (数字の 1-9)。
+_CLASS_SHARE_CHECK_CHARS = frozenset("123456789")
+
+
+def margin_code_to_key(code: str | None) -> str | None:
+    """JPX 信用残 PDF の 5 文字コードを R2 `margin/{date}.json` の `rows[].code` へ。
+
+    - 末尾 "0" (と 4 文字) は `source_code_to_ticker` と同じ 4 文字ティッカー。
+    - 「4 文字の正準形 + 数字 1-9」の 5 文字は **5 文字のまま** 返す (種類株)。
+    - それ以外は None。
+
+    ## なぜ `source_code_to_ticker` をそのまま使わないか
+    実 PDF (2026-08-28 / 09-04 申込み現在、各 4,229 / 4,227 明細) の実測:
+
+    - 検査文字は "0" が 4,222 / 4,220 行、非 "0" は **両週とも 7 行だけ**
+      ("5" が 6 行・"6" が 1 行)。ETF・ETN・REIT・インフラファンド・JDR は
+      **全件 "0"**。「ETF/REIT は非 0 の見込み」という懸念は外れていた
+      (TDnet の ``"16714"`` のような形は信用残 PDF には無い)。
+    - 非 "0" の 7 行はすべて種類株 (伊藤園第１種優先株式 25935、
+      ゼンショー・日本航空・ANA・インフロニア・ソフトバンク×2 の社債型種類株式)
+      で、**全件が同社普通株と先頭 4 文字を共有**する。旧実装 (先頭 4 文字切り
+      出し) は 6 つの 4 文字コードに 13 行を潰していた (取り違え)。
+
+    `source_code_to_ticker` を当てると取り違えは消えるが、この 7 行 (実在する
+    別の証券の残高) を**落とす**。信用残は「その証券の行」を 1 件も捨てずに
+    写す writer なので、落とさず 5 文字のまま別キーにする。5 文字キーは
+    4 文字ティッカーと決して衝突しないため取り違えも起きない。
+
+    ## 採らなかった案
+    - ISIN を rows に足す: 公開 API が行を丸ごとスプレッドするため公開面が
+      広がり、`cloud_store.margin.SNAPSHOT_CONTRACT` (キー固定) を破る。
+    - 非 "0" 行を捨てる: 上記のとおり実在証券のデータ欠損になる。
+
+    ## 範囲
+    TDnet/EDINET の取込には使わない (そちらは 4 文字の銘柄母集団へ突合するので
+    `source_code_to_ticker` の「取りこぼし側」が正しい)。
+    """
+    ticker = source_code_to_ticker(code)
+    if ticker is not None:
+        return ticker
+    normalized = normalize_stock_code(code)
+    if (
+        len(normalized) == 5
+        and STOCK_CODE_RE.match(normalized[:4])
+        and normalized[4] in _CLASS_SHARE_CHECK_CHARS
+    ):
+        return normalized
+    return None

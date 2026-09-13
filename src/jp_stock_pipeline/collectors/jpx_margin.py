@@ -12,6 +12,15 @@ JPX は 2026-09-28 から週次→毎営業日16:00へ変更し、様式も変�
 `parse_margin_text` が、新様式は公開後に実データを見てから追加する。
 どちらの様式かは `detect_layout()` がヘッダ文字列で判定し、**判定できない
 テキストは推測せず LayoutUnknown を返す**（§3-1 推定しない）。
+
+## 銘柄コード (2026-09-13 変更)
+
+`rows[].code` は `contracts.stock_code.margin_code_to_key` で決める。末尾検査文字
+"0" の行 (普通株・ETF・REIT 等すべて) は従来どおり 4 文字、末尾 "1"-"9" の種類株
+(実 PDF で毎週 7 行) だけが 5 文字になる。以前はこの 7 行も先頭 4 文字へ切り、
+同社普通株と同じコードの行が 2〜3 行並んでいた。読み手 `/api/margin` は
+4 文字コードで先頭一致の行を返し、実 PDF では普通株が常に先に並ぶため、
+4 文字コードで引ける値はこの変更で 1 つも変わらない。
 """
 
 from __future__ import annotations
@@ -19,6 +28,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import StrEnum
+
+from ..contracts.stock_code import margin_code_to_key
 
 # kabulab-cf の実装と同一の UA。JPX は UA 無しだと 403 を返す。
 USER_AGENT = (
@@ -127,14 +138,12 @@ def parse_margin_text(text: str) -> MarginData:
     )
     rows = [
         MarginRow(
-            # 既知例外 (docs/CONTRACTS.md 不変条件9): ここは
-            # `contracts.stock_code.source_code_to_ticker` を通していない。
-            # 5 文字を無条件に先頭 4 文字へ切る＝種類株を普通株へ取り違える規則
-            # そのものだが、末尾 "0" 限定にすると信用銘柄の ETF/REIT
-            # (検査文字が "0" でない見込み) を大量に落とす恐れがある。
-            # 実 PDF で検査文字の分布を測るまで触らない。フィクスチャは規約上
-            # コミットできず本ファイルのテストは常時 skip = 回帰検知ゼロ。
-            code=mm.group(1)[:4],
+            # 末尾 "0" は 4 文字ティッカー、末尾 "1"-"9" (種類株) は 5 文字のまま。
+            # 以前は無条件に先頭 4 文字へ切っており、実 PDF で 7 行の種類株を
+            # 同社普通株のコードへ潰していた (docs/CONTRACTS.md 銘柄コード契約)。
+            # `source_code_to_ticker` だとこの 7 行を落とすので使わない。
+            # `_ROW_RE` が 5 文字目を数字に限るため None にはならない。
+            code=_margin_code(mm.group(1)),
             sell=to_int(mm.group(3)),
             sell_chg=to_int(mm.group(4)),
             buy=to_int(mm.group(5)),
@@ -143,6 +152,18 @@ def parse_margin_text(text: str) -> MarginData:
         for mm in _ROW_RE.finditer(text)
     ]
     return MarginData(week=week, rows=rows)
+
+
+def _margin_code(code5: str) -> str:
+    """`_ROW_RE` が拾った 5 文字コードを rows[].code へ。
+
+    正規表現上 None は起こり得ないが、起きたら黙って別の値にせず失敗させる
+    (行を別の銘柄として書くより、その回を書かない方が安全 §3-1)。
+    """
+    key = margin_code_to_key(code5)
+    if key is None:
+        raise ValueError(f"信用残の銘柄コードを解釈できない: {code5!r}")
+    return key
 
 
 def extract_pdf_text(pdf_bytes: bytes) -> str:
