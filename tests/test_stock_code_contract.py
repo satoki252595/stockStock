@@ -10,6 +10,7 @@ JSON を diff する）。
 - normalize         … 表現揺れの吸収のみ（妥当性は見ない）
 - parse             … 4 文字の正準形か（① 銘柄マスタ由来の値の検証に使う）
 - source_to_ticker  … TDnet/EDINET の 5 文字形式 → 4 文字ティッカー
+- margin_to_key     … JPX 信用残 PDF の 5 文字形式 → rows[].code（種類株は 5 文字のまま）
 
 この 3 つを 1 つの関数で兼ねようとして 7 実装が割れていた。
 """
@@ -26,6 +27,7 @@ from jp_stock_pipeline.collectors.tdnet_yanoshin import normalize_company_code
 from jp_stock_pipeline.contracts.stock_code import (
     STOCK_CODE_RE,
     is_valid_stock_code,
+    margin_code_to_key,
     normalize_stock_code,
     parse_stock_code,
     source_code_to_ticker,
@@ -74,6 +76,18 @@ class TestCanonicalImplementation:
 
     def test_source_to_ticker(self, vector):
         assert source_code_to_ticker(vector["input"]) == vector["source_to_ticker"]
+
+    def test_margin_to_key(self, vector):
+        assert margin_code_to_key(vector["input"]) == vector["margin_to_key"]
+
+    def test_margin_to_key_never_collides_with_a_different_ticker(self, vector):
+        """4 文字を返すなら source_to_ticker と同じ値。それ以外は 4 文字にしない。
+
+        信用残で種類株を普通株のコードへ潰さない (取り違え) ことの一般形。
+        """
+        key = margin_code_to_key(vector["input"])
+        if key is not None and len(key) == 4:
+            assert key == vector["source_to_ticker"]
 
 
 @pytest.mark.parametrize("vector", VECTORS, ids=_ids())
