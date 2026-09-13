@@ -389,14 +389,27 @@ def ddl_columns(sql: str | None) -> list[str]:
 # 瞬間に `universe.ts` が毎回 throw して **JPX 母集団同期が止まる**。だから
 # `base` は `kabulab-cf` のまま動かさない。
 #
-# `enrich` 群（P4a で足した 12 列）は、`jobs/master_sync.py` が `sector33` を
-# 既存行への UPDATE だけで埋め始めたので `stockStock` で宣言する。設計どおり
-# 同一 PR で (1) `core_stocks/enrich` を `stockStock` で足す (2) 充填ジョブを
-# 有効にする、の順に入れた。`universe.ts` は `enrich` の列を 1 つも SET しない
-# ので、この宣言で kabulab-cf 側が止まることはない（2026-09-13 に origin/main を
-# 読んで確認。照合コード自体もまだ無い）。
+# `enrich` 群（P4a で足した 12 列のうち `instrument_type` を除く 11 列）は、
+# `jobs/master_sync.py` が `sector33` を既存行への UPDATE だけで埋め始めたので
+# `stockStock` で宣言する。設計どおり同一 PR で (1) `core_stocks/enrich` を
+# `stockStock` で足す (2) 充填ジョブを有効にする、の順に入れた。
 #
-# `enrich` の 12 列のうち今日書くのは `sector33` だけで、残り 11 列は P4b。
+# ## `instrument_type` は `base` に数える（2026-09-13、kabulab-cf #27）
+#
+# kabulab-cf #27（P4b 第 1 段）から、`universe.ts` が JPX data_j の区分で
+# `instrument_type` を書く。行の作成（INSERT）と同じ upsert で書くので
+# 「既存行の UPDATE のみ」という `enrich` の定義に合わず、writer も kabulab-cf
+# である。だからこの列は `base` に数える。claim の行（`(dataset, column_group)`
+# と writer）は変わらないので、本番の `jss_writer_claims` に DELETE は要らない。
+# `universe.ts` は `instrument_type` 以外の `enrich` の列（`sector33` など）を
+# SET しない（2026-09-13 に kabulab-cf origin/main を読んで確認。照合コード自体は
+# kabulab-cf 側にまだ無い）。
+#
+# 採らなかった案: `instrument_type` のために群を足す。writer が `base` と同じ
+# kabulab-cf で INSERT も発行するので `base` と分ける理由が無く、PK の行を
+# 増やすほど後の統合が破壊的書換になる。
+#
+# `enrich` の 11 列のうち今日書くのは `sector33` だけで、残り 10 列は P4b。
 # 群を列ごとに割らないのは、PK が `(dataset, column_group)` なので細かく割るほど
 # 後の統合が破壊的書換になるからである（writer が別になる列が出たら割る）。
 #
@@ -458,15 +471,15 @@ WRITER_CLAIMS: tuple[WriterClaim, ...] = tuple(
             "core_stocks",
             COLUMN_GROUP_BASE,
             WRITER_KABULAB,
-            "kabulab-cf src/cron/universe.ts。行の作成と既存列。enrich を stockStock が"
-            "持った後もここは動かさない",
+            "kabulab-cf src/cron/universe.ts。行の作成と既存列、instrument_type"
+            "（kabulab-cf #27 から）。enrich を stockStock が持った後もここは動かさない",
         ),
         _claim(
             "core_stocks",
             COLUMN_GROUP_ENRICH,
             WRITER_STOCKSTOCK,
             "stockStock master_sync が sector33 を既存行の UPDATE だけで埋める"
-            "（updated_at は進めない）。残りの P4a 列は P4b",
+            "（updated_at は進めない）。instrument_type は base。残りの P4a 列は P4b",
         ),
         _claim(
             "core_stock_financials",

@@ -58,8 +58,9 @@ EDINET 側の取得時刻で測ると「kabulab-cf の同期が止まった」�
 
 **(3) 承認とロールバックの単位 → 2026-09-13 にユーザ承認。** 戻し方は
 `UPDATE core_stocks SET sector33 = NULL`（`updated_at` を進めない）と
-`jss_writer_claims` の `('core_stocks', 'enrich')` 行の削除。`instrument_type` など
-残りの P4a 列の充填は引き続き P4b。
+`jss_writer_claims` の `('core_stocks', 'enrich')` 行の削除。`instrument_type` は
+kabulab-cf #27（P4b 第 1 段）から `universe.ts` が埋め、claim は `base` に数える
+（`governance` の注記）。残りの P4a 列の充填は引き続き P4b。
 """
 
 from __future__ import annotations
