@@ -155,27 +155,38 @@ def _run_sql_flow(mig, table: str, ddl: str, *, extra: dict) -> None:
     con = sqlite3.connect(":memory:")
     con.execute(ddl)
 
-    def insert(code, period_end, dtype, consolidated, source="EDINET"):
+    def insert(code, period_end, dtype, consolidated, source="EDINET", **values):
         row = {
             "code": code, "fiscal_period_end": period_end, "disclosure_type": dtype,
             "consolidated": consolidated, "source": source, "license_tag": "commercial-ok",
-            "fetched_at": extra["fetched_at"], "quality": "正常",
+            "fetched_at": extra["fetched_at"], "quality": "正常", **values,
         }
         cols = ", ".join(row)
         con.execute(f"INSERT INTO {table} ({cols}) VALUES ({', '.join('?' for _ in row)})",
                     list(row.values()))
 
+    t = extra["disclosed_at"]
     insert("A", "2024-09-30", "2Q", "連結")
     insert("A", "2024-09-30", "2Q", "単体", source="TDnet")
     insert("B", "2024-03-31", "2Q", "連結")  # 四半期報告制度の側
-    insert("C", "2025-09-30", "2Q", "連結")
-    insert("C", "2025-09-30", "中間", "連結")  # 衝突
+    # 衝突: 短信 (TDnet, 旧コード→2Q) と半期報告書 (EDINET, 新コード→中間) が同じ期に来た
+    insert("C", "2025-09-30", "2Q", "連結", source="TDnet", license_tag="factual-cite",
+           net_sales=100.0, forecast_eps=50.0, disclosed_at=t(1))
+    insert("C", "2025-09-30", "中間", "連結", net_sales=110.0, disclosed_at=t(2))
+    # 衝突で「2Q」側の方が新しい開示（旧コードが後から訂正を書いた）
+    insert("E", "2025-09-30", "中間", "連結", net_sales=200.0, eps=9.0, disclosed_at=t(1))
+    insert("E", "2025-09-30", "2Q", "連結", source="TDnet", net_sales=210.0, disclosed_at=t(2))
     insert("D", "2024-06-30", "本決算", "連結")
     sql = mig.interim_sql(table)
-    assert con.execute(sql["count"]).fetchall() == [("EDINET", 2), ("TDnet", 1)]
-    assert con.execute(sql["conflicts"]).fetchall() == [(1,)]
+    assert con.execute(sql["count"]).fetchall() == [("EDINET", 1), ("TDnet", 3)]
+    assert con.execute(sql["conflicts"]).fetchall() == [(2,)]
+    assert con.execute(sql["fold"]).rowcount == 2
+    assert con.execute(sql["drop_folded"]).rowcount == 2
     assert con.execute(sql["apply"]).rowcount == 2
-    assert con.execute(sql["apply"]).rowcount == 0  # 冪等
+    for step in ("fold", "drop_folded", "apply"):  # 冪等
+        assert con.execute(sql[step]).rowcount == 0
+    assert con.execute(sql["count"]).fetchall() == []
+    assert con.execute(sql["conflicts"]).fetchall() == [(0,)]
     got = sorted(con.execute(
         f"SELECT code, fiscal_period_end, disclosure_type, consolidated FROM {table}"
     ).fetchall())
@@ -183,22 +194,37 @@ def _run_sql_flow(mig, table: str, ddl: str, *, extra: dict) -> None:
         ("A", "2024-09-30", "中間", "単体"),
         ("A", "2024-09-30", "中間", "連結"),
         ("B", "2024-03-31", "2Q", "連結"),
-        ("C", "2025-09-30", "2Q", "連結"),  # 衝突は残して conflicts で知らせる
-        ("C", "2025-09-30", "中間", "連結"),
+        ("C", "2025-09-30", "中間", "連結"),  # 1 行に畳み込まれる（二重計上しない）
         ("D", "2024-06-30", "本決算", "連結"),
+        ("E", "2025-09-30", "中間", "連結"),
     ]
+    folded = {
+        r[0]: r[1:] for r in con.execute(
+            f"SELECT code, net_sales, eps, forecast_eps, source, license_tag, disclosed_at"
+            f" FROM {table} WHERE code IN ('C', 'E')"
+        )
+    }
+    # C: 中間が新しい → 値は中間を優先、中間に無い予想は短信から残す、タグは厳しい側
+    assert folded["C"] == (110.0, None, 50.0, "EDINET", "factual-cite", t(2))
+    # E: 2Q が新しい → 値と来歴は 2Q を優先、2Q に無い EPS は中間から残す
+    assert folded["E"] == (210.0, 9.0, None, "TDnet", "commercial-ok", t(2))
 
 
 class TestInterimSql:
     def test_d1(self, mig):
         ddl = next(s for s in cloud_schema.SCHEMA_STATEMENTS if "TABLE IF NOT EXISTS jss_financials" in s)
-        _run_sql_flow(mig, "jss_financials", ddl, extra={"fetched_at": 1})
+        _run_sql_flow(
+            mig, "jss_financials", ddl, extra={"fetched_at": 1, "disclosed_at": lambda d: d},
+        )
 
     def test_local(self, mig):
         ddl = next(s for s in LOCAL_STATEMENTS if "TABLE IF NOT EXISTS financials" in s)
         _run_sql_flow(
             mig, "financials", ddl.replace("DEFAULT now()", "DEFAULT CURRENT_TIMESTAMP"),
-            extra={"fetched_at": "2026-09-13T00:00:00+09:00"},
+            extra={
+                "fetched_at": "2026-09-13T00:00:00+09:00",
+                "disclosed_at": lambda d: f"2025-11-0{d}T15:00:00+09:00",
+            },
         )
 
     def test_unknown_table_is_rejected(self, mig):

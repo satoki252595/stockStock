@@ -24,7 +24,9 @@
   先に済ませても、DB を作り直した後でも同じように動く。DB ID は設定から読む。
 - d1 / local: D1 `jss_financials` とローカル PG `financials` で ③ と同じ「2Q」→「中間」。
   D1 の接続情報 (CF_ACCOUNT_ID / CF_API_TOKEN / CF_D1_DATABASE_ID) が無ければ、
-  wrangler で流す SQL を表示するだけにする。
+  wrangler で流す SQL を表示するだけにする。**D1 は書き手が旧行を採用しない**
+  （PK に開示種別を含む INSERT ... ON CONFLICT）ので、Notion と違って順序に依存する。
+  下の「衝突」の畳み込みを apply に含めるのはそのため。
 - 連結区分 (③ のキー): Notion ③ は書き手が「連結単体が空」の行を採用するので
   書き換えは要らない。空の行を数えるだけにする。ローカル PG の PK 張り替えは
   LocalStore の接続時 DDL (`local_store/schema.FINANCIALS_PK_MIGRATION`) が行い、
@@ -34,8 +36,20 @@
 
 同じ (銘柄コード, 決算期末, 連結単体) に「中間」の行が既にあれば、その「2Q」の行は
 書き換えずに conflicts として出す（書き換えると同じキーの行が 2 つになる）。
-新しいコードの書き手は「2Q」の旧行を採用するので、移行より先にラベル変更が出ても
-衝突は起きにくい。出たときは中身を比べて、不要な方を Notion で archive する。
+
+- Notion ③: 新しいコードの書き手は「2Q」の旧行を採用するので、移行より先にラベル変更が
+  出ても衝突は起きにくい。出たときは中身を比べて、不要な方を Notion で archive する。
+- D1 / ローカル PG: 書き手は旧行を採用しない。マージ後・移行前に同じ期を書くと
+  「2Q」（旧コード）と「中間」（新コード）の 2 行になる。2026-09-13 時点の D1 の対象
+  31 行は決算期末がすべて 2026-07-31 で、TDnet の短信が「2Q」で入り、同じ期の
+  半期報告書（提出期限 2026-09-14）が EDINET から「中間」で来る組み合わせそのもの。
+  そこで apply は、衝突した「2Q」行を「中間」行へ**畳み込んでから**消し、残りを
+  書き換える（fold → drop_folded → apply。どれも流し直して結果が変わらない）。
+  畳み込みは書き手の upsert と同じ規則: 開示日時の新しい側の値を優先し、NULL は
+  もう一方で埋める (COALESCE)、来歴列は新しい側、license_tag は厳しい側。
+  採らなかった案: (a) 衝突行を残して人が消す — 短信の予想値など片方にしか無い値が
+  消える / 手作業が要る。(b) D1 の書き手に旧行の採用を足す — 書き込み 1 件ごとに
+  文が増え、並行セッションが触る cloud_store/sink.py の経路に手が入る。
 
 ## 所要時間の目安（Notion 2.5 req/s。2026-09-13 監査の件数）
 
@@ -58,12 +72,15 @@ import time
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+from jp_stock_pipeline.cloud_store import financials as d1_financials
 from jp_stock_pipeline.config import Settings, load_settings
-from jp_stock_pipeline.models import Source
+from jp_stock_pipeline.licensing import LicenseTag, stricter_tag_sql
+from jp_stock_pipeline.local_store import mappers as local_mappers
+from jp_stock_pipeline.models import FinancialSummaryRecord, Provenance, Source
 from jp_stock_pipeline.notion import schema as S
 from jp_stock_pipeline.notion.client import NotionClient, QueryTruncatedError
 from jp_stock_pipeline.notion.upsert import financial_summary_title, select_prop, title_prop
@@ -286,11 +303,41 @@ def option_names(db_info: dict, prop: str) -> list[str]:
     return [o.get("name") for o in (prop_info.get("select") or {}).get("options") or []]
 
 
+def _fold_columns(table: str) -> tuple[tuple[str, ...], tuple[str, ...], str]:
+    """(COALESCE でマージする列, 新しい側で上書きする列, license 列)。書き手の分類をそのまま使う。"""
+    if table == D1_TABLE:
+        return (
+            d1_financials.MERGE_COLUMNS, d1_financials.OVERWRITE_COLUMNS,
+            d1_financials.LICENSE_COLUMN,
+        )
+    # ローカルは列の一覧を定数で持たないので、書き手の params から取る（値は使わない）。
+    _, params = local_mappers.financial_upsert(
+        FinancialSummaryRecord(
+            code="0000", fiscal_period_end=date(2000, 1, 1), disclosure_type="本決算",
+            provenance=Provenance(
+                source=Source.EDINET, license_tag=LicenseTag.COMMERCIAL_OK,
+                data_date=None, fetched_at=datetime(2000, 1, 1, tzinfo=UTC),
+            ),
+        )
+    )
+    fixed = {
+        *local_mappers.FIN_PK, *local_mappers.FIN_OVERWRITE_COLUMNS,
+        local_mappers.FIN_LICENSE_COLUMN,
+    }
+    return (
+        tuple(c for c in params if c not in fixed), local_mappers.FIN_OVERWRITE_COLUMNS,
+        local_mappers.FIN_LICENSE_COLUMN,
+    )
+
+
 def interim_sql(table: str) -> dict[str, str]:
     """D1 / ローカル PG 共通の SQL。値はすべて定数から作り、外部入力を埋め込まない。
 
     `IS NOT DISTINCT FROM` は SQLite (>= 3.39) と PostgreSQL で同じ意味を持つ。
     ローカル PG は PK 張り替え前だと連結区分に NULL がありうるので、= ではなくこれを使う。
+    `UPDATE ... FROM`（自己結合）は SQLite (>= 3.33) と PostgreSQL の両方にある。
+
+    apply は fold → drop_folded → apply の順に流す（docstring「衝突」）。
     """
     if table not in (D1_TABLE, LOCAL_TABLE):
         raise MigrationError(f"未知の表: {table}")
@@ -309,10 +356,39 @@ def interim_sql(table: str) -> dict[str, str]:
             f" AND b.disclosure_type = '{interim}'"
         )
 
+    merge_cols, overwrite_cols, license_col = _fold_columns(table)
+    # q = 畳み込まれる「2Q」行。q の方が新しい開示なら q の値を優先する（書き手の
+    # disclosed_at ガードと同じ向き。既存側が NULL なら新しい側とみなす）。
+    q_newer = (
+        f"(q.disclosed_at > {table}.disclosed_at"
+        f" OR ({table}.disclosed_at IS NULL AND q.disclosed_at IS NOT NULL))"
+    )
+    assignments = [
+        f"{c} = CASE WHEN {q_newer} THEN COALESCE(q.{c}, {table}.{c})"
+        f" ELSE COALESCE({table}.{c}, q.{c}) END"
+        for c in merge_cols
+    ]
+    assignments += [
+        f"{c} = CASE WHEN {q_newer} THEN q.{c} ELSE {table}.{c} END" for c in overwrite_cols
+    ]
+    assignments.append(
+        f"{license_col} = " + stricter_tag_sql(f"q.{license_col}", f"{table}.{license_col}")
+    )
+    if table == LOCAL_TABLE:
+        assignments.append("updated_at = CURRENT_TIMESTAMP")
     return {
         "count": (
             f"SELECT a.source, COUNT(*) AS n FROM {table} a WHERE {target('a')}"
             " GROUP BY a.source ORDER BY a.source"
+        ),
+        "fold": (
+            f"UPDATE {table} SET {', '.join(assignments)} FROM {table} AS q"
+            f" WHERE {table}.disclosure_type = '{interim}' AND {target('q')}"
+            f" AND q.code = {table}.code AND q.fiscal_period_end = {table}.fiscal_period_end"
+            f" AND q.consolidated IS NOT DISTINCT FROM {table}.consolidated"
+        ),
+        "drop_folded": (
+            f"DELETE FROM {table} WHERE {target(table)} AND EXISTS ({same_key_interim(table)})"
         ),
         "conflicts": (
             f"SELECT COUNT(*) AS n FROM {table} a WHERE {target('a')}"
@@ -488,8 +564,9 @@ def run_d1(settings: Settings, apply: bool) -> dict:
         return {
             "configured": False,
             "note": "D1 の接続情報が無いので SQL だけを出す。kabulab-cf で "
-                    "`npx wrangler d1 execute <DB> --remote --command \"<SQL>\"` の形で流す"
-                    "（count と conflicts を先に見て、conflicts が 0 のときだけ apply）",
+                    "`npx wrangler d1 execute <DB> --remote --command \"<SQL>\"` の形で、"
+                    "count と conflicts を見てから fold → drop_folded → apply の順に 1 文ずつ流す"
+                    "（conflicts が 0 なら fold と drop_folded は 0 行で終わる）",
             "sql": sql,
         }
     from jp_stock_pipeline.cloud_store.d1 import D1Store
@@ -501,8 +578,11 @@ def run_d1(settings: Settings, apply: bool) -> dict:
         "conflicts": store.query(sql["conflicts"]),
     }
     if apply:
-        store.query(sql["apply"])  # 条件付き UPDATE なので再送しても二重に変わらない
+        # どれも条件付きで、再送しても結果が変わらない。途中で落ちても流し直せばよい。
+        for step in ("fold", "drop_folded", "apply"):
+            store.query(sql[step])
         report["after_count"] = store.query(sql["count"])
+        report["after_conflicts"] = store.query(sql["conflicts"])
     return report
 
 
@@ -524,9 +604,10 @@ def run_local(settings: Settings, apply: bool) -> dict:
                         "conflicts": rows(sql["conflicts"])}
         if apply:
             LocalStore(conn).init_schema()  # PK 張り替え（済んでいれば何もしない）
-            with conn.cursor() as cur:
-                cur.execute(sql["apply"])
-                report["updated"] = cur.rowcount
+            with conn.transaction(), conn.cursor() as cur:
+                for step in ("fold", "drop_folded", "apply"):
+                    cur.execute(sql[step])
+                    report[f"{step}_rows"] = cur.rowcount
     return report
 
 
