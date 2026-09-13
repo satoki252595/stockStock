@@ -131,10 +131,10 @@ def test_cache_only_after_persistence(tmp_path, artifact, monkeypatch, raw_saved
         assert events == ["raw"]
 
 
-@pytest.mark.parametrize("doc_type", ["150", "170"])
+@pytest.mark.parametrize(("doc_type", "doc_type_label"), [("150", "四半期報告"), ("170", "半期報告")])
 @pytest.mark.parametrize("fallback", [False, True])
 def test_amended_interim_reports_use_financial_pipeline(
-    tmp_path, artifact, monkeypatch, doc_type, fallback,
+    tmp_path, artifact, monkeypatch, doc_type, doc_type_label, fallback,
 ):
     """訂正報告も type5→type1、⑤原本→③財務→任意キャッシュの既存経路を通る。"""
     ctx = context(tmp_path / "cache")
@@ -170,6 +170,7 @@ def test_amended_interim_reports_use_financial_pipeline(
     job._process_document(ctx, doc, "list-page", master_map_ok=True)
     assert fetch_types == ([5, 1, 2] if fallback else [5, 2])
     assert persisted[0] == "raw" and persisted[-1] is financial
-    assert persisted[1].doc_type == "四半期報告"  # Notionの既存選択肢は維持
+    # 170 (訂正半期報告書) は「半期報告」。以前は④に選択肢が無く「四半期報告」へ寄せていた。
+    assert persisted[1].doc_type == doc_type_label
     assert ctx.failed == int(fallback)  # type1 は保存済みでもキャッシュ未対応を隠さない
     assert (tmp_path / "cache" / f"{DOC_ID}.zip").exists() is not fallback

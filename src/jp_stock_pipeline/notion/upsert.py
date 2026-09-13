@@ -327,15 +327,80 @@ def price_technical_filter(code: str) -> dict:
     return {"property": S.PRICE_PROP_CODE, "title": {"equals": code}}
 
 
+# ③ の旧開示種別。書き込み前のキー検索で、ラベル変更前の行も拾うために使う。
+# 決算期末 >= 2024-06-30 の第2四半期は、以前は「2Q」で書いていた
+# (transform/normalize.interim_disclosure_type)。移行スクリプト
+# (scripts/migrate_halfyear_labels.py) より先にラベル変更が本番に出ても、書き手が
+# 旧行を採用して「中間」へ書き直すので、同じ期が 2 行に割れない。
+# 期末 >= 2024-06-30 の「2Q」は新しいコードでは作られないので、移行後も害は無い。
+# normalize を import しないのは、upsert を pandas に依存させないため。
+LEGACY_DISCLOSURE_TYPES: dict[str, tuple[str, ...]] = {"中間": ("2Q",)}
+
+
+def _select_equals(prop: str, value: str) -> dict:
+    return {"property": prop, "select": {"equals": value}}
+
+
+def _consolidated_condition(consolidated: str | None) -> dict:
+    """連結単体の条件。判定できなかったレコード (None) は「空」の行をキーにする。"""
+    if consolidated:
+        return _select_equals(S.FIN_PROP_CONSOLIDATED, consolidated)
+    return {"property": S.FIN_PROP_CONSOLIDATED, "select": {"is_empty": True}}
+
+
 def financial_summary_filter(
-    code: str, fiscal_period_end: date, disclosure_type: str
+    code: str, fiscal_period_end: date, disclosure_type: str, consolidated: str | None
 ) -> dict:
-    """③ 複合キー = 銘柄コード×決算期末×開示種別 の and フィルタ。"""
+    """③ 複合キー = 銘柄コード×決算期末×開示種別×連結単体 の and フィルタ。
+
+    連結単体をキーに含めるのは、同じ期末・同じ開示種別の連結と単体を後勝ちで
+    潰さないため（D1 `jss_financials` は PR #39 で PK に足した）。判定できなかった
+    レコード (None) は「連結単体が空」の行をキーにする。D1 の '不明' に当たるが、
+    Notion の select に選択肢を増やさず空で表す。
+    """
     return {
         "and": [
             {"property": S.FIN_PROP_CODE, "rich_text": {"equals": code}},
             {"property": S.FIN_PROP_PERIOD_END, "date": {"equals": fiscal_period_end.isoformat()}},
-            {"property": S.FIN_PROP_DISCLOSURE_TYPE, "select": {"equals": disclosure_type}},
+            _select_equals(S.FIN_PROP_DISCLOSURE_TYPE, disclosure_type),
+            _consolidated_condition(consolidated),
+        ]
+    }
+
+
+def financial_summary_lookup_filter(
+    code: str, fiscal_period_end: date, disclosure_type: str, consolidated: str | None
+) -> dict:
+    """③ の書き込み前のキー検索。正確なキーの行と、採用してよい旧キーの行を 1 回で引く。
+
+    旧キーの行は 2 種類ある:
+    - 連結単体が空の行: キーに連結単体が無かった頃の行。判定できたレコードが採用する。
+    - 旧開示種別の行: LEGACY_DISCLOSURE_TYPES（「中間」に対する「2Q」）。
+    どれに書くかは pick_financial_page が決める。リクエストは従来どおり 1 回で済む
+    （Notion の複合フィルタは and → or → 条件 の 2 段までネストできる）。
+
+    採用しなかった案: 正確なキーで検索して無ければ旧キーで再検索する。作成のたびに
+    リクエストが 1 回増えるので採らない。
+    """
+    types = (disclosure_type, *LEGACY_DISCLOSURE_TYPES.get(disclosure_type, ()))
+    if len(types) == 1:
+        type_condition = _select_equals(S.FIN_PROP_DISCLOSURE_TYPE, disclosure_type)
+    else:
+        type_condition = {
+            "or": [_select_equals(S.FIN_PROP_DISCLOSURE_TYPE, t) for t in types]
+        }
+    if consolidated:
+        consolidated_condition = {
+            "or": [_consolidated_condition(consolidated), _consolidated_condition(None)]
+        }
+    else:
+        consolidated_condition = _consolidated_condition(None)
+    return {
+        "and": [
+            {"property": S.FIN_PROP_CODE, "rich_text": {"equals": code}},
+            {"property": S.FIN_PROP_PERIOD_END, "date": {"equals": fiscal_period_end.isoformat()}},
+            type_condition,
+            consolidated_condition,
         ]
     }
 
@@ -900,13 +965,50 @@ def upsert_price_technical(
     )
 
 
+def _select_name(page: dict, prop: str) -> str | None:
+    value = (page.get("properties", {}).get(prop) or {}).get("select") or {}
+    return value.get("name") or None
+
+
+def pick_financial_page(
+    pages: list[dict], disclosure_type: str, consolidated: str | None
+) -> dict | None:
+    """③ のキー検索結果 (financial_summary_lookup_filter) から書き込み先を 1 つ選ぶ。
+
+    優先順:
+    1. 正確なキーの行
+    2. 旧開示種別（「中間」に対する「2Q」）で、連結単体が合う行
+    3. 連結単体が空の行
+    4. 旧開示種別で、連結単体が空の行
+    連結単体が合うことを開示種別より優先する。「2Q」→「中間」は同じ期の呼び名を
+    変えただけだが、連結単体が空の行はどちらの測定範囲の値か分からないため。
+    同じ順位に複数あれば最古を正とする (#13)。
+    """
+    if not pages:
+        return None
+
+    def rank(page: dict) -> tuple[bool, bool]:
+        return (
+            _select_name(page, S.FIN_PROP_CONSOLIDATED) != (consolidated or None),
+            _select_name(page, S.FIN_PROP_DISCLOSURE_TYPE) != disclosure_type,
+        )
+
+    best = min(rank(page) for page in pages)
+    return oldest_page([page for page in pages if rank(page) == best])
+
+
 def upsert_financial_summary(
     client: NotionClient,
     settings: Settings,
     record: FinancialSummaryRecord,
     master_page_id: str | None = None,
 ) -> str:
-    """③ 財務サマリへ冪等 upsert (複合キー=銘柄コード×決算期末×開示種別)。
+    """③ 財務サマリへ冪等 upsert (複合キー=銘柄コード×決算期末×開示種別×連結単体)。
+
+    **旧キーの行の採用**: 正確なキーの行が無ければ、連結単体が空の行や、ラベル変更前の
+    「2Q」の行（今回が「中間」のとき）を採用して書き込む（pick_financial_page）。
+    ③ は完全置換なので、採用した行の連結単体・開示種別・タイトルも今回の値に替わる。
+    キーを変えても既存行を重複させないため。作成後の重複確認 (#13) は正確なキーで行う。
 
     **開示日時ガード (#14)**: 既存行の開示日 (FIN_PROP_DISCLOSED_AT) が今回の
     record.disclosed_at より新しければ上書きしない。古い原報告（またはその
@@ -921,8 +1023,24 @@ def upsert_financial_summary(
     ただしキー自体にソースを含めていないため、これは緩和であり根治ではない。
     """
     db_id = settings.db_id("financials")
-    flt = financial_summary_filter(record.code, record.fiscal_period_end, record.disclosure_type)
-    existing = _find_page_full(client, db_id, flt)
+    key = (record.code, record.fiscal_period_end, record.disclosure_type, record.consolidated)
+    flt = financial_summary_filter(*key)
+    existing = pick_financial_page(
+        _query_key(client, db_id, financial_summary_lookup_filter(*key)),
+        record.disclosure_type, record.consolidated,
+    )
+    if existing is not None and (
+        _select_name(existing, S.FIN_PROP_DISCLOSURE_TYPE) != record.disclosure_type
+        or _select_name(existing, S.FIN_PROP_CONSOLIDATED) != (record.consolidated or None)
+    ):
+        logger.info(
+            "③ 財務サマリ: 旧キーの行を採用して新しいキーで書き直す: page=%s 旧=(%s, %s) "
+            "新=(%s, %s) %s %s",
+            existing.get("id"),
+            _select_name(existing, S.FIN_PROP_DISCLOSURE_TYPE),
+            _select_name(existing, S.FIN_PROP_CONSOLIDATED),
+            record.disclosure_type, record.consolidated, record.code, record.fiscal_period_end,
+        )
     if existing is not None and not financial_overwrite_allowed(existing, record):
         return existing["id"]
     # existing は直前の _find_page_full で確定済み（prefetch マップ経由ではない

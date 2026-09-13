@@ -134,7 +134,9 @@ _FORECAST_FIELDS: dict[str, str] = {
 }
 
 # 開示種別 (③ select) — tse-ed-t TypeOfCurrentPeriodDETAIL / jpdei
-# TypeOfCurrentPeriodDEI (Q1/Q2/Q3/HY/FY) の値から導出
+# TypeOfCurrentPeriodDEI (Q1/Q2/Q3/HY/FY) の値から導出。
+# HY も Q2 と同じ「2Q」に寄せ、「中間」への読み替えは決算期末で行う
+# (interim_disclosure_type。DEI では半期報告書かどうかを判定できない)。
 PERIOD_TYPE_TO_DISCLOSURE: dict[str, str] = {
     "FY": "本決算",
     "1Q": "1Q",
@@ -145,6 +147,40 @@ PERIOD_TYPE_TO_DISCLOSURE: dict[str, str] = {
     "Q2": "2Q",
     "Q3": "3Q",
 }
+
+# 半期報告制度 (2024-04-01 施行) で「2Q」と「中間」を切り分ける。
+#
+# 2024 年 4 月の金商法改正で四半期報告書 (docTypeCode 140/150) が廃止され、
+# 上場会社も半期報告書 (160/170) を出すようになった。経過措置は四半期会計期間の
+# 単位で、2024-04-01 より前に始まった四半期会計期間までは四半期報告書のまま。
+# 第2四半期は期末の 3 か月前の翌日に始まるので、「開始日が 2024-04-01 以後」と
+# 「期末が 2024-06-30 以後」は同じ意味になる（20 日締めでも 2024-06-20 期末は
+# 2024-03-21 開始で四半期報告書、2024-07-20 期末は 2024-04-21 開始で半期報告書）。
+#
+# DEI の値 (HY / Q2) では切り分けない。ローカルの EDINET 書類一覧 258,351 件と
+# 変換済み CSV を docID で突き合わせたところ (2026-09-13)、2024 年以後の
+# 半期報告書 (160) の DEI は Q2 が 4,659 件、HY が 3,052 件に割れていた。
+# 2024 年より前の四半期報告書 (140) にも HY が 92 件あった（銀行などの特定事業会社）。
+# DEI で分けると、同じ期の EDINET 行と TDnet 行が「2Q」と「中間」に割れて
+# 二重計上になる。
+#
+# 期末で決めれば、Notion ③ の既存行の移行 (scripts/migrate_halfyear_labels.py) にも
+# 同じ規則が使える。既存行には書類種別が残っていないので、書類種別で決める規則は
+# 移行できない。規則が同じなら、移行した行と後から同じ期を取り直した書き込みが
+# 必ず同じキーに着地する。
+DISCLOSURE_TYPE_SECOND_QUARTER = "2Q"
+DISCLOSURE_TYPE_INTERIM = "中間"
+INTERIM_FIRST_PERIOD_END = date(2024, 6, 30)
+
+
+def interim_disclosure_type(disclosure_type: str, fiscal_period_end: date) -> str:
+    """第2四半期のうち半期報告制度の期を「中間」へ読み替える。それ以外はそのまま返す。"""
+    if (
+        disclosure_type == DISCLOSURE_TYPE_SECOND_QUARTER
+        and fiscal_period_end >= INTERIM_FIRST_PERIOD_END
+    ):
+        return DISCLOSURE_TYPE_INTERIM
+    return disclosure_type
 
 # 会計基準 (AccountingStandardsDEI 等の値 → ③ select。schema.py の選択肢と一致させる)
 ACCOUNTING_STANDARD_MAP: dict[str, str] = {
@@ -310,7 +346,9 @@ def tidy_to_financial_record(
     if fiscal_period_end is None:
         logger.warning("決算期末を導出できないため③レコードを生成しない (code=%s)", code)
         return None
-    dtype = disclosure_type or derive_disclosure_type(tidy) or "本決算"
+    dtype = interim_disclosure_type(
+        disclosure_type or derive_disclosure_type(tidy) or "本決算", fiscal_period_end
+    )
 
     values: dict[str, float | None] = {}
     for field, candidates in ELEMENT_CANDIDATES.items():

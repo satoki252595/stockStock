@@ -188,11 +188,13 @@ JOB_PROP_RUN_URL = "GitHub Run URL"
 JOB_PROP_DURATION = "所要時間(秒)"
 
 # select の固定選択肢 (§6.4)。enum 由来のものは models / licensing と一致させる。
-DISCLOSURE_TYPES: tuple[str, ...] = ("本決算", "1Q", "2Q", "3Q", "修正", "予想")
+# 「2Q」は四半期報告制度の第2四半期、「中間」は半期報告制度の中間期（決算期末が
+# 2024-06-30 以後の第2四半期。transform/normalize.interim_disclosure_type）。
+DISCLOSURE_TYPES: tuple[str, ...] = ("本決算", "1Q", "2Q", "中間", "3Q", "修正", "予想")
 CONSOLIDATED_TYPES: tuple[str, ...] = ("連結", "単体")
 ACCOUNTING_STANDARDS: tuple[str, ...] = ("日本基準", "IFRS", "US-GAAP", "その他")
 DOC_TYPES: tuple[str, ...] = (
-    "短信", "有報", "四半期報告", "業績修正", "配当修正", "大量保有", "自社株買い",
+    "短信", "有報", "四半期報告", "半期報告", "業績修正", "配当修正", "大量保有", "自社株買い",
     "株式分割", "株式併合", "上場廃止", "新規上場", "優待", "その他",
 )
 # ① 状態 select。上場=通常 / 監理・整理=上場廃止前段階 / 上場廃止=廃止済み
@@ -639,8 +641,11 @@ _CATALOG_DICTIONARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "更新頻度: 毎営業日21:00 (edinet_daily)・毎時 (tdnet_hourly)",
         (
             "タイトル (title): 例 7203 2026/03期 本決算",
-            "銘柄コード (text) / 決算期末 (date) / 開示種別 (select: 本決算/1Q/2Q/3Q/修正/予想) — 複合キー",
-            "連結単体 (select) / 会計基準 (select)",
+            "銘柄コード (text) / 決算期末 (date) / 開示種別 (select: 本決算/1Q/2Q/中間/3Q/修正/予想)"
+            " / 連結単体 — 複合キー",
+            "開示種別の 2Q と中間: 2Q=四半期報告制度の第2四半期、中間=決算期末 2024-06-30 以後の"
+            "第2四半期 (半期報告制度。短信・半期報告書とも)",
+            "連結単体 (select: 連結/単体。空=判定できず) / 会計基準 (select)",
             "売上高/営業利益/経常利益/純利益 (number, 円)",
             "EPS/BPS (number, 円) / ROE%/ROA%/自己資本比率% (number, %)",
             "営業CF/投資CF/財務CF (number, 円)",
@@ -655,7 +660,7 @@ _CATALOG_DICTIONARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "毎営業日21:00 (edinet_daily)",
         (
             "開示タイトル (title) / 開示日時 (date)",
-            "書類種別 (select: 短信/有報/四半期報告/業績修正/配当修正/大量保有/自社株買い/"
+            "書類種別 (select: 短信/有報/四半期報告/半期報告/業績修正/配当修正/大量保有/自社株買い/"
             "株式分割/株式併合/上場廃止/新規上場/優待/その他)",
             "分割比率 (text: 例 1:3) / 分割係数 (number) / 効力発生日 (date): コーポレート"
             "アクション属性。人間の判断材料に留め株価の自動調整はしない (§3-7)",

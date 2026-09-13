@@ -53,16 +53,16 @@ TARGET_DOC_TYPE_CODES: frozenset[str] = frozenset(
 )
 
 # docTypeCode → ④開示書類DB「書類種別」select (§6.4) のマッピング。
-# 半期報告書は④の選択肢に独立項目が無いため、期中の法定報告として
-# 「四半期報告」に分類する（書類名は title にそのまま残るため情報は失われない）。
+# 半期報告書 (160/170) は「半期報告」。2024-04 に四半期報告書を置き換えた別の書類で、
+# 「四半期報告」に混ぜると制度の前後で件数の意味が変わる。
 # 未知のコードは「その他」。
 DOC_TYPE_LABELS: dict[str, str] = {
     DOC_TYPE_ANNUAL_REPORT: "有報",
     DOC_TYPE_ANNUAL_REPORT_AMEND: "有報",
     DOC_TYPE_QUARTERLY_REPORT: "四半期報告",
     DOC_TYPE_QUARTERLY_REPORT_AMEND: "四半期報告",
-    DOC_TYPE_SEMIANNUAL_REPORT: "四半期報告",
-    DOC_TYPE_SEMIANNUAL_REPORT_AMEND: "四半期報告",
+    DOC_TYPE_SEMIANNUAL_REPORT: "半期報告",
+    DOC_TYPE_SEMIANNUAL_REPORT_AMEND: "半期報告",
     DOC_TYPE_LARGE_HOLDING: "大量保有",
     DOC_TYPE_LARGE_HOLDING_AMEND: "大量保有",
 }
