@@ -13,7 +13,8 @@
    書類管理番号ごとに 2 ページ以上あるグループについて
    - 正のページ = PR #46 の順序キーで最古（`upsert.oldest_page` をそのまま使う。
      書き直すと本番の書き手と正の選び方がずれうるので、自前で実装しない）
-   - 書き戻す値 = 最後に編集されたコピーの書き込み可能なプロパティ
+   - 書き戻す値 = 最後に編集されたコピーの書き込み可能なプロパティ。ただし空の値では消さない
+     （その欄に値を持つ、次に新しいページの値を使う）
    - 関連付け（銘柄マスタ・原本）= 全コピーの和集合
    - 正のページが既に同じ値なら更新しない。アーカイブ対象 = 正のページ以外
    を JSON に書き出す。
@@ -32,6 +33,12 @@
 - 作り直し（新 DB へ移す）: ①⑤の双方向 relation と既存ビュー・外部リンクが切れる。ユーザ判断で不採用。
 - 正のページ = 最後に編集されたコピー: 本番の書き手（PR #46）は最古を更新するので、
   集約後に書き手と正が食い違い、次の実行でまた値が割れる。値だけを最新から持ってくる。
+- 正のページの値を残す（タイトル・銘柄コードを動かさない）: 2026-09-13 に、タイトルが割れた
+  36 グループを EDINET 書類一覧の今の docDescription と照合したところ、36 件すべてで最後に
+  編集されたコピーと一致した（半期報告書の期間表記、大量保有報告書→変更報告書など、EDINET 側が
+  書類名を改めている）。正を残すと、EDINET が既に改めた古い書類名に戻る。
+- 空の値もそのまま書き戻す: TDnet の 2 グループで最新のコピーだけ銘柄コードが空で、古い 3 ページの
+  1672 を空で消していた。空は「値が無い」であって「値を消した」ではない。
 - 開示日時で範囲を区切る走査（監査スクリプトの方式）: 開示日時が空・範囲外のページを
   別クエリで拾う必要があり、取りこぼしの余地が残る。created_time は全ページにあり、
   1 分に 10,000 件は作れない（2.5 req/s）ので、1 分まで割れば必ず全件読める。
@@ -261,6 +268,45 @@ def value_source_page(pages: list[dict], canonical: dict) -> dict:
     return max(tied, key=upsert._page_order_key)
 
 
+def _is_empty(write_value: dict) -> bool:
+    """書き込み形式の値が「値が無い」か。checkbox の False は値として扱う。"""
+    kind, raw = next(iter(write_value.items()))
+    if kind == "checkbox":
+        return False
+    if kind in ("title", "rich_text"):
+        items = raw or []
+        text = "".join((i.get("text") or {}).get("content", "") for i in items)
+        return not text.strip() and all(i.get("type", "text") == "text" for i in items)
+    return raw in (None, [], "")
+
+
+def _desired_values(source: dict, pages: list[dict]) -> tuple[dict[str, dict], dict[str, str]]:
+    """書き戻す値（関連付け以外）と、source 以外から取った欄 {プロパティ: ページ id}。
+
+    source の値を使う。source が空の欄は、その欄に値を持つ次に新しいページ（last_edited_time、
+    同着は PR #46 の順序キーで後ろ）の値を使う。どのページも空なら空のまま。
+    """
+    newest_first = sorted(
+        (p for p in pages if p["id"] != source["id"]),
+        key=lambda p: (p["last_edited_time"], upsert._page_order_key(p)),
+        reverse=True,
+    )
+    others = [(p["id"], writable_properties(p)) for p in newest_first]
+    desired: dict[str, dict] = {}
+    fallback: dict[str, str] = {}
+    for name, value in writable_properties(source).items():
+        if name in RELATION_PROPS:
+            continue
+        if _is_empty(value):
+            for page_id, props in others:
+                if name in props and not _is_empty(props[name]):
+                    value = props[name]
+                    fallback[name] = page_id
+                    break
+        desired[name] = value
+    return desired, fallback
+
+
 def _relation_union(pages_in_order: list[dict], prop: str) -> list[dict]:
     seen: set[str] = set()
     merged: list[dict] = []
@@ -286,7 +332,7 @@ def plan_group(doc_id: str, pages: list[dict]) -> dict:
     ordered = sorted(pages, key=upsert._page_order_key)
 
     current = writable_properties(canonical)
-    desired = {k: v for k, v in writable_properties(source).items() if k not in RELATION_PROPS}
+    desired, fallback = _desired_values(source, pages)
     relation_added: dict[str, list[str]] = {}
     for prop in RELATION_PROPS:
         if prop not in canonical.get("properties", {}) and not any(
@@ -307,6 +353,7 @@ def plan_group(doc_id: str, pages: list[dict]) -> dict:
         "doc_id": doc_id,
         "canonical_page_id": canonical["id"],
         "value_source_page_id": source["id"],
+        "value_fallback": fallback,
         "pages": [
             {"id": p["id"], "created_time": p["created_time"],
              "last_edited_time": p["last_edited_time"]}

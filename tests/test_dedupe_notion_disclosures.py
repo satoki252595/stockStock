@@ -48,20 +48,23 @@ def _rel(prop_id: str, ids: list[str], has_more: bool = False) -> dict:
 
 def page(pid: str, *, created: str, edited: str, title: str = "決算短信", doc: str = "TD1",
          master: list[str] | None = None, raw: list[str] | None = None,
-         factor: float | None = None, url: str | None = "https://example.invalid/a") -> dict:
+         factor: float | None = None, url: str | None = "https://example.invalid/a",
+         code: str = "", xbrl: bool = True) -> dict:
     return {
         "object": "page", "id": pid, "created_time": created, "last_edited_time": edited,
         "archived": False,
         "properties": {
             S.DISC_PROP_TITLE: _text("title", title),
             S.DISC_PROP_DOC_ID: _text("rich_text", doc),
+            S.DISC_PROP_CODE: (_text("rich_text", code) if code
+                               else {"id": "k", "type": "rich_text", "rich_text": []}),
             S.DISC_PROP_SPLIT_FACTOR: {"id": "f", "type": "number", "number": factor},
             S.DISC_PROP_URL: {"id": "u", "type": "url", "url": url},
             S.DISC_PROP_DOC_TYPE: {"id": "t", "type": "select",
                                    "select": {"id": "x", "name": "決算短信", "color": "red"}},
             S.DISC_PROP_DISCLOSED_AT: {"id": "d", "type": "date", "date": {
                 "start": "2026-09-13T15:00:00.000+09:00", "end": None, "time_zone": None}},
-            S.DISC_PROP_HAS_XBRL: {"id": "x", "type": "checkbox", "checkbox": True},
+            S.DISC_PROP_HAS_XBRL: {"id": "x", "type": "checkbox", "checkbox": xbrl},
             S.PROP_MASTER_RELATION: _rel("m", master or []),
             S.PROP_RAW_RELATION: _rel("r", raw or []),
             "計算列": {"id": "c", "type": "formula", "formula": {"type": "string", "string": "z"}},
@@ -273,6 +276,63 @@ class TestPlanValues:
         assert group["value_source_page_id"] == "aaaa"
         assert group["update_properties"] == {}
 
+    def test_empty_value_in_latest_copy_does_not_erase_existing_value(self):
+        # 2026-09-13 の実例: TDnet の 2 グループで、最新のコピーだけ銘柄コードが空だった
+        pages = [
+            page("aaaa", created="2026-07-01T00:00:00.000Z", edited="2026-07-01T00:00:00.000Z",
+                 code="1672", factor=2.0),
+            page("bbbb", created="2026-07-01T00:01:00.000Z", edited="2026-09-01T00:00:00.000Z",
+                 title="決算短信（訂正後）"),
+        ]
+        (group,) = make_plan(pages)["groups"]
+        assert group["value_source_page_id"] == "bbbb"
+        update = group["update_properties"]
+        assert update[S.DISC_PROP_TITLE]["title"][0]["text"]["content"] == "決算短信（訂正後）"
+        assert S.DISC_PROP_CODE not in update
+        assert S.DISC_PROP_SPLIT_FACTOR not in update
+        desired = group["desired_properties"]
+        assert desired[S.DISC_PROP_CODE]["rich_text"][0]["text"]["content"] == "1672"
+        assert desired[S.DISC_PROP_SPLIT_FACTOR] == {"number": 2.0}
+        assert group["value_fallback"] == {
+            S.DISC_PROP_CODE: "aaaa", S.DISC_PROP_SPLIT_FACTOR: "aaaa",
+        }
+
+    def test_empty_field_takes_the_newest_page_that_has_a_value(self):
+        pages = [
+            page("aaaa", created="2026-07-01T00:00:00.000Z", edited="2026-07-01T00:00:00.000Z",
+                 code="1111"),
+            page("bbbb", created="2026-07-01T00:01:00.000Z", edited="2026-08-01T00:00:00.000Z",
+                 code="2222"),
+            page("cccc", created="2026-07-01T00:02:00.000Z", edited="2026-09-01T00:00:00.000Z"),
+        ]
+        (group,) = make_plan(pages)["groups"]
+        assert group["value_source_page_id"] == "cccc"
+        code = group["update_properties"][S.DISC_PROP_CODE]
+        assert code["rich_text"][0]["text"]["content"] == "2222"
+        assert group["value_fallback"] == {S.DISC_PROP_CODE: "bbbb"}
+
+    def test_checkbox_false_is_a_value_not_empty(self):
+        pages = [
+            page("aaaa", created="2026-07-01T00:00:00.000Z", edited="2026-07-01T00:00:00.000Z",
+                 xbrl=True),
+            page("bbbb", created="2026-07-01T00:01:00.000Z", edited="2026-09-01T00:00:00.000Z",
+                 xbrl=False),
+        ]
+        (group,) = make_plan(pages)["groups"]
+        assert group["update_properties"][S.DISC_PROP_HAS_XBRL] == {"checkbox": False}
+        assert group["value_fallback"] == {}
+
+    def test_field_empty_on_every_page_stays_empty(self):
+        pages = [
+            page("aaaa", created="2026-07-01T00:00:00.000Z", edited="2026-07-01T00:00:00.000Z"),
+            page("bbbb", created="2026-07-01T00:01:00.000Z", edited="2026-09-01T00:00:00.000Z",
+                 title="決算短信（訂正後）"),
+        ]
+        (group,) = make_plan(pages)["groups"]
+        assert group["desired_properties"][S.DISC_PROP_CODE] == {"rich_text": []}
+        assert group["desired_properties"][S.DISC_PROP_SPLIT_FACTOR] == {"number": None}
+        assert group["value_fallback"] == {}
+
     def test_unknown_property_type_stops_instead_of_dropping_it(self):
         pages = three_copies()
         pages[0]["properties"]["謎"] = {"id": "q", "type": "files", "files": []}
@@ -385,6 +445,21 @@ class TestApply:
         assert title_of(canonical) == "決算短信（訂正後）"
         assert rel_ids(canonical, S.PROP_RAW_RELATION) == {"r1", "r2", "r3"}
         assert canonical["properties"][S.DISC_PROP_SPLIT_FACTOR]["number"] == 3.0
+
+    def test_apply_keeps_existing_code_when_latest_copy_is_empty(self):
+        pages = [
+            page("aaaa", created="2026-07-01T00:00:00.000Z", edited="2026-07-01T00:00:00.000Z",
+                 code="1672"),
+            page("bbbb", created="2026-07-01T00:01:00.000Z", edited="2026-09-01T00:00:00.000Z",
+                 title="決算短信（訂正後）"),
+        ]
+        fake = FakeNotion(pages)
+        report = dd.apply_plan(fake, make_plan(pages), check_backup=False)
+        assert (report.errors, report.skipped, report.applied) == ([], [], ["TD1"])
+        canonical = fake.pages["aaaa"]
+        assert canonical["properties"][S.DISC_PROP_CODE]["rich_text"][0]["plain_text"] == "1672"
+        assert title_of(canonical) == "決算短信（訂正後）"
+        assert fake.archived_ids() == ["bbbb"]
 
     def test_group_edited_after_plan_is_skipped(self):
         pages = three_copies()
