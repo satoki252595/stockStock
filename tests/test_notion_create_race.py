@@ -316,7 +316,26 @@ class TestExistingDuplicates:
         assert fake.archived("db-disc") == []  # もともとあったページは archive しない
         assert len(fake.active("db-disc")) == 2
 
-    def test_prefetched_maps_pick_the_same_canonical_page(self):
+    def test_key_search_asks_notion_for_oldest_first_beyond_page_size(self):
+        """重複が page_size を超えても最古を取れるのは sorts のおかげ（手元の min だけでは足りない）。"""
+        n = upsert.KEY_QUERY_PAGE_SIZE + 1
+        # 挿入順は新しい順の逆: 最後に入れたページが最古。sorts 無しなら先頭 page_size 件に入らない
+        created_times = [f"2026-09-13T00:{i + 1:02d}:00.000Z" for i in range(n - 1)]
+        created_times.append("2026-09-13T00:00:00.000Z")
+        ids = [f"dup-{i:02d}" for i in range(n)]
+        fake = FakeNotion(ids=ids, created_times=created_times)
+        props = upsert.disclosure_properties(disclosure("既存"))
+        for _ in ids:
+            fake.create_page(parent={"database_id": "db-disc"}, properties=props)
+        fake.calls.clear()
+
+        page_id = upsert.upsert_disclosure(fake, settings(), disclosure("更新"))
+
+        assert page_id == ids[-1]
+        assert fake.calls == [("query", "db-disc"), ("update", ids[-1])]
+
+    @pytest.mark.parametrize("reverse", [False, True], ids=["old-last", "old-first"])
+    def test_prefetched_maps_pick_the_same_canonical_page(self, reverse):
         # ① と ② はプロパティ名が同じで型（rich_text / title）だけ違うので DB ごとに作る
         key_prop = {
             "db-prices": (S.PRICE_PROP_CODE, "title"),
@@ -329,6 +348,9 @@ class TestExistingDuplicates:
             ("p-zz", SAME_MINUTE, "6758"),
             ("p-aa", SAME_MINUTE, "6758"),
         ]
+        if reverse:
+            # 返る順序に依らず最古を選ぶ（「後から来た行を採る」実装では片方の順序でしか通らない）
+            rows.reverse()
 
         class _C:
             def query_database(self, db_id, **kw):
