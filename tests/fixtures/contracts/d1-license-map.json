@@ -49,14 +49,6 @@
       "kind": "column-map",
       "tag": null
     },
-    "finmath_daily_ohlcv": {
-      "kind": "uniform",
-      "tag": "personal-only"
-    },
-    "finmath_price_snapshot": {
-      "kind": "uniform",
-      "tag": "personal-only"
-    },
     "ir_disclosures": {
       "kind": "uniform",
       "tag": "factual-cite"
