@@ -28,12 +28,19 @@ EPS・CF・配当を全部 NULL にする。
   来歴は最後の書き手だけ）。
 - `disclosed_at` ガードは維持する（古い開示の再取得が新しい訂正を巻き戻さない）。
 
-**ただしローカルの PK には連結区分が無い**（D1 は PR #39 で PK に足した）。D1 では
-連結と単体が別行になるのでマージは必ず同じ測定範囲の中で起きるが、ここで無条件に
-COALESCE すると「単体の訂正値 + 前回の連結値」が 1 行に混ざる。混ざった行は
-NULL より悪い（それらしい数字として読まれる）ので、マージは連結区分が一致する
-(`IS NOT DISTINCT FROM`) ときに限り、一致しなければ従来どおり完全置換する。
-一致判定はレコードの `consolidated`（normalize の判定値）に依存する。
+**PK に連結区分を含める**（D1 は PR #39。既存のローカル DB は `local_store/schema.py`
+の FINANCIALS_PK_MIGRATION が接続時に PK を張り替える）。連結と単体が別行になるので、
+COALESCE のマージは必ず同じ測定範囲の中で起き、「単体の訂正値 + 前回の連結値」が
+1 行に混ざらない。PK に無かった頃は、連結区分が一致するときだけマージする
+`merge_scope` で防いでいたが、PK に入ったので ③ では使わなくなった。
+判定できなかったレコードの連結区分は D1 と同じ '不明' (UNKNOWN_CONSOLIDATED) にする。
+PostgreSQL の PK 列は NULL を許さないため。
+
+連結区分が '不明' の既存行を、後から来た連結/単体のレコードが採用することはしない
+（D1 と同じく別行にする）。Notion ③ は採用する (notion/upsert.pick_financial_page) が、
+ローカルは本番で未構成で、Notion ③ 34,551 行に連結単体が空の行は 0 件だった
+(2026-09-13 監査)。採用のために ON CONFLICT の前に条件付き UPDATE を足すと、
+開示日時ガードと完全置換の順序まで SQL で揃える必要があり、利益に見合わない。
 
 Notion ③ (notion/upsert.py) は完全置換のままで、③ に限りここと対称ではない。
 
@@ -218,16 +225,16 @@ def price_upsert(record: PriceTechnicalRecord) -> tuple[str, dict]:
 
 
 # ③ の列の役割（冒頭 docstring「③ 財務サマリだけが完全置換の例外である理由」）。
-FIN_PK: tuple[str, ...] = ("code", "fiscal_period_end", "disclosure_type")
+FIN_PK: tuple[str, ...] = ("code", "fiscal_period_end", "disclosure_type", "consolidated")
 # NOT NULL の来歴列。COALESCE しても必ず EXCLUDED 側が残るので明示的に上書きする。
 FIN_OVERWRITE_COLUMNS: tuple[str, ...] = ("source", "fetched_at", "quality")
-# マージの単位。D1 では PK の一部だが、ローカルの PK には無い。
-FIN_MERGE_SCOPE = "consolidated"
 FIN_LICENSE_COLUMN = "license_tag"
+# 連結区分を判定できなかったレコードの PK 値。D1 (cloud_store/financials.py) と同じ値。
+UNKNOWN_CONSOLIDATED = "不明"
 
 
 def financial_upsert(record: FinancialSummaryRecord) -> tuple[str, dict]:
-    """③ 財務サマリ。(code, 決算期末, 開示種別) を主キー。
+    """③ 財務サマリ。(code, 決算期末, 開示種別, 連結区分) を主キー。
 
     完全置換ではなくマージする（冒頭 docstring）。上の分類に入らない列はすべて
     COALESCE マージになるので、列を足しても訂正開示の NULL 潰しは再発しない
@@ -237,7 +244,7 @@ def financial_upsert(record: FinancialSummaryRecord) -> tuple[str, dict]:
         "code": record.code,
         "fiscal_period_end": record.fiscal_period_end,
         "disclosure_type": record.disclosure_type,
-        "consolidated": record.consolidated,
+        "consolidated": record.consolidated or UNKNOWN_CONSOLIDATED,
         "accounting_standard": record.accounting_standard,
         "net_sales": record.net_sales,
         "operating_income": record.operating_income,
@@ -261,12 +268,11 @@ def financial_upsert(record: FinancialSummaryRecord) -> tuple[str, dict]:
         "disclosed_at": record.disclosed_at,
         **_prov(record.provenance),
     }
-    fixed = {*FIN_PK, *FIN_OVERWRITE_COLUMNS, FIN_MERGE_SCOPE, FIN_LICENSE_COLUMN}
+    fixed = {*FIN_PK, *FIN_OVERWRITE_COLUMNS, FIN_LICENSE_COLUMN}
     return _build_upsert(
         "financials", params, list(FIN_PK),
         guard_column="disclosed_at",
         merge_cols=tuple(c for c in params if c not in fixed),
-        merge_scope=FIN_MERGE_SCOPE,
         license_column=FIN_LICENSE_COLUMN,
     )
 

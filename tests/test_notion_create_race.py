@@ -74,11 +74,13 @@ def financial(net_sales: float, disclosed_on: date | None) -> FinancialSummaryRe
 
 
 def _matches(flt: dict | None, props: dict) -> bool:
-    """フェイク用の最小フィルタ評価（キー検索で使う equals と and のみ）。"""
+    """フェイク用の最小フィルタ評価（キー検索で使う equals / is_empty と and / or のみ）。"""
     if flt is None:
         return True
     if "and" in flt:
         return all(_matches(sub, props) for sub in flt["and"])
+    if "or" in flt:
+        return any(_matches(sub, props) for sub in flt["or"])
     prop = props.get(flt["property"]) or {}
     for kind in ("rich_text", "title"):
         if kind in flt:
@@ -87,7 +89,10 @@ def _matches(flt: dict | None, props: dict) -> bool:
     if "date" in flt:
         return (prop.get("date") or {}).get("start") == flt["date"]["equals"]
     if "select" in flt:
-        return (prop.get("select") or {}).get("name") == flt["select"]["equals"]
+        name = (prop.get("select") or {}).get("name")
+        if flt["select"].get("is_empty"):
+            return name is None
+        return name == flt["select"]["equals"]
     raise AssertionError(f"未対応のフィルタ: {flt}")
 
 
@@ -546,3 +551,142 @@ class TestDisclosureMapWindowIsJstDay:
         start, end = self._window(date(2026, 9, 11))
         assert not (start <= datetime(2026, 9, 10, 23, 59, tzinfo=JST) < end)
         assert not (start <= datetime(2026, 9, 12, 0, 0, tzinfo=JST) < end)
+
+
+# --- ③ のキーに連結単体を足す / 「2Q」→「中間」の旧行を採用する ---------------
+
+
+def fin(
+    *, dtype: str = "1Q", consolidated: str | None = "連結", net_sales: float = 1.0,
+    period_end: date = date(2026, 6, 30), disclosed_on: date | None = date(2026, 8, 1),
+) -> FinancialSummaryRecord:
+    return FinancialSummaryRecord(
+        code="7203", fiscal_period_end=period_end, disclosure_type=dtype,
+        consolidated=consolidated, net_sales=net_sales,
+        disclosed_at=(
+            datetime(disclosed_on.year, disclosed_on.month, disclosed_on.day, 15, tzinfo=JST)
+            if disclosed_on else None
+        ),
+        provenance=prov(),
+    )
+
+
+def seed(fake: FakeNotion, record: FinancialSummaryRecord) -> None:
+    """変更前の書き手が作った行を置く（キー検索を通さず作る）。"""
+    fake.create_page(
+        parent={"database_id": "db-fin"},
+        properties=upsert.financial_summary_properties(record),
+    )
+    fake.calls.clear()
+
+
+def select_of(page: dict, prop: str) -> str | None:
+    return (page["properties"][prop].get("select") or {}).get("name")
+
+
+class TestFinancialKeyIncludesConsolidation:
+    def test_consolidated_and_standalone_coexist(self):
+        fake = FakeNotion()
+        upsert.upsert_financial_summary(fake, settings(), fin(consolidated="連結", net_sales=1000.0))
+        upsert.upsert_financial_summary(fake, settings(), fin(consolidated="単体", net_sales=400.0))
+        upsert.upsert_financial_summary(
+            fake, settings(),
+            fin(consolidated="連結", net_sales=1100.0, disclosed_on=date(2026, 9, 1)),
+        )
+        by_scope = {
+            select_of(p, S.FIN_PROP_CONSOLIDATED): net_sales_of(p) for p in fake.active("db-fin")
+        }
+        assert by_scope == {"連結": 1100.0, "単体": 400.0}  # 後勝ちで潰れない
+        assert fake.archived("db-fin") == []
+
+    def test_concurrent_creates_of_both_scopes_do_not_archive_each_other(self):
+        """作成直後の再確認 (#13) は正確なキーで行う。別の連結区分は重複ではない。"""
+        fake = FakeNotion()
+        fake.before_insert = lambda: upsert.upsert_financial_summary(
+            fake, settings(), fin(consolidated="単体", net_sales=400.0)
+        )
+        upsert.upsert_financial_summary(fake, settings(), fin(consolidated="連結", net_sales=1000.0))
+        assert len(fake.active("db-fin")) == 2
+        assert fake.archived("db-fin") == []
+
+    def test_a_legacy_row_without_consolidation_is_adopted(self):
+        fake = FakeNotion()
+        seed(fake, fin(consolidated=None, net_sales=900.0))
+        page_id = upsert.upsert_financial_summary(
+            fake, settings(), fin(consolidated="連結", net_sales=1000.0)
+        )
+        (active,) = fake.active("db-fin")  # 重複を作らない
+        assert page_id == active["id"] == "page-0001"
+        assert select_of(active, S.FIN_PROP_CONSOLIDATED) == "連結"
+        assert net_sales_of(active) == 1000.0
+        assert fake.calls == [("query", "db-fin"), ("update", "page-0001")]  # 追加の問い合わせ無し
+
+        # 空の旧行は採用済みなので、単体は別の行になる
+        upsert.upsert_financial_summary(fake, settings(), fin(consolidated="単体", net_sales=400.0))
+        assert sorted(
+            select_of(p, S.FIN_PROP_CONSOLIDATED) for p in fake.active("db-fin")
+        ) == ["単体", "連結"]
+
+    def test_the_exact_key_wins_over_an_older_legacy_row(self):
+        fake = FakeNotion()
+        seed(fake, fin(consolidated=None, net_sales=900.0))  # page-0001（古い）
+        seed(fake, fin(consolidated="連結", net_sales=1000.0))  # page-0002
+        page_id = upsert.upsert_financial_summary(
+            fake, settings(), fin(consolidated="連結", net_sales=1100.0)
+        )
+        assert page_id == "page-0002"
+        assert net_sales_of(fake._page("page-0001")) == 900.0
+
+    def test_an_undetermined_record_does_not_overwrite_a_consolidated_row(self):
+        fake = FakeNotion()
+        seed(fake, fin(consolidated="連結", net_sales=1000.0))
+        upsert.upsert_financial_summary(fake, settings(), fin(consolidated=None, net_sales=50.0))
+        assert net_sales_of(fake._page("page-0001")) == 1000.0
+        assert len(fake.active("db-fin")) == 2
+
+    def test_the_disclosed_at_guard_still_applies_to_an_adopted_row(self):
+        """#14: 採用する旧行の方が新しい開示なら、古い報告で巻き戻さない。"""
+        fake = FakeNotion()
+        seed(fake, fin(consolidated=None, net_sales=1100.0, disclosed_on=date(2026, 9, 1)))
+        page_id = upsert.upsert_financial_summary(
+            fake, settings(),
+            fin(consolidated="連結", net_sales=999.0, disclosed_on=date(2026, 8, 1)),
+        )
+        assert page_id == "page-0001"
+        assert fake.calls == [("query", "db-fin")]
+        assert net_sales_of(fake._page("page-0001")) == 1100.0
+
+
+class TestInterimAdoptsTheLegacySecondQuarter:
+    def test_an_interim_record_adopts_the_legacy_2q_row(self):
+        """移行スクリプトより先にラベル変更が出ても、同じ期を 2 行に割らない。"""
+        fake = FakeNotion()
+        seed(fake, fin(dtype="2Q", net_sales=900.0))
+        page_id = upsert.upsert_financial_summary(
+            fake, settings(), fin(dtype="中間", net_sales=1000.0)
+        )
+        (active,) = fake.active("db-fin")
+        assert page_id == active["id"]
+        assert select_of(active, S.FIN_PROP_DISCLOSURE_TYPE) == "中間"
+        title = active["properties"][S.FIN_PROP_TITLE]["title"][0]["text"]["content"]
+        assert title == "7203 2026/06期 中間"
+        assert net_sales_of(active) == 1000.0
+
+    def test_an_existing_interim_row_wins_over_the_legacy_2q_row(self):
+        fake = FakeNotion()
+        seed(fake, fin(dtype="2Q", net_sales=900.0))  # page-0001（古い）
+        seed(fake, fin(dtype="中間", net_sales=1000.0))  # page-0002
+        page_id = upsert.upsert_financial_summary(
+            fake, settings(), fin(dtype="中間", net_sales=1100.0)
+        )
+        assert page_id == "page-0002"
+        assert select_of(fake._page("page-0001"), S.FIN_PROP_DISCLOSURE_TYPE) == "2Q"
+
+    def test_a_second_quarter_record_does_not_adopt_an_interim_row(self):
+        fake = FakeNotion()
+        seed(fake, fin(dtype="中間", net_sales=1000.0))
+        upsert.upsert_financial_summary(fake, settings(), fin(dtype="2Q", net_sales=900.0))
+        assert sorted(
+            select_of(p, S.FIN_PROP_DISCLOSURE_TYPE) for p in fake.active("db-fin")
+        ) == ["2Q", "中間"]
+

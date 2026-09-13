@@ -11,6 +11,57 @@
 
 from __future__ import annotations
 
+# ③ financials の PK に連結区分を足す移行（既存 DB 向け。新規 DB は下の DDL が
+# 最初から 4 列の PK で作るので何もしない）。
+#
+# - 旧 PK (code, 決算期末, 開示種別) の下では各キーが 1 行なので、4 列の PK に
+#   張り替えても衝突しない。既存行はそのまま残る（消さない・重複させない）。
+# - PostgreSQL の PK 列は NULL を許さない。連結区分が NULL の既存行は、D1 と同じ
+#   '不明' (local_store/mappers.UNKNOWN_CONSOLIDATED) を入れてから張り替える。
+# - 冪等: PK が既に連結区分を含んでいれば、ロックも UPDATE も行わず終わる。
+#   LocalStore.connect のたびに流れるので、確認は pg_constraint を 1 回引くだけにする。
+# - 同時に 2 つの接続が移行を始めても壊れないよう、ロックを取ってから確認し直す。
+#   READ COMMITTED では文ごとにスナップショットを取り直すので、ロック待ちの間に
+#   相手が済ませた張り替えが見える。
+# - 1 つの DO ブロックは 1 トランザクションなので、途中で失敗すれば元の PK に戻る。
+# - `format('%I')` を使わず quote_ident で連結する。psycopg に渡す SQL に % を
+#   含めないため。
+FINANCIALS_PK_MIGRATION = """
+DO $$
+DECLARE
+    old_pk text;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint c
+         WHERE c.conrelid = 'financials'::regclass AND c.contype = 'p'
+           AND NOT EXISTS (
+               SELECT 1 FROM pg_attribute a
+                WHERE a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+                  AND a.attname = 'consolidated'
+           )
+    ) THEN
+        RETURN;
+    END IF;
+    LOCK TABLE financials IN ACCESS EXCLUSIVE MODE;
+    SELECT c.conname INTO old_pk FROM pg_constraint c
+     WHERE c.conrelid = 'financials'::regclass AND c.contype = 'p'
+       AND NOT EXISTS (
+           SELECT 1 FROM pg_attribute a
+            WHERE a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+              AND a.attname = 'consolidated'
+       );
+    IF old_pk IS NULL THEN
+        RETURN;
+    END IF;
+    UPDATE financials SET consolidated = '不明' WHERE consolidated IS NULL;
+    ALTER TABLE financials ALTER COLUMN consolidated SET NOT NULL;
+    EXECUTE 'ALTER TABLE financials DROP CONSTRAINT ' || quote_ident(old_pk);
+    ALTER TABLE financials
+        ADD PRIMARY KEY (code, fiscal_period_end, disclosure_type, consolidated);
+END
+$$
+"""
+
 # 各文を個別に実行する（psycopg は複数文 execute も可だが、冪等性と可読性のため分割）。
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     # ① 銘柄マスタ -----------------------------------------------------------
@@ -74,13 +125,13 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS prices_code_idx ON prices (code)",
-    # ③ 財務サマリ（code × 決算期末 × 開示種別） -----------------------------
+    # ③ 財務サマリ（code × 決算期末 × 開示種別 × 連結区分） -------------------
     """
     CREATE TABLE IF NOT EXISTS financials (
         code                      TEXT NOT NULL,
         fiscal_period_end         DATE NOT NULL,
         disclosure_type           TEXT NOT NULL,
-        consolidated              TEXT,
+        consolidated              TEXT NOT NULL,
         accounting_standard       TEXT,
         net_sales                 DOUBLE PRECISION,
         operating_income          DOUBLE PRECISION,
@@ -108,9 +159,10 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         fetched_at                TIMESTAMPTZ NOT NULL,
         quality                   TEXT NOT NULL,
         updated_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
-        PRIMARY KEY (code, fiscal_period_end, disclosure_type)
+        PRIMARY KEY (code, fiscal_period_end, disclosure_type, consolidated)
     )
     """,
+    FINANCIALS_PK_MIGRATION,
     "CREATE INDEX IF NOT EXISTS financials_code_idx ON financials (code)",
     # ④ 開示書類（doc_id 一意） ---------------------------------------------
     """

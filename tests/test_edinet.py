@@ -41,7 +41,11 @@ class TestDocTypeMapping:
         assert mod.doc_type_label("120") == "有報"
         assert mod.doc_type_label("130") == "有報"
         assert mod.doc_type_label("140") == "四半期報告"
-        assert mod.doc_type_label("160") == "四半期報告"  # 半期報告は④に独立選択肢が無い
+        # 160/170 は 2024-04 に四半期報告書を置き換えた半期報告書。別の書類なので
+        # 「四半期報告」に混ぜない（混ぜると制度の前後で件数の意味が変わる）。
+        assert mod.doc_type_label("150") == "四半期報告"
+        assert mod.doc_type_label("160") == "半期報告"
+        assert mod.doc_type_label("170") == "半期報告"
         assert mod.doc_type_label("350") == "大量保有"
         assert mod.doc_type_label("360") == "大量保有"
 
@@ -137,7 +141,7 @@ class TestWithRealDocumentsList:
             assert rec.doc_id == doc["docID"]
             assert rec.disclosed_at.tzinfo is not None
             assert rec.code is not None and len(rec.code) == 4  # secCode 5桁→4桁
-            assert rec.doc_type in ("有報", "四半期報告", "大量保有", "その他")
+            assert rec.doc_type in ("有報", "四半期報告", "半期報告", "大量保有", "その他")
             assert rec.has_xbrl == (str(doc.get("xbrlFlag")) == "1")
             prov = rec.provenance
             assert prov.source is Source.EDINET

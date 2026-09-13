@@ -219,15 +219,87 @@ class TestFinancialSummaryPayload:
 
 
 class TestFinancialSummaryFilter:
+    """③ のキーは 銘柄コード×決算期末×開示種別×連結単体（連結と単体を後勝ちで潰さない）。"""
+
+    CONS_EQ = {"property": S.FIN_PROP_CONSOLIDATED, "select": {"equals": "連結"}}
+    CONS_EMPTY = {"property": S.FIN_PROP_CONSOLIDATED, "select": {"is_empty": True}}
+
     def test_compound_and_filter_structure(self):
-        flt = upsert.financial_summary_filter("7203", date(2026, 3, 31), "本決算")
+        flt = upsert.financial_summary_filter("7203", date(2026, 3, 31), "本決算", "連結")
         assert flt == {
             "and": [
                 {"property": S.FIN_PROP_CODE, "rich_text": {"equals": "7203"}},
                 {"property": S.FIN_PROP_PERIOD_END, "date": {"equals": "2026-03-31"}},
                 {"property": S.FIN_PROP_DISCLOSURE_TYPE, "select": {"equals": "本決算"}},
+                self.CONS_EQ,
             ]
         }
+
+    def test_undetermined_consolidation_keys_the_empty_select(self):
+        flt = upsert.financial_summary_filter("7203", date(2026, 3, 31), "本決算", None)
+        assert flt["and"][3] == self.CONS_EMPTY
+
+    def test_lookup_also_matches_rows_without_consolidation(self):
+        flt = upsert.financial_summary_lookup_filter("7203", date(2026, 3, 31), "本決算", "連結")
+        assert flt["and"][2] == {"property": S.FIN_PROP_DISCLOSURE_TYPE, "select": {"equals": "本決算"}}
+        assert flt["and"][3] == {"or": [self.CONS_EQ, self.CONS_EMPTY]}
+
+    def test_lookup_for_undetermined_consolidation_does_not_match_known_rows(self):
+        flt = upsert.financial_summary_lookup_filter("7203", date(2026, 3, 31), "本決算", None)
+        assert flt["and"][3] == self.CONS_EMPTY
+
+    def test_lookup_for_interim_also_matches_the_legacy_second_quarter(self):
+        flt = upsert.financial_summary_lookup_filter("7203", date(2026, 6, 30), "中間", "連結")
+        assert flt["and"][2] == {
+            "or": [
+                {"property": S.FIN_PROP_DISCLOSURE_TYPE, "select": {"equals": "中間"}},
+                {"property": S.FIN_PROP_DISCLOSURE_TYPE, "select": {"equals": "2Q"}},
+            ]
+        }
+
+    def test_second_quarter_lookup_does_not_match_interim_rows(self):
+        flt = upsert.financial_summary_lookup_filter("7203", date(2023, 9, 30), "2Q", "連結")
+        assert flt["and"][2] == {"property": S.FIN_PROP_DISCLOSURE_TYPE, "select": {"equals": "2Q"}}
+
+    def test_lookup_nests_at_most_two_levels(self):
+        """Notion の複合フィルタは 2 段 (and → or → 条件) までしかネストできない。"""
+        flt = upsert.financial_summary_lookup_filter("7203", date(2026, 6, 30), "中間", "連結")
+        for cond in flt["and"]:
+            for sub in cond.get("or", []):
+                assert "or" not in sub and "and" not in sub
+
+
+class TestPickFinancialPage:
+    @staticmethod
+    def _page(page_id, minute, dtype, consolidated):
+        return {
+            "id": page_id,
+            "created_time": f"2026-09-13T00:{minute:02d}:00.000Z",
+            "properties": {
+                S.FIN_PROP_DISCLOSURE_TYPE: {"select": {"name": dtype}},
+                S.FIN_PROP_CONSOLIDATED: {"select": {"name": consolidated} if consolidated else None},
+            },
+        }
+
+    def test_priority_prefers_consolidation_then_disclosure_type(self):
+        pages = [
+            self._page("legacy-both", 1, "2Q", None),
+            self._page("empty-cons", 2, "中間", None),
+            self._page("legacy-type", 3, "2Q", "連結"),
+            self._page("exact", 4, "中間", "連結"),
+        ]
+        pick = upsert.pick_financial_page
+        assert pick(pages, "中間", "連結")["id"] == "exact"
+        assert pick(pages[:3], "中間", "連結")["id"] == "legacy-type"
+        assert pick(pages[:2], "中間", "連結")["id"] == "empty-cons"
+        assert pick(pages[:1], "中間", "連結")["id"] == "legacy-both"
+
+    def test_oldest_wins_within_the_same_rank(self):
+        pages = [self._page("new", 5, "本決算", "連結"), self._page("old", 1, "本決算", "連結")]
+        assert upsert.pick_financial_page(pages, "本決算", "連結")["id"] == "old"
+
+    def test_no_pages(self):
+        assert upsert.pick_financial_page([], "本決算", "連結") is None
 
 
 class TestKeyFilters:

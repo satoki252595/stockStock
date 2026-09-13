@@ -17,6 +17,7 @@ import pytest
 
 from jp_stock_pipeline.licensing import LicenseTag
 from jp_stock_pipeline.models import Provenance, Source, now_jst
+from jp_stock_pipeline.transform import normalize as normalize_mod
 from jp_stock_pipeline.transform.normalize import (
     derive_disclosure_type,
     derive_fiscal_period_end,
@@ -283,7 +284,8 @@ class TestDerivations:
 
     @pytest.mark.parametrize(
         ("value", "expected"),
-        [("FY", "本決算"), ("1Q", "1Q"), ("2Q", "2Q"), ("3Q", "3Q")],
+        # HY も 2Q に寄せる。「中間」への読み替えは決算期末で行う (TestInterimDisclosureType)
+        [("FY", "本決算"), ("1Q", "1Q"), ("2Q", "2Q"), ("3Q", "3Q"), ("HY", "2Q"), ("Q2", "2Q")],
     )
     def test_disclosure_type(self, value, expected):
         tidy = tidy_frame([
@@ -315,3 +317,54 @@ class TestYfValuation:
         assert yf_info_to_valuation({}) == {
             "per": None, "pbr": None, "market_cap": None, "dividend_yield_pct": None,
         }
+
+
+class TestInterimDisclosureType:
+    """半期報告制度 (2024-04): 決算期末が 2024-06-30 以後の第2四半期は「中間」。"""
+
+    @pytest.mark.parametrize(
+        ("period_end", "expected"),
+        [
+            (date(2024, 6, 30), "中間"),  # 2024-04-01 開始 → 半期報告書
+            (date(2024, 7, 20), "中間"),  # 20 日締め: 2024-04-21 開始
+            (date(2026, 1, 31), "中間"),
+            (date(2024, 6, 20), "2Q"),  # 20 日締め: 2024-03-21 開始 → 経過措置で四半期報告書
+            (date(2024, 5, 31), "2Q"),
+            (date(2023, 9, 30), "2Q"),
+        ],
+    )
+    def test_second_quarter_by_period_end(self, period_end, expected):
+        assert normalize_mod.interim_disclosure_type("2Q", period_end) == expected
+
+    @pytest.mark.parametrize("dtype", ["本決算", "1Q", "3Q", "修正", "予想", "中間"])
+    def test_other_types_are_unchanged(self, dtype):
+        assert normalize_mod.interim_disclosure_type(dtype, date(2025, 9, 30)) == dtype
+
+    @pytest.mark.parametrize(
+        ("dei", "period_end", "expected"),
+        [
+            # 2024 年以後の半期報告書 (160) の DEI は Q2 のことも HY のこともある
+            # （ローカルの EDINET 一覧との突合で Q2 4,659 件 / HY 3,052 件）
+            ("Q2", "2024-09-30", "中間"),
+            ("HY", "2026-01-31", "中間"),
+            # 2024 年より前の四半期報告書 (140) にも HY がある（特定事業会社。92 件）
+            ("HY", "2023-09-30", "2Q"),
+            ("Q2", "2022-07-31", "2Q"),
+        ],
+    )
+    def test_record_follows_the_period_not_the_dei(self, dei, period_end, expected):
+        tidy = tidy_frame([
+            {"element": "jpdei_cor:TypeOfCurrentPeriodDEI", "context_ref": "FilingDateInstant", "value": dei},
+            {"element": "jpdei_cor:CurrentPeriodEndDateDEI", "context_ref": "FilingDateInstant", "value": period_end},
+            {"element": "jppfs_cor:NetSales", "context_ref": "CurrentYTDDuration", "consolidated": "連結", "value": "1", "period_end": period_end},
+        ])
+        record = tidy_to_financial_record(tidy, "7203", prov())
+        assert record.disclosure_type == expected
+
+    def test_explicit_annual_override_is_kept(self):
+        tidy = tidy_frame([
+            {"element": "jpdei_cor:CurrentPeriodEndDateDEI", "context_ref": "FilingDateInstant", "value": "2025-03-31"},
+            {"element": "jppfs_cor:NetSales", "context_ref": "CurrentYearDuration", "consolidated": "連結", "value": "1", "period_end": "2025-03-31"},
+        ])
+        record = tidy_to_financial_record(tidy, "7203", prov(), disclosure_type="本決算")
+        assert record.disclosure_type == "本決算"

@@ -179,11 +179,11 @@ class PriceTechnicalRecord:
 
 @dataclass
 class FinancialSummaryRecord:
-    """③ 財務サマリ (キー=銘柄コード×決算期末×開示種別)。"""
+    """③ 財務サマリ (キー=銘柄コード×決算期末×開示種別×連結単体)。"""
 
     code: str
     fiscal_period_end: date  # 決算期末
-    disclosure_type: str  # 本決算/1Q/2Q/3Q/修正/予想
+    disclosure_type: str  # 本決算/1Q/2Q/中間/3Q/修正/予想 (中間=期末2024-06-30以後の2Q)
     provenance: Provenance
     consolidated: str | None = None  # 連結/単体
     accounting_standard: str | None = None  # 日本基準/IFRS/US-GAAP 等
@@ -218,7 +218,7 @@ class DisclosureRecord:
     disclosed_at: datetime
     provenance: Provenance
     code: str | None = None  # 銘柄コード (4桁基準。全市場一括等は None)
-    doc_type: str = "その他"  # 短信/有報/四半期報告/業績修正/配当修正/大量保有/自社株買い/
+    doc_type: str = "その他"  # 短信/有報/四半期報告/半期報告/業績修正/配当修正/大量保有/自社株買い/
     # 株式分割/株式併合/上場廃止/新規上場/その他
     source_url: str | None = None
     has_xbrl: bool = False

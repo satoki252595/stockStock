@@ -1049,7 +1049,7 @@ CREATE INDEX idx_jss_raw_src_type  ON jss_raw_files(source, datatype, data_date 
 CREATE TABLE jss_financials (
   code                      TEXT NOT NULL,
   fiscal_period_end         TEXT NOT NULL,   -- YYYY-MM-DD
-  disclosure_type           TEXT NOT NULL,   -- 本決算/1Q/2Q/3Q/修正/予想
+  disclosure_type           TEXT NOT NULL,   -- 本決算/1Q/2Q/中間/3Q/修正/予想
   stock_id                  INTEGER,
   consolidated              TEXT NOT NULL,   -- 連結/単体/不明。PK なので NOT NULL
   accounting_standard       TEXT,

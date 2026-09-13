@@ -17,6 +17,7 @@ import pytest
 
 from jp_stock_pipeline.licensing import LicenseTag
 from jp_stock_pipeline.local_store import mappers
+from jp_stock_pipeline.local_store import schema as local_schema
 from jp_stock_pipeline.local_store.schema import SCHEMA_STATEMENTS
 from jp_stock_pipeline.local_store.sink import LocalStore
 from jp_stock_pipeline.models import (
@@ -145,7 +146,9 @@ class TestFinancialUpsert:
             net_sales=1.0e12, eps=250.0, provenance=_prov(),
         )
         sql, params = mappers.financial_upsert(rec)
-        assert "ON CONFLICT (code, fiscal_period_end, disclosure_type)" in sql
+        assert "ON CONFLICT (code, fiscal_period_end, disclosure_type, consolidated)" in sql
+        # 連結区分を判定できなかったレコードは D1 と同じ '不明'（PK 列は NULL を許さない）
+        assert params["consolidated"] == mappers.UNKNOWN_CONSOLIDATED == "不明"
         assert params["net_sales"] == 1.0e12
         assert params["eps"] == 250.0
 
@@ -263,22 +266,25 @@ class TestFinancialUpsertAssignments:
         assigned = re.findall(r"(?:^|, )(\w+) = ", set_clause)
         assert assigned == [c for c in params if c not in mappers.FIN_PK] + ["updated_at"]
 
-    def test_value_columns_merge_only_within_the_same_consolidation(self):
+    def test_value_columns_merge(self):
+        """連結区分が PK に入ったので、衝突するのは同じ測定範囲の行だけ。
+
+        以前は PK に無く、連結区分が一致するときだけ COALESCE する CASE で
+        「単体の訂正値 + 前回の連結値」の混在を防いでいた。今は無条件に COALESCE する。
+        """
         sql, _ = self._sql()
         for c in (
             "net_sales", "eps", "cf_operating", "dps_actual", "forecast_eps",
             "accounting_standard", "disclosed_at", "data_date",
         ):
-            assert (
-                f"{c} = CASE WHEN EXCLUDED.consolidated IS NOT DISTINCT FROM"
-                f" financials.consolidated THEN COALESCE(EXCLUDED.{c}, financials.{c})"
-                f" ELSE EXCLUDED.{c} END" in sql
-            )
+            assert f"{c} = COALESCE(EXCLUDED.{c}, financials.{c})" in sql
+        assert "CASE WHEN EXCLUDED.consolidated" not in sql
 
     def test_not_null_provenance_is_overwritten_and_license_is_not(self):
         sql, _ = self._sql()
-        for c in ("source", "fetched_at", "quality", "consolidated"):
+        for c in ("source", "fetched_at", "quality"):
             assert f"{c} = EXCLUDED.{c}," in sql
+        assert "consolidated = " not in sql.split(" DO UPDATE SET ", 1)[1]  # PK 列は更新しない
         assert "license_tag = EXCLUDED.license_tag" not in sql
         assert "license_tag = CASE WHEN CASE EXCLUDED.license_tag" in sql
 
@@ -325,11 +331,14 @@ class _FinancialsDb:
         values = {k: v.isoformat() if isinstance(v, date) else v for k, v in params.items()}
         self.con.execute(re.sub(r"%\((\w+)\)s", r":\1", sql), values)
 
+    def rows(self) -> list[dict]:
+        cur = self.con.execute("SELECT * FROM financials ORDER BY consolidated")
+        names = [d[0] for d in cur.description]
+        return [dict(zip(names, r, strict=True)) for r in cur.fetchall()]
+
     def row(self) -> dict:
-        cur = self.con.execute("SELECT * FROM financials")
-        rows = cur.fetchall()
-        assert len(rows) == 1  # PK が同じなので常に 1 行
-        return dict(zip([d[0] for d in cur.description], rows[0], strict=True))
+        (only,) = self.rows()  # PK が同じなので 1 行
+        return only
 
 
 class TestFinancialUpsertMerge:
@@ -395,18 +404,17 @@ class TestFinancialUpsertMerge:
         assert row["license_tag"] == LicenseTag.FACTUAL_CITE.value
         assert row["source"] == Source.EDINET.value  # 来歴は最後に書いた側
 
-    def test_a_different_consolidation_is_replaced_not_mixed(self):
-        """ローカルの PK には連結区分が無い。無条件に COALESCE すると混ざる。
+    def test_a_different_consolidation_is_a_separate_row(self):
+        """連結区分は PK の一部。単体の値が連結の行を置き換えも、混ざりもしない。
 
-        単体の値と前回の連結値が 1 行に並ぶと、それらしい数字として読まれる
-        （NULL より悪い）。D1 なら別行になる組み合わせなので、ここでは従来どおり
-        完全置換に倒す。連結行が単体行に置き換わること自体は PK の問題として残る。
+        以前は PK に無く、単体の書き込みが連結の行を完全置換していた（値は混ざらないが
+        連結の行が消えた）。D1 (PR #39) と同じく別行にする。
         """
         db = _FinancialsDb()
         db.write(_fin(net_sales=1000.0, eps=120.5))
         db.write(_fin(consolidated="単体", net_sales=50.0, disclosed_at=_CORRECTION_AT))
-        row = db.row()
-        assert (row["consolidated"], row["net_sales"], row["eps"]) == ("単体", 50.0, None)
+        rows = {r["consolidated"]: (r["net_sales"], r["eps"]) for r in db.rows()}
+        assert rows == {"連結": (1000.0, 120.5), "単体": (50.0, None)}
 
     def test_undetermined_consolidation_merges_with_itself(self):
         """normalize は単体のみの会社で consolidated=None を返しうる。
@@ -418,6 +426,48 @@ class TestFinancialUpsertMerge:
         db.write(_fin(consolidated=None, net_sales=1100.0, disclosed_at=_CORRECTION_AT))
         row = db.row()
         assert (row["net_sales"], row["eps"]) == (1100.0, 120.5)
+        assert row["consolidated"] == "不明"
+
+
+class TestFinancialsPkMigration:
+    """既存のローカル DB の ③ PK を (code, 決算期末, 開示種別, 連結区分) へ張り替える DDL。
+
+    CI に PostgreSQL は無いので、ここでは文の形と並びを確かめる。実際の張り替えは
+    PostgreSQL 17 で確認した（PR 本文）。
+    """
+
+    @staticmethod
+    def _statements() -> list[str]:
+        return list(SCHEMA_STATEMENTS)
+
+    def test_new_tables_are_created_with_the_four_column_pk(self):
+        ddl = next(s for s in SCHEMA_STATEMENTS if "TABLE IF NOT EXISTS financials" in s)
+        assert "PRIMARY KEY (code, fiscal_period_end, disclosure_type, consolidated)" in ddl
+        assert "consolidated              TEXT NOT NULL" in ddl
+
+    def test_migration_runs_right_after_the_create_table(self):
+        statements = self._statements()
+        create = next(
+            i for i, s in enumerate(statements) if "TABLE IF NOT EXISTS financials" in s
+        )
+        assert statements[create + 1] is local_schema.FINANCIALS_PK_MIGRATION
+
+    def test_migration_is_guarded_and_fills_unknown_before_not_null(self):
+        sql = local_schema.FINANCIALS_PK_MIGRATION
+        assert sql.index("RETURN") < sql.index("LOCK TABLE financials")  # 済んでいればロックしない
+        assert sql.count("a.attname = 'consolidated'") == 2  # ロック後に確認し直す
+        assert (
+            sql.index(f"SET consolidated = '{mappers.UNKNOWN_CONSOLIDATED}' WHERE consolidated IS NULL")
+            < sql.index("SET NOT NULL")
+            < sql.index("DROP CONSTRAINT")
+            < sql.index("ADD PRIMARY KEY (code, fiscal_period_end, disclosure_type, consolidated)")
+        )
+        assert "%" not in sql  # psycopg のプレースホルダと誤解されない
+
+    def test_unknown_consolidation_matches_d1(self):
+        from jp_stock_pipeline.cloud_store.financials import UNKNOWN_CONSOLIDATED
+
+        assert mappers.UNKNOWN_CONSOLIDATED == UNKNOWN_CONSOLIDATED
 
 
 class TestDisclosureUpsert:
