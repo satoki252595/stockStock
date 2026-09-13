@@ -17,7 +17,7 @@
 | 7 | vwap リポジトリはアーカイブ（実施済み: vwap `79642b6`） |
 | 8 | 全面正本化は「stockStock が同等以上を書けるようになってから writer を切り替える」段階を踏む |
 | 9 | **（2026-09-13）日次取込（kabulab-cf `src/cron/daily.ts`）と、それを読む公開面の母集団を `is_active=1 AND instrument_type='equity'` に絞る**（kabulab-cf PR #30。2026-09-13 マージ済み）。**公開面に ETF / REIT / 出資証券を出さない**（2026-09-13 にユーザーが承認した決定。同じ述語で、P4b で入る外国株・PRO Market も出ない。この 2 種別が承認に含まれるかは未確認で「残る判断事項」に置く）。+725 行（非普通株 9 行の削除後の再計測では +733）の INSERT は P5 完了後・P6 直前のまま動かさない（§2.1） |
-| 10 | **（2026-09-13）非普通株 9 銘柄（`reit_fund` 8 / `investment_certificate` 1）の kabulab-cf D1 の行を、元データから削除した**（2026-09-13 18:33 UTC に実行）。`core_stocks` 9 行と、子表 15 表（行があったのは 13 表）の 1,049 行、計 1,058 行。退避は git 管理外。範囲外として残したのは `jss_*` / Notion / R2。ユーザーの指示の文言は「元データから削除しましょう」。コード指定の詳細ページは 404 になる（P4b「副作用の明示」、承認 A27）。**kabulab-cf PR #31 のマージまで、手元で `pnpm sync:monthly` を流さない**（流すと優待の取込が、削除した行を `is_active=1`・`instrument_type` NULL で作り直す。P4b 節「前提作業」）。この 9 コードを P4b で `core_stocks` に戻すかは未決（「残る判断事項」） |
+| 10 | **（2026-09-13）非普通株 9 銘柄（`reit_fund` 8 / `investment_certificate` 1）の kabulab-cf D1 の行を、元データから削除した**（2026-09-13 18:33 UTC に実行）。`core_stocks` 9 行と、子表 15 表（行があったのは 13 表）の 1,049 行、計 1,058 行。退避は git 管理外。範囲外として残したのは `jss_*` / Notion / R2。ユーザーの指示の文言は「元データから削除しましょう」。コード指定の詳細ページは 404 になる（P4b「副作用の明示」、承認 A27）。優待の取込が削除した行を作り直す経路は、kabulab-cf PR #31（2026-09-13 マージ）で塞いだ（P4b 節「前提作業」）。この 9 コードを P4b で `core_stocks` に戻すかは未決（「残る判断事項」） |
 
 ## 確定した前提（2026-09-11 追記・本文の U1/U2 を解決）
 
@@ -2344,7 +2344,7 @@ converted CSV を600件サンプルした平均は 1,061行/doc・359 KB/doc。3
 | 7 | `yutai_monthly` に D1 書込を追加（保護列のテストを先に書く） | 保護4列が変化しないことを SELECT で確認 |
 | 8 | `master_sync` に data_j.xlsx + `instrument_type`（列追加のみ）+ **4条件ガード** | dry-run で `instrument_type` 別件数を `stocks.json` と突合。ガードの発火テスト |
 | 9 | `prices_daily`: 履歴子DB廃止 + R2 merge 経路 + マージ後系列でのテクニカル計算 + D1 断面 | **既存 `daily/{code}.json` を1件も壊さない**（GET→書き戻しの往復テスト）。sma75/sma200/week52 が NULL にならないこと |
-| 10 | `master_sync` の母集団 **+725件**（非普通株 9 行の削除後の再計測では +733。実施時に測り直す）INSERT（**9 の直前**） | 日次取込と読み手が active かつ equity に絞られていること（kabulab-cf PR #30）。取込の code→id も同じ母集団に絞られ、優待の取込が `core_stocks` に行を足さないこと（kabulab-cf PR #31。削除した 9 行を手元の月次優待取込が作り直さないための前提でもあるので、P4b より前、遅くとも次の `pnpm sync:monthly` より前に入れる） |
+| 10 | `master_sync` の母集団 **+725件**（非普通株 9 行の削除後の再計測では +733。実施時に測り直す）INSERT（**9 の直前**） | 日次取込と読み手が active かつ equity に絞られていること（kabulab-cf PR #30）。TDnet 開示・EDINET 有報の取込の code→id から非普通株が除かれ、優待の取込が `core_stocks` に行を足さないこと（kabulab-cf PR #31、2026-09-13 マージ済み） |
 | 11 | `export_weekly` の入力を R2 `daily/` へ、トラックAを D1 へ | 生成 Parquet の行数・期間が従来と一致 |
 | 12 | `edinet_daily` / `tdnet_hourly` に R2 原本 + `jss_*`。TDnet PDF 取得を追加 | `jss_raw_files` と R2 の突合 |
 | 13 | `reconcile_weekly` を整合チェックへ改修 | 意図的に不整合を作って検出できるか |
@@ -3268,11 +3268,11 @@ P5 完了後、P6 の直前に実施する（§2.1）。
 - 銘柄種別（`equity` / `foreign` / `pro_market` / `etf_etn` / `reit_fund` / `investment_certificate`。語彙の正本は kabulab-cf `src/shared/jpx/instrument-type.ts`）を持つ行を足し、`core_stocks` の総数を 4,543 にする（2026-09-14 時点の集合差。足す行をすべて active にすると active は 4,433。実施時に測り直す。4,445 は `stocks.json` の件数で、`core_stocks` の値ではない）。既存行への充填は 2026-09-13 に kabulab-cf #27 で済んでいる。
 - これは P6 で「stockStock の母集団で日足を上書きして ETF を更新停止させる」事故を**型で防ぐ**ための前提。
 - **削除した非普通株 9 銘柄のコードを P4b で戻すかは未決**（2026-09-14 追記。ユーザーの判断待ち。「残る判断事項」）。ユーザーの指示は「元データから削除しましょう」で、`core_stocks` に戻すことまでは確認していない。9 コードは data_j に載っているので、何もしなければ P4b の INSERT で**別の id** の行として戻る。設計側の既定案は「戻す（除外しない）」。P6 のガード（「対象コード集合 ⊇ R2 に既に存在する日足キー集合」）と R2 `daily/` の母集団（`stocks.json`）が、全種別を `core_stocks` に置くことを前提にしているため。戻さないなら、P4b の INSERT から 9 コードを除く仕組みと、P6 ガードか `stocks.json` の設計変更が要る。戻した行は `instrument_type` が `equity` ではないので、日次取込にも公開面にも出ない（決定 9）。
-- **前提作業: kabulab-cf PR #31**（取込の code→id を active かつ equity に絞る。優待の取込で `core_stocks` に行を足さない。2026-09-14 時点で未マージ）。P4b だけの前提ではなく、**削除を保つための前提**でもある。
-  - kabulab-cf main（019f09b）の `services/otakara-yutai/data-scripts/fetch-yutai-full.ts` は、取得した優待コードごとに `core_stocks` を code で upsert する。無いコードは `is_active=1`（既定値）・`instrument_type` NULL の新しい行になる。この処理は `pnpm sync:monthly`（`scripts/sync/all-monthly.ts`、手元で実行）の 2 段目にある。
-  - 削除した 9 銘柄は優待の取得元に載っている。そのため **#31 のマージより前に `pnpm sync:monthly` を流すと、P4b を待たずに 9 行が戻る**。戻ると「削除後の active 3,700 はすべて equity」が崩れ、TDnet 開示・EDINET 有報の日次キャッチアップ（code→id を全行から引く）で、9 銘柄の取込と Notion への記録が再開する。
-  - GitHub の月次 universe 同期（`src/cron/universe.ts`）は内国普通株の行しか upsert しないので、9 行を作らない。ただし既存 active 行の `instrument_type` は埋めるので、戻った行には非普通株の語が入る。
-  - したがって **#31 のマージまで手元で `pnpm sync:monthly` を流さない**。#31 は、遅くとも次の手元の月次優待取込の前、かつ P4b の前に入れる。#31 が無いまま P4b を行うと、`core_stocks` に入った ETF 等についても TDnet 開示・EDINET 有報の取込が自動で始まる。
+- **前提作業: kabulab-cf PR #31（2026-09-13 マージ済み）**。P4b だけの前提ではなく、削除を保つための前提でもあった。
+  - 取込（TDnet 開示・EDINET 有報の日次キャッチアップ、ir-catalog の取込の既定経路、両 backfill）の code→id は、`instrument_type='equity' OR (is_active=0 AND instrument_type IS NULL)` の行から引く。非普通株（区分が非 NULL）と、区分 NULL の active 行は取り込まない。上場廃止や地域取引所の単独上場で `is_active=0` の会社の開示は、変更前どおり取り込む（ユーザー決定は非普通株を外すことだけのため。止めるなら述語を active かつ equity に替える）。
+  - 優待の取込（`fetch-yutai-full.ts` ほか 3 経路）は `core_stocks` に行を足さない。全削除は母集団（active かつ equity）の銘柄の優待行だけで、母集団外の優待行と LLM 派生値には触らない。取得割合が 95% 未満なら削除の前に止まる。
+  - #31 より前の main では、優待の取込が取得した優待コードごとに `core_stocks` を code で upsert していた（無いコードは `is_active=1`・`instrument_type` NULL の新しい行）。削除した 9 銘柄は優待の取得元に載っているので、#31 より前に手元で `pnpm sync:monthly` を流すと 9 行が戻っていた。#31 のマージでこの経路は無くなった。
+  - 残る既知の限界: P4b の後に JPX が非普通株の区分名を変えると、universe sync（`planInstrumentTypeUpdates`）が既存行の `instrument_type` を NULL に書き換える。その行が後で対象外化されると `is_active=0` かつ区分 NULL になり、取込の母集団に戻る。universe sync に NULL への書き換えをやめさせるかは、P4b 第 2 段の前に決める。
 - **`core_stocks_migrate --state-dump` は、P4b の適用の直前に取る**（削除前の状態は使わない）。削除前の状態を基準にすると、削除した 9 行が P4b の差分に混ざる。件数は月次同期でも動く（2026-09-13 の月次同期は 1 行を INSERT し、7 行を対象外にした）ので、total 3,810 / active 3,700 を条件にしない。
   - **P4b の検証に、今の `--compare-to` はそのまま使えない。** `jobs/core_stocks_migrate.py` の G-core-2 は、適用前後で件数（total / active / sector NULL）と `sqlite_sequence` が変わらないことを要求する（P4a の DDL だけの変更用）。P4b は行を INSERT するので、どの基準でも必ず問題として出る。P4b 用に、G-core-2 を「件数 = 適用前 + INSERT 数、かつ旧 code ⊆ 新 code」（設計上の定義「旧にあって新に無い code がゼロ」）で判定するモードを足す。
 - **`jss_financials` で `stock_id` が NULL の行の再解決を検討する。** `cloud_store/financials.resolve_stock_id` は、コードが `core_stocks` に無ければ `stock_id` を NULL にして書く。P4b より前に書いた行のうち、削除した 9 コードや ETF 等の行は NULL のまま残り、P4b で `core_stocks` に行が入っても自動では埋まらない。P4b の後に code から id を引き直すかを決める。
@@ -3527,7 +3527,7 @@ D1 の内訳で従来試算とのずれが大きい2点: 原本索引は R2 キ�
 | A9 | P4a | ①マスタへの列追加と既存3,818行への銘柄種別充填（列追加は P4a で済。**銘柄種別の充填は kabulab-cf #27 で済**） | 可逆 |
 | A10 | P5 | ②断面の writer 切替 | 可逆 |
 | A11 | P5 | kabulab-cf 日次 cron の**部分停止改修**（分割フラグの追加。P5 のブロッカー） | 可逆 |
-| A12 | P4b | **+725行 INSERT**（削除後の再計測では +733。実施時に測り直す）。前提として kabulab-cf の絞り込み改修（A26）と取込の改修（kabulab-cf PR #31）が入っているので、公開面の件数と旧 writer の処理対象は変わらない。**何もしなければ、削除した非普通株 9 コードが別の id で `core_stocks` に戻る**（子表の行は戻らない。戻すかは「残る判断事項」） | 可逆 |
+| A12 | P4b | **+725行 INSERT**（削除後の再計測では +733。実施時に測り直す）。前提の kabulab-cf の絞り込み改修（A26）と取込の改修（kabulab-cf PR #31）はマージ済みなので、公開面の件数と旧 writer の処理対象は変わらない。**何もしなければ、削除した非普通株 9 コードが別の id で `core_stocks` に戻る**（子表の行は戻らない。戻すかは「残る判断事項」） | 可逆 |
 | A13 | P6 | per-code 日足の writer 切替（外部読者2つが直読） | 可逆 |
 | A14 | P6 | kabulab-cf の日足/5分足の cron 分離改修と日足 cron 停止 | 可逆 |
 | A15 | P6/S5 | 007 の信用残 API を per-code 読みへ変更（互換シム廃止の前提） | 可逆 |
@@ -3542,7 +3542,7 @@ D1 の内訳で従来試算とのずれが大きい2点: 原本索引は R2 キ�
 | A24 | S1 前 | **既存公開 API の personal-only 無認証配布の是正**（認証を掛ける / 内部ホストへ移す） | 可逆 |
 | A25 | S1 | 公開 API / 公開面を立ち上げるという意思決定 | 可逆 |
 | A26 | P4b 前 | kabulab-cf の日次取込と読み手を普通株に絞る（お宝優待から非普通株 9 件が消える。kabulab-cf PR #30。2026-09-13 マージ済み） | 可逆 |
-| A27 | P4b 前 | 非普通株 9 銘柄の行を kabulab-cf D1 から削除（ir-catalog の開示 108 件を含む）。2026-09-13 18:33 UTC に実行済み（決定 10）。戻す経路の本線は git 管理外の JSONL の退避で、優待の LLM 派生値（要約 19 行・推定値 6 行）は再取得できず写しはこれだけ。D1 の Time Travel は削除の直前・直後の bookmark を取ってあるが、期限は 2026-10-13 頃で、restore は DB 全体をその場で巻き戻す（削除後の日次の書込もすべて消える）ので最後の手段。P4b で同じコードが別の id で入った後に JSONL から戻す場合は、子表の `stock_id` を新しい id に付け替える必要がある。kabulab-cf PR #31 のマージまで手元で `pnpm sync:monthly` を流さない（流すと 9 行が作り直される） | 条件付き可逆 |
+| A27 | P4b 前 | 非普通株 9 銘柄の行を kabulab-cf D1 から削除（ir-catalog の開示 108 件を含む）。2026-09-13 18:33 UTC に実行済み（決定 10）。戻す経路の本線は git 管理外の JSONL の退避で、優待の LLM 派生値（要約 19 行・推定値 6 行）は再取得できず写しはこれだけ。D1 の Time Travel は削除の直前・直後の bookmark を取ってあるが、期限は 2026-10-13 頃で、restore は DB 全体をその場で巻き戻す（削除後の日次の書込もすべて消える）ので最後の手段。P4b で同じコードが別の id で入った後に JSONL から戻す場合は、子表の `stock_id` を新しい id に付け替える必要がある。優待の取込が 9 行を作り直す経路は kabulab-cf PR #31（マージ済み）で塞いだ | 条件付き可逆 |
 
 ---
 
@@ -3567,7 +3567,7 @@ D1 の内訳で従来試算とのずれが大きい2点: 原本索引は R2 キ�
 - 【みんかぶ優待の扱いを、公認照会の結果を待って決めるか】逐条確認の結論は「規約内に personal-only を緩める根拠は存在しない」で、本計画はタグ維持を前提に P3 の公開面是正（掲載文を公開画面・公開APIの6箇所から外す）を組んでいる。もし後から公認が得られる、あるいは法務確認が通ってタグが変わると、この是正が不要になり掲載文を公開面に戻す逆方向の作業が発生する。公認の申請窓口・条件は規約にも関連法規ページにも明記がなく、運営会社への個別照会が必要。P3 着手前に照会するか、タグ維持で先に進めるか。
 - 【ETF / REIT / 出資証券を公開面に出すか】→ **2026-09-13 決着: 出さない**（ユーザーが承認。決定 9）。kabulab-cf PR #30（マージ済み）が、日次取込と公開面の一覧を `is_active=1 AND instrument_type='equity'` に絞った。さらに、優待のある非普通株 9 銘柄（`reit_fund` 8 / `investment_certificate` 1）の行は、ユーザーの指示で元データから削除した（決定 10。コード指定の詳細ページは 404）。方針を変えて出す場合は日次取込の対象も広げる必要がある（広げないと、日次データが止まった行を一覧に出すことになる）。P4b 後に全種別を対象にすると、取込は約 +20%（削除前の数字で (3,709 + 725) / 3,709 = 1.195、削除後の数字で (3,700 + 733) / 3,700 = 1.198。725 / 733 は P4b の実施時に集合差を測り直す）。
   - **未確認: 外国株と PRO Market も出さないでよいか。** 述語 `instrument_type='equity'` は、P4b で入る外国株（`foreign`。2026-09-14 の集合差で 5）と PRO Market（`pro_market`。同 187）も、公開面・断面・投影から外す。承認として記録しているのは「ETF / REIT / 出資証券を出さない」だけ
-  - P4b の前提作業として kabulab-cf PR #31 を入れる（取込の code→id を active かつ equity に絞り、優待の取込で `core_stocks` に行を足さない）。**#31 のマージまで手元で `pnpm sync:monthly` を流さない**（流すと、削除した 9 行が作り直される。P4b 節）
+  - P4b の前提作業の kabulab-cf PR #31 はマージ済み（取込の code→id から非普通株を除き、優待の取込で `core_stocks` に行を足さない。P4b 節）
 - 【削除した非普通株 9 コードを P4b で `core_stocks` に戻すか】（2026-09-14 追加・未決）ユーザーの指示は「元データから削除しましょう」で、P4b で戻すことまでは確認していない。何もしなければ、9 コードは data_j に載っているので P4b の INSERT で別の id の行として戻る（子表の行は戻らない。日次取込・公開面には出ない）。設計側の既定案は「戻す」。P6 のガード（「対象コード集合 ⊇ R2 に既に存在する日足キー集合」）と R2 `daily/` の母集団（`stocks.json`）が、全種別を `core_stocks` に置くことを前提にしているため。戻さないなら、P4b の INSERT から 9 コードを除く仕組みと、P6 ガードか `stocks.json` の設計変更が要る。どちらを採るか（P4b 節、承認 A12）。
 
 ---
