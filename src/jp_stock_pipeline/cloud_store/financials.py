@@ -82,7 +82,7 @@ import logging
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
-from ..licensing import LicenseTag, strictness_rank
+from ..licensing import stricter_tag_sql, strictness_rank_sql
 from .d1 import MAX_BOUND_PARAMS, D1Error
 from .schema import FINANCIALS_PK
 
@@ -173,15 +173,11 @@ STOCK_ID_BATCH = 90
 def _license_rank_sql(expression: str) -> str:
     """ライセンスタグの厳しさ順位を SQL で再現する。
 
-    順位は `licensing` の `_STRICTNESS` から生成するので、あちらの順序を
-    変えたらこの SQL も自動で追随する。未知の値は既知の最大 + 1 = 最も厳しい
-    扱いにする（緩い側へ倒れる方が危険なので fail-safe はこちら）。
+    定義は `licensing.strictness_rank_sql` に一本化した。ローカル PG の ③
+    (`local_store/mappers.py`) も同じ順位で「厳しい側を残す」ので、ストアごとに
+    書くと未知タグの扱いのような端の規則だけが食い違う。
     """
-    whens = " ".join(
-        f"WHEN '{tag.value}' THEN {strictness_rank(tag)}" for tag in LicenseTag
-    )
-    unknown = max(strictness_rank(tag) for tag in LicenseTag) + 1
-    return f"CASE {expression} {whens} ELSE {unknown} END"
+    return strictness_rank_sql(expression)
 
 
 def build_upsert_sql(row_count: int) -> str:
@@ -198,10 +194,8 @@ def build_upsert_sql(row_count: int) -> str:
     ]
     assignments += [f"{c} = excluded.{c}" for c in OVERWRITE_COLUMNS]
     assignments.append(
-        f"{LICENSE_COLUMN} = CASE WHEN"
-        f" {_license_rank_sql(f'excluded.{LICENSE_COLUMN}')} >="
-        f" {_license_rank_sql(f'{TABLE}.{LICENSE_COLUMN}')}"
-        f" THEN excluded.{LICENSE_COLUMN} ELSE {TABLE}.{LICENSE_COLUMN} END"
+        f"{LICENSE_COLUMN} = "
+        + stricter_tag_sql(f"excluded.{LICENSE_COLUMN}", f"{TABLE}.{LICENSE_COLUMN}")
     )
     return (
         f"INSERT INTO {TABLE} ({', '.join(COLUMNS)})"

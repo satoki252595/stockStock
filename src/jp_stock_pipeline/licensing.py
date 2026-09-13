@@ -54,11 +54,36 @@ def strictness_rank(tag: LicenseTag) -> int:
     """厳しさの順位（大きいほど厳しい）。
 
     SQL で同じ順序を再現する必要がある場所があるため公開している
-    （`cloud_store/financials.py` は行内の `license_tag` を「厳しい側を残す」
+    （③財務サマリは D1 `cloud_store/financials.py` とローカル PG
+    `local_store/mappers.py` の両方で、行内の `license_tag` を「厳しい側を残す」
     でマージする。Python の `inherit()` と同じ順序でなければ、1 つの行の
-    タグが経路によって変わる）。
+    タグが経路によって変わる）。SQL 式は `strictness_rank_sql` を使う。
     """
     return _STRICTNESS[tag]
+
+
+def strictness_rank_sql(expression: str) -> str:
+    """`strictness_rank` と同じ順位を SQL の `CASE` 式で返す。
+
+    D1(SQLite) とローカル PG の両方が使うので定義をここ 1 箇所に置く
+    （ストアごとに書くと、未知タグの扱いのような端の規則だけが食い違う）。
+    未知の値は既知の最大 + 1 = 最も厳しい扱いにする（緩い側へ倒れる方が
+    危険なので fail-safe はこちら）。
+
+    `expression` は列参照などの SQL 断片で、値ではない。埋め込むリテラルは
+    `LicenseTag` の定数だけで、外部入力を連結しない。
+    """
+    whens = " ".join(f"WHEN '{tag.value}' THEN {_STRICTNESS[tag]}" for tag in LicenseTag)
+    unknown = max(_STRICTNESS.values()) + 1
+    return f"CASE {expression} {whens} ELSE {unknown} END"
+
+
+def stricter_tag_sql(incoming: str, existing: str) -> str:
+    """2 つのタグ式のうち厳しい方を返す SQL 式。同順位なら `incoming`。"""
+    return (
+        f"CASE WHEN {strictness_rank_sql(incoming)} >= {strictness_rank_sql(existing)}"
+        f" THEN {incoming} ELSE {existing} END"
+    )
 
 
 def inherit(tags: Iterable[LicenseTag]) -> LicenseTag:
