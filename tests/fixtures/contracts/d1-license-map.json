@@ -3,7 +3,7 @@
   "$source_of_truth": "Python 実装が正本: column_license は src/jp_stock_pipeline/cloud_store/schema.py の MIXED_LICENSE_COLUMNS、table_license は src/jp_stock_pipeline/cloud_store/governance.py の TABLE_LICENSE。D1 の jss_column_license へ投入するのは jobs/license_map.py だけで、実表との突き合わせも同ジョブが毎日行う。",
   "$undeclared_policy": "列地図に無い列・表区分に無い表は「公開してよいと決まっていない」= 公開投影ビューに入れない。地図は公開できるものの allowlist であって、公開できないものの denylist ではない。",
   "$tag_semantics": "タグは「その列の値が第三者の著作物・データセットを含むか」を答える。「公開 API が出すべきか」は別の判断（例: core_stocks.id は第三者由来の値を含まないので commercial-ok だが、移行元の PK なので API には出さない）。",
-  "$provenance_note": "core_stocks.sector と core_stocks.sector33 は名前が似ているだけで出所が違う。sector は kabulab-cf src/cron/universe.ts が JPX data_j.xlsx の33業種を書く既存列 (personal-only)。sector33 は stockStock collectors/edinet_codelist.py が EDINET コードリストの「提出者業種」を書く新設列 (commercial-ok)。2 列を 1 列に統合してはいけない（タグの違う値が同居すると列単位で区別できなくなる）。なお sector33 は 2026-09-13 時点で本番 3,818 行すべて NULL なので、公開面の業種を sector から sector33 へ切り替えてよいのは P4b の充填後。",
+  "$provenance_note": "core_stocks.sector と core_stocks.sector33 は名前が似ているだけで出所が違う。sector は kabulab-cf src/cron/universe.ts が JPX data_j.xlsx の33業種を書く既存列 (personal-only)。sector33 は stockStock collectors/edinet_codelist.py が EDINET コードリストの「提出者業種」を書く新設列 (commercial-ok)。2 列を 1 列に統合してはいけない（タグの違う値が同居すると列単位で区別できなくなる）。sector33 は stockStock master_sync が EDINET「提出者業種」を東証33業種の名称へ正規化して埋める（倉庫・運輸関連 → 倉庫・運輸関連業、外国法人・組合 → NULL）。EDINET の業種は提出者の申告で東証の割り当てではないので、sector と約 4% の銘柄で分類が違う。これは誤りではなく、sector へ寄せてはいけない（寄せると personal-only の値が混ざる）。",
   "$kinds": {
     "row-tag": "行の license_tag 列が正。ソースが行ごとに違う表。",
     "column-map": "1 行にライセンスが混在する。column_license が正。",
@@ -162,7 +162,7 @@
       "tag": null
     }
   },
-  "$writer_claim_note": "jss_writer_claims の column_group の語彙をここで固定する。PK が (dataset, column_group) なので、後から値を改名すると DELETE + INSERT の破壊的書換になる。宣言するのは「今日実際に writer が居る (dataset, column_group)」だけで、writer の居ない列群（例: core_stocks の enrich = P4a で足した 12 列）には行を作らない。core_stocks は P4b の writer 交代まで kabulab-cf とする（stockStock と宣言すると universe.ts の照合が毎回 throw して JPX 母集団同期が止まる）。照合は warn → fail の 2 段リリースで、1 段目では食い違いを warning にする（claim を投入するのも書込ジョブなので、claim 行の無い DB への最初の実行を異常終了させるとブートストラップ不能）。",
+  "$writer_claim_note": "jss_writer_claims の column_group の語彙をここで固定する。PK が (dataset, column_group) なので、後から値を改名すると DELETE + INSERT の破壊的書換になる。宣言するのは「今日実際に writer が居る (dataset, column_group)」だけで、writer の居ない列群には行を作らない。core_stocks は base（行の作成と既存列）を kabulab-cf、enrich（P4a で足した 12 列を既存行の UPDATE だけで書く群）を stockStock とする。base を stockStock と宣言すると universe.ts の照合が毎回 throw して JPX 母集団同期が止まるので動かさない。enrich は 2026-09-13 から stockStock master_sync が sector33 を updated_at を進めずに埋める（残り 11 列は P4b）。照合は warn → fail の 2 段リリースで、1 段目では食い違いを warning にする（claim を投入するのも書込ジョブなので、claim 行の無い DB への最初の実行を異常終了させるとブートストラップ不能）。",
   "column_groups": {
     "all": "その表の全列を 1 writer が書く（分割の必要が無い表）",
     "base": "行の作成 + 基本列（INSERT / UPDATE の両方）",
@@ -233,6 +233,12 @@
       "dataset": "core_stocks",
       "column_group": "base",
       "writer": "kabulab-cf",
+      "declared": "2026-09-13"
+    },
+    {
+      "dataset": "core_stocks",
+      "column_group": "enrich",
+      "writer": "stockStock",
       "declared": "2026-09-13"
     },
     {

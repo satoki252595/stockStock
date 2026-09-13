@@ -348,21 +348,26 @@ def ddl_columns(sql: str | None) -> list[str]:
 #
 # 「列を足したが writer を入れ忘れて黙って死ぬ」（`estimate_source_url` が
 # 8,314 行すべて NULL なのに `estimated_value` は 5,333 行ある）を検出可能に
-# しておくため、**writer がいない群は宣言しない**。`core_stocks` の `enrich`
-# 群（P4a で足した 12 列）は今日どのジョブも書いていないので行を作らない。
+# しておくため、**writer がいない群は宣言しない**。
 #
-# ## `core_stocks` を `kabulab-cf` から始める理由（順序の罠）
+# ## `core_stocks` は `base = kabulab-cf` / `enrich = stockStock`（2026-09-13）
 #
-# `core_stocks` の行を今日書いているのは kabulab-cf の `src/cron/universe.ts`
-# だけである。stockStock 側は `jobs/core_stocks_migrate.py` が ALTER と
-# CREATE INDEX しか出さず、値の充填は `cloud_store/core_stocks.build_column_update`
-# が「組み立てて返す（実行しない）」設計になっている。
-#
-# ここで `writer='stockStock'` と宣言すると、kabulab-cf 側に同じ照合を入れた
+# `core_stocks` の行の作成と既存列（`name` / `market` / `sector` / `is_active` /
+# `updated_at`）を書くのは kabulab-cf の `src/cron/universe.ts` だけである。
+# ここで `base` を `stockStock` と宣言すると、kabulab-cf 側に同じ照合を入れた
 # 瞬間に `universe.ts` が毎回 throw して **JPX 母集団同期が止まる**。だから
-# P4b の writer 交代までは `kabulab-cf` とし、交代は同一 PR で
-# (1) `core_stocks/enrich` を `stockStock` で足す (2) 充填ジョブを有効にする
-# の順に行う。`base` 群の writer は交代後も kabulab-cf のままである。
+# `base` は `kabulab-cf` のまま動かさない。
+#
+# `enrich` 群（P4a で足した 12 列）は、`jobs/master_sync.py` が `sector33` を
+# 既存行への UPDATE だけで埋め始めたので `stockStock` で宣言する。設計どおり
+# 同一 PR で (1) `core_stocks/enrich` を `stockStock` で足す (2) 充填ジョブを
+# 有効にする、の順に入れた。`universe.ts` は `enrich` の列を 1 つも SET しない
+# ので、この宣言で kabulab-cf 側が止まることはない（2026-09-13 に origin/main を
+# 読んで確認。照合コード自体もまだ無い）。
+#
+# `enrich` の 12 列のうち今日書くのは `sector33` だけで、残り 11 列は P4b。
+# 群を列ごとに割らないのは、PK が `(dataset, column_group)` なので細かく割るほど
+# 後の統合が破壊的書換になるからである（writer が別になる列が出たら割る）。
 #
 # `all` を使わず最初から `base` にしてあるのは、後で `base` / `enrich` へ割る
 # ときに `all` 行の DELETE が必要になるのを避けるためである（PK が
@@ -422,8 +427,15 @@ WRITER_CLAIMS: tuple[WriterClaim, ...] = tuple(
             "core_stocks",
             COLUMN_GROUP_BASE,
             WRITER_KABULAB,
-            "kabulab-cf src/cron/universe.ts。P4b の writer 交代までここは動かさない"
-            "（stockStock 側の build_column_update は組み立てるだけで実行しない）",
+            "kabulab-cf src/cron/universe.ts。行の作成と既存列。enrich を stockStock が"
+            "持った後もここは動かさない",
+        ),
+        _claim(
+            "core_stocks",
+            COLUMN_GROUP_ENRICH,
+            WRITER_STOCKSTOCK,
+            "stockStock master_sync が sector33 を既存行の UPDATE だけで埋める"
+            "（updated_at は進めない）。残りの P4a 列は P4b",
         ),
         _claim(
             "core_stock_financials",

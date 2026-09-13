@@ -419,22 +419,21 @@ class _RecordingD1Store(D1Store):
 
 
 class TestFillWouldBlindTheFreshnessMonitor:
-    """`sector33` の充填を P4b に置いた理由を機械可読な事実として固定する。
-
-    `sector33` の出所は決着している（EDINET「提出者業種」= commercial-ok）ので、
-    `master_sync` に UPDATE を 1 行足せば充填できる。**足してはいけない。**
+    """`build_column_update` で月次充填してはいけない理由を機械可読な事実として固定する。
 
     `cloud_store/datasets.py` は `core_stocks` に日付列が無いため鮮度を
     `MAX(updated_at)` で測っており、`build_column_update` は `updated_at` を
-    明示的に進める。月次で 3,818 行を充填すると `MAX(updated_at)` が毎月必ず
-    進み、kabulab-cf の universe sync が死んでいても `core_stocks` の SLO
+    明示的に進める。これで月次に 3,818 行を充填すると `MAX(updated_at)` が毎月
+    必ず進み、kabulab-cf の universe sync が死んでいても `core_stocks` の SLO
     （33 日で黄・46 日で赤）が発火しなくなる。JPX の 404 で銘柄マスタが 33 日
     止まったのに誰も気づかなかった、というまさに検知したかった事象を自分の
     書き込みで隠すことになる（設計書 B-8 の「now を入れると永久に緑」と同型）。
 
-    この 2 つの事実（鮮度の基準が `updated_at` である / 充填が `updated_at` を
-    進める）が両方とも成り立っている間は充填を有効にできない。どちらかを
-    先に崩すのが P4b の前提条件である。
+    2026-09-13 に `sector33` だけは充填を始めたが、`updated_at` を進めない専用の
+    `build_sector33_updates` で書く（その SQL に `updated_at` が現れないことは
+    `tests/test_core_stocks_sector33.py` が固定する）。したがって下の 3 つの事実は
+    今も成り立っていなければならない。`build_column_update` を `jobs/` から
+    呼び始めるなら、先に鮮度の基準を `updated_at` から外すこと（P4b）。
     """
 
     def test_鮮度の基準が_updated_at_である(self) -> None:

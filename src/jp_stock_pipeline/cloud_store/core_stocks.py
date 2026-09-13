@@ -21,41 +21,54 @@
 SET 句に一度も現れないことを静的に検査する」ことを求めている。実行と生成が
 同じ関数に同居していると、その検査ができない。
 
-## 充填を P4b に置く理由（2026-09-13 追記。実行させる前に必ず読むこと）
+## sector33 の充填で updated_at を進めない理由（2026-09-13。書き換える前に必ず読むこと）
 
-`sector33` の出所は決着した（EDINET コードリストの「提出者業種」= commercial-ok。
-`collectors/edinet_codelist.py:151`）。つまり `master_sync` はこの値を既に
-持っており、Notion ① とローカル ① へは書いている。残っているのは **D1
-`core_stocks.sector33` へ UPDATE を流すかどうか**だけである。
+`sector33` の出所は決着している（EDINET コードリストの「提出者業種」=
+commercial-ok。`collectors/edinet_codelist.py` の `_COL_SECTOR`）。2026-09-13 に
+ユーザが「公開面の業種を33業種で表示する」と決め、公開面（kabulab-cf
+`src/shared/db/public-columns.ts`）は既に `core_stocks.sector33` を読んでいる。
+本番は全行 NULL で「—」表示だったので、`master_sync` がこの列を埋める。
 
-本レーンでは流さない。理由は 3 つあり、1 つ目が決定的である。
+当初この充填を P4b に置いた理由は 3 つあった。それぞれ次のように解いた。
 
-**(1) 鮮度監視を恒久的に緑にしてしまう。** `cloud_store/datasets.py` の
-`core_stocks` は日付列を持たないので、鮮度を `MAX(updated_at)` で測っている。
-`build_column_update` は `updated_at = (unixepoch())` を明示的に進めるので、
-月次 `master_sync` が 3,818 行を充填すると **`MAX(updated_at)` が毎月必ず
-進む**。すると `core_stocks` の SLO（33 日で黄・46 日で赤）は、kabulab-cf の
-月次 universe sync が死んでいても発火しない。これは検知したかった事象
-（JPX の 404 で銘柄マスタが **33 日**止まったのに誰も気づかなかった）を
-自分の書き込みで隠すことになる。設計書 B-8 が「`now` を入れると翌日から
-永久に緑」と書いているのと同じ失敗で、**writer 不在より悪い**。
-P4b はこれを先に解く必要がある（`src_data_date` / `src_fetched_at` を
-充填して鮮度の基準をそちらへ移すか、鮮度 SQL を「kabulab-cf が書いた列だけ」
-で測る形にするか）。
+**(1) 鮮度監視を恒久的に緑にしてしまう → `updated_at` を SET しない専用の
+UPDATE で解く。** `cloud_store/datasets.py` の `core_stocks` は日付列を持たない
+ので、鮮度を `MAX(updated_at)` で測っている。`build_column_update` は
+`updated_at = (unixepoch())` を明示的に進めるので、これで月次に充填すると
+**`MAX(updated_at)` が毎月必ず進み**、kabulab-cf の月次 universe sync が死んで
+いても `core_stocks` の SLO（33 日で黄・46 日で赤）が発火しない（JPX の 404 で
+銘柄マスタが 33 日止まったのに誰も気づかなかった事象を、自分の書き込みで隠す。
+設計書 B-8 の「`now` を入れると永久に緑」と同型）。
+そこで `build_sector33_updates` は `sector33` だけを SET する。`updated_at` に
+触るのは kabulab-cf の `universe.ts` だけなので、鮮度の意味は変わらない。
+`build_column_update` は他の P4a 列（P4b）のために**そのまま残す**。
+SQL に `updated_at` が現れないことは `tests/test_core_stocks_sector33.py` が固定する。
+本番 `core_stocks` に trigger が無いこと（UPDATE が裏で `updated_at` を進めない
+こと）は 2026-09-13 に `sqlite_master` で確認した。
 
-**(2) writer 交代と同じ単位の変更になる。** UPDATE を流した瞬間に stockStock は
-`core_stocks` の writer になる。`governance.WRITER_CLAIMS` は P4b までこの表を
-`kabulab-cf` と宣言しており（そう宣言しないと `universe.ts` の照合が throw して
-JPX 母集団同期が止まる）、充填を先に入れると宣言と実態が食い違う。
+採らなかった案: `src_fetched_at` を同時に埋めて鮮度の基準をそちらへ移す。
+EDINET 側の取得時刻で測ると「kabulab-cf の同期が止まった」を検知できなくなり、
+解きたい問題が別の形で戻る。
 
-**(3) 承認とロールバックの単位が違う。** 列追加（DDL・1 回きり）と値の充填
-（UPDATE・毎月 3,818 行）で戻し方が違う。G-core-1 の静的検査も「実行しない」
-前提で書かれている。
+**(2) writer 交代と同じ単位の変更 → 同一 PR で claim を足す。**
+`governance.WRITER_CLAIMS` に `core_stocks/enrich = stockStock` を足す。
+`base` 群（行の作成と既存列）の writer は `kabulab-cf` のまま。kabulab-cf の
+`universe.ts` は `sector33` を SET せず（`sector` は JPX 由来の別列）、2026-09-13
+時点で claim の照合コードも持たないので、この宣言で JPX 母集団同期は止まらない。
+
+**(3) 承認とロールバックの単位 → 2026-09-13 にユーザ承認。** 戻し方は
+`UPDATE core_stocks SET sector33 = NULL`（`updated_at` を進めない）と
+`jss_writer_claims` の `('core_stocks', 'enrich')` 行の削除。`instrument_type` など
+残りの P4a 列の充填は引き続き P4b。
 """
 
 from __future__ import annotations
 
-from .d1 import MAX_COMPOUND_SELECT_TERMS, D1Error
+from collections.abc import Iterable, Mapping
+
+from ..contracts.sector33 import normalize_sector33
+from ..contracts.stock_code import source_code_to_ticker
+from .d1 import MAX_BOUND_PARAMS, MAX_COMPOUND_SELECT_TERMS, D1Error
 
 TABLE = "core_stocks"
 
@@ -102,7 +115,8 @@ NEW_COLUMNS: dict[str, str] = {
     "instrument_type": "TEXT",  # equity/etf/... JPX 由来 → personal-only
     # EDINET コードリストの「提出者業種」(33業種相当) → commercial-ok。
     # 既存の `sector` (JPX 33業種 / personal-only) とは出所が違う別の列である。
-    # 値の充填は P4b（理由は docs/CF-CANONICAL-DESIGN.md の P4a 実施記録）。
+    # 値は master_sync が東証33業種の名称へ正規化して埋める
+    # （`build_sector33_updates`。updated_at を進めない）。
     "sector33": "TEXT",
     "sector17": "TEXT",  # 17業種 JPX 由来 → personal-only
     "edinet_code": "TEXT",  # EDINETコード → commercial-ok
@@ -225,6 +239,116 @@ def build_column_update(code: str, values: dict[str, object]) -> tuple[str, list
         f"UPDATE {TABLE} SET {assignments}, updated_at = (unixepoch()) WHERE code = ?"
     )
     return sql, [values[c] for c in columns] + [code]
+
+
+# --- sector33 の充填（EDINET「提出者業種」）----------------------------------
+#
+# `build_column_update` を使わず専用の UPDATE を持つ理由は、モジュール docstring の
+# 「sector33 の充填で updated_at を進めない理由」を読むこと。要点だけ書くと、
+# `core_stocks` の鮮度は `MAX(updated_at)` で測っているので、月次の充填が
+# `updated_at` を進めると kabulab-cf の universe sync が死んでも SLO が鳴らない。
+
+SECTOR33_COLUMN = "sector33"
+
+# 差分を取るための読み取り。全行（約 3,818 行）を 1 文で読む。月 1 回なので
+# rows_read は月 3,818 行。`WHERE sector33 IS NOT ...` で絞る案は、コードリストと
+# 比べるまで「変わったか」が分からないので成立しない。
+SECTOR33_SNAPSHOT_SQL = f"SELECT code, {SECTOR33_COLUMN} FROM {TABLE}"
+
+
+def plan_sector33_updates(
+    current_rows: Iterable[Mapping[str, object]],
+    codelist: Iterable[tuple[str | None, str | None]],
+) -> dict[str, str | None]:
+    """書くべき `{code: 新しい sector33}` を返す（値が変わる行だけ）。
+
+    - `current_rows` は `SECTOR33_SNAPSHOT_SQL` の結果（D1 側の正）
+    - `codelist` は `(証券コード, 提出者業種)` の組。コードは `source_code_to_ticker`
+      で 4 文字にする（5 文字は末尾 "0" のときだけ。別証券への取り違えを避ける）
+    - **コードリストに現れない銘柄は触らない。** コードリストの一時的な欠落や
+      REIT・インフラファンド（EDINET に証券コードが無い）で既存値を NULL に
+      潰さない。NULL を書くのは「コードリストに居て、正規化結果が None」の銘柄だけ
+    - 同じティッカーが 2 回現れたら後勝ち（`master_sync._dedup_by_code` と同じ）
+    """
+    desired: dict[str, str | None] = {}
+    for raw_code, raw_sector in codelist:
+        ticker = source_code_to_ticker(raw_code)
+        if ticker is None:
+            continue
+        desired[ticker] = normalize_sector33(raw_sector)
+
+    changes: dict[str, str | None] = {}
+    for row in current_rows:
+        code = str(row.get("code") or "")
+        if code not in desired:
+            continue
+        new = desired[code]
+        if row.get(SECTOR33_COLUMN) != new:
+            changes[code] = new
+    return changes
+
+
+def build_sector33_updates(changes: Mapping[str, str | None]) -> list[tuple[str, list]]:
+    """`sector33` **だけ**を SET する UPDATE 文の列を**組み立てて返す**（実行しない）。
+
+    形は `UPDATE core_stocks SET sector33 = ? WHERE code IN (?, ...)` で、同じ値を
+    書く銘柄を 1 文にまとめ、1 文のバインド数を `MAX_BOUND_PARAMS` 以下に切る。
+
+    - `updated_at` を SET しない（鮮度監視を自分の書き込みで隠さないため）
+    - サロゲートキー `id` も既存列も SET しない（G-core-1）
+    - `WHERE code IN` は `core_stocks_code_unique` 索引で引けるので、走査行は
+      書く行数と同じオーダーに収まる
+
+    採らなかった案: `SET sector33 = CASE code WHEN ? THEN ? ... END WHERE code IN
+    (...)`。1 行あたり 3 バインドで 1 文 33 行になり、初回の約 3,704 行で 113 文。
+    値でまとめる形なら 34 値 × 99 行で約 50 文に減る。加えて CASE は WHEN と IN の
+    列が 1 つでもずれると ELSE 無しで NULL を書く（既存値を黙って潰す）が、
+    値でまとめる形はその失敗の仕方を持たない。
+    """
+    by_value: dict[str | None, list[str]] = {}
+    for code in sorted(changes):
+        by_value.setdefault(changes[code], []).append(code)
+
+    per_statement = MAX_BOUND_PARAMS - 1  # 先頭の 1 個は SET の値
+    statements: list[tuple[str, list]] = []
+    # None を先頭に置いて並びを決定的にする（dict の挿入順に依存させない）
+    for value in sorted(by_value, key=lambda v: (v is not None, v or "")):
+        codes = by_value[value]
+        for start in range(0, len(codes), per_statement):
+            chunk = codes[start : start + per_statement]
+            placeholders = ", ".join("?" for _ in chunk)
+            sql = (
+                f"UPDATE {TABLE} SET {SECTOR33_COLUMN} = ?"
+                f" WHERE code IN ({placeholders})"
+            )
+            statements.append((sql, [value, *chunk]))
+    return statements
+
+
+def render_sector33_backfill(changes: Mapping[str, str | None]) -> str:
+    """一回限りの backfill 用に、値を埋め込んだ SQL ファイルの中身を返す。
+
+    `wrangler d1 execute --file` はバインドを渡せないので、ここだけ文字列へ
+    埋め込む。値は東証33業種の固定語彙か NULL、コードは正準 4 文字だけなので
+    引用符は `'` の二重化で足りる（それ以外の値は `normalize_sector33` と
+    `source_code_to_ticker` を通った時点で来ない）。
+    """
+
+    def lit(value: str | None) -> str:
+        return "NULL" if value is None else "'" + value.replace("'", "''") + "'"
+
+    # `build_sector33_updates` と同じ分割で出す（SQL の形を 2 か所で作文しない
+    # ために params から組み直す。文字列置換で `?` を埋める案は、値に `?` が
+    # 含まれた瞬間に壊れるので採らない）。
+    lines = []
+    for _sql, params in build_sector33_updates(changes):
+        value, *codes = params
+        in_list = ", ".join(lit(c) for c in codes)
+        lines.append(
+            f"UPDATE {TABLE} SET {SECTOR33_COLUMN} = {lit(value)}"
+            f" WHERE code IN ({in_list});"
+        )
+    return "\n".join(lines) + ("\n" if lines else "")
 
 
 # --- 読み取り（検証用。すべて SELECT / PRAGMA）-------------------------------
