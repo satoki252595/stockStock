@@ -1,7 +1,8 @@
 # 鮮度を観測して記録し（freshness_probe）、そのあと SLO を判定する（ops_check）。
 # 続いて core_stocks の列定義ドリフトを検出し（core_stocks_migrate --verify / E7）、
 # 最後に列単位ライセンス地図を投入して実表と照合する（license_map）。
-# 異常があれば Issue を 1 本立てる。正常なら何も出さない。
+# 異常があれば Issue を 1 本立てる。4 層すべてが正常なら、open の同名 Issue を
+# 閉じる（無ければ何も出さない）。
 #
 # 「壊れても音が鳴らない」を塞ぐための層。実測で次が誰にも気づかれなかった:
 #   EDINET 11 営業日連続 processed=0 で「成功」/ JPX 404 で銘柄マスタ 33 日停止
@@ -62,12 +63,16 @@ concurrency:
 
 permissions:
   contents: read
-  issues: write  # SLO 違反時に Issue を立てるため
+  issues: write  # SLO 違反時に Issue を立て、緑に戻ったら閉じるため
 
 jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # 立てる側と閉じる側で同じ文字列を使う。片方だけ書き換わると、閉じる側が
+    # 永久に何も見つけられず黙る（完全一致で探しているため）。
+    env:
+      SLO_ISSUE_TITLE: "[SLO違反] データの鮮度またはジョブ結果"
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
@@ -189,6 +194,12 @@ jobs:
       # どの層で落ちたかが分かるように4ステップの outcome を本文へ入れる
       # （観測が落ちたのか、観測はできたが SLO を割ったのか、列定義がドリフトした
       # のか、ライセンス地図が実表と乖離したのかで対処がまったく違う）。
+      #
+      # 既存 Issue の探し方は下の「閉じる」ステップと同じ完全一致にそろえる。
+      # 以前は `--search "$TITLE in:title"` の先頭を取っていたが、GitHub 検索は
+      # 語の部分一致で、日本語タイトルは分かち書きが効かないため、語が重なる
+      # 別 Issue にコメントし得た。作る側と閉じる側で「どれが SLO 違反 Issue か」の
+      # 判定がずれると、閉じたはずの Issue とは別の Issue に積まれる。
       - name: SLO 違反を Issue に出す
         if: failure()
         env:
@@ -199,12 +210,76 @@ jobs:
           DRIFT_OUTCOME: ${{ steps.drift.outcome }}
           LICENSE_OUTCOME: ${{ steps.license.outcome }}
         run: |
-          TITLE="[SLO違反] データの鮮度またはジョブ結果"
-          EXISTING=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          EXISTING=$(gh issue list --state open --limit 200 --json number,title \
+            --jq '[.[] | select(.title == env.SLO_ISSUE_TITLE)][0].number // empty')
           BODY=$(printf '観測・判定・列定義ドリフト検出・ライセンス地図の照合のいずれかが失敗しました。\n\n- 観測 (freshness_probe): %s\n- 判定 (ops_check): %s\n- 列定義ドリフト (core_stocks_migrate --verify / E7): %s\n- ライセンス地図 (license_map): %s\n\n実行ログ: %s\n検知: %s' \
             "$PROBE_OUTCOME" "$JUDGE_OUTCOME" "$DRIFT_OUTCOME" "$LICENSE_OUTCOME" "$RUN_URL" "$(date -u '+%Y-%m-%d %H:%M UTC')")
           if [ -n "$EXISTING" ]; then
             gh issue comment "$EXISTING" --body "$BODY"
           else
-            gh issue create --title "$TITLE" --body "$BODY"
+            gh issue create --title "$SLO_ISSUE_TITLE" --body "$BODY"
           fi
+
+      # 4 層がすべて緑に戻ったら、open の SLO 違反 Issue を閉じる。
+      #
+      # ## なぜ閉じるのか
+      #
+      # 上のステップは赤のたびに同じ Issue へコメントを積むが、緑に戻っても
+      # 閉じなかった。残った Issue は「今も壊れている」と読まれ、次に本物の赤が
+      # 来てもコメント 1 件が増えるだけで気づかれない（通知の残骸が検知を鈍らせる）。
+      # 手で閉じる運用は、閉じ忘れと「まだ赤の日に閉じて翌日また立つ」の両方を招く。
+      #
+      # ## 採らなかった案: 赤を `slo.ACCEPTED_RED` へ入れて黙らせる
+      #
+      # 新しい writer の初回実行は黙った失敗が最も起きやすく、その赤が唯一の検知に
+      # なる（2026-09-13、本番 `jss_financials` の PK が旧いままで
+      # `ON CONFLICT (..., consolidated)` の書き込みが全部黙って失敗していたのを
+      # 手で見つけた）。赤は赤のまま出し、残骸は緑で片付ける側に倒した。
+      #
+      # ## 条件を `success()` だけにしない理由
+      #
+      # `success()` は `if:` で skip されたステップを失敗と数えない。将来どれかの
+      # 層に条件を付けて skip される日が来ると、「見ていないのに緑として閉じる」
+      # ことになる。4 層の outcome を明示して、全部 success のときだけ閉じる。
+      # 層を足したらここにも足すこと（tests/test_jobs_smoke.py が突き合わせる）。
+      #
+      # ## タイトルは完全一致
+      #
+      # `--search` は部分一致で無関係な Issue を拾い得るので使わない。open の一覧を
+      # 取って jq で完全一致させる（open Issue は数件規模なので `--limit 200` で
+      # 足りる）。同名が複数 open なら全部閉じる（手で立てた重複も同じ残骸）。
+      #
+      # ## 既知の割り切り
+      #
+      # - 赤→緑→赤と揺れると、Issue が閉じて新しい番号で立ち直る。日次なので
+      #   多くて 1 日 1 本。閉じた Issue を reopen して 1 スレッドに保つ案は、
+      #   closed を遡って探す分だけシェルが大きくなるので採らない。
+      # - `gh` が落ちるとこのステップが失敗し、Issue の無い赤い実行が残る。
+      #   `continue-on-error` にしないのは、閉じられなかったことが黙るより赤で
+      #   見える方がよいから（Issue が 1 本残るだけで害は小さい）。
+      - name: SLO が緑に戻ったら SLO 違反 Issue を閉じる
+        if: >-
+          success()
+          && steps.probe.outcome == 'success'
+          && steps.judge.outcome == 'success'
+          && steps.drift.outcome == 'success'
+          && steps.license.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PROBE_OUTCOME: ${{ steps.probe.outcome }}
+          JUDGE_OUTCOME: ${{ steps.judge.outcome }}
+          DRIFT_OUTCOME: ${{ steps.drift.outcome }}
+          LICENSE_OUTCOME: ${{ steps.license.outcome }}
+        run: |
+          NUMBERS=$(gh issue list --state open --limit 200 --json number,title \
+            --jq '.[] | select(.title == env.SLO_ISSUE_TITLE) | .number')
+          if [ -z "$NUMBERS" ]; then
+            echo "open の SLO 違反 Issue は無い"
+            exit 0
+          fi
+          BODY=$(printf '観測・判定・列定義ドリフト検出・ライセンス地図の照合がすべて成功したので閉じます。\n\n- 観測 (freshness_probe): %s\n- 判定 (ops_check): %s\n- 列定義ドリフト (core_stocks_migrate --verify / E7): %s\n- ライセンス地図 (license_map): %s\n\n実行ログ: %s\n回復: %s' \
+            "$PROBE_OUTCOME" "$JUDGE_OUTCOME" "$DRIFT_OUTCOME" "$LICENSE_OUTCOME" "$RUN_URL" "$(date -u '+%Y-%m-%d %H:%M UTC')")
+          for N in $NUMBERS; do
+            gh issue close "$N" --reason completed --comment "$BODY"
+          done

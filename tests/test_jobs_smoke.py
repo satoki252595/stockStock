@@ -766,6 +766,51 @@ class TestWorkflowCrons:
         assert "nix develop" in text
 
 
+class TestOpsCheckIssueLifecycle:
+    """ops_check.yml は赤で SLO 違反 Issue を立て、4 層すべて緑で閉じる。
+
+    閉じる条件に層の outcome を 1 つでも書き忘れると、その層を見ないまま Issue を
+    閉じる。層を足したときの書き忘れを、`id:` の一覧との突き合わせで捕まえる。
+    pyyaml は直接依存ではないので、周囲のテストと同じく本文を文字列で読む。
+    """
+
+    PATH = Path(__file__).parent.parent / ".github" / "workflows" / "ops_check.yml"
+    CLOSE_STEP = "- name: SLO が緑に戻ったら SLO 違反 Issue を閉じる"
+
+    def _text(self) -> str:
+        return self.PATH.read_text(encoding="utf-8")
+
+    def _close_block(self, text: str) -> str:
+        assert self.CLOSE_STEP in text, "緑で Issue を閉じるステップが無い"
+        block = text.split(self.CLOSE_STEP, 1)[1]
+        # 次のステップ（あれば）の手前まで
+        return re.split(r"\n\s*- name:", block, maxsplit=1)[0]
+
+    def test_close_requires_every_layer_success(self):
+        text = self._text()
+        ids = re.findall(r"^\s*id:\s*(\w+)\s*$", text, re.MULTILINE)
+        assert set(ids) == {"probe", "judge", "drift", "license"}
+        cond = self._close_block(text).split("env:", 1)[0]
+        assert "success()" in cond
+        for step_id in ids:
+            assert f"steps.{step_id}.outcome == 'success'" in cond, step_id
+
+    def test_title_is_shared_and_matched_exactly(self):
+        text = self._text()
+        # 立てる側と閉じる側が別々に文字列を持つと、片方だけ書き換わって黙る
+        assert text.count("[SLO違反] データの鮮度またはジョブ結果") == 1
+        assert "SLO_ISSUE_TITLE:" in text
+        close = self._close_block(text)
+        assert "select(.title == env.SLO_ISSUE_TITLE)" in close
+        assert "--search" not in close  # 部分一致は無関係な Issue を閉じ得る
+        assert "gh issue close" in close
+        create = text.split("- name: SLO 違反を Issue に出す", 1)[1].split(
+            self.CLOSE_STEP, 1
+        )[0]
+        assert "select(.title == env.SLO_ISSUE_TITLE)" in create
+        assert '--title "$SLO_ISSUE_TITLE"' in create
+
+
 class TestEdinetLargeHolding:
     """大量保有報告書 (350/360) の取りこぼし修正。
 
