@@ -74,9 +74,9 @@
 
 ### 解消済み: JPX 信用残の 5 文字コード（2026-09-13）
 
-`collectors/jpx_margin.py` の `parse_margin_text` と kabulab-cf
-`services/vwap-analysis/lib/margin.ts` の `parseMarginText` は、5 文字コードを
-`[:4]` / `.slice(0, 4)` で**無条件に切っていた**（取り違えの規則そのもの）。
+kabulab-cf `services/vwap-analysis/lib/margin.ts` の `parseMarginText` は、
+5 文字コードを `.slice(0, 4)` で**無条件に切っていた**（取り違えの規則そのもの）。
+（stockStock 側の `collectors/jpx_margin.py` は移行中止に伴い削除。判定記録は残す）
 「信用銘柄の ETF/REIT は検査文字が `"0"` でない見込みなので、`source_code_to_ticker`
 に寄せると正当な行を落とす」として保留していたが、実 PDF で測って決着した。
 
@@ -116,9 +116,9 @@
 - マージ順の罠: `cross-repo-contract` は相手リポの **main** と突合するので、両 PR とも
   マージ前は赤、片方をマージした直後の main も赤になる。両方マージした後に両リポの
   `cross-repo-contract` を再実行して緑を確認する。
-- 検証: 合成ベクタは常時走る（`tests/test_jpx_margin.py::TestFiveCharCodeToKey`、
-  kabulab-cf `margin.test.ts`）。実 PDF は `tests/fixtures/jpx/syumatsu*.pdf` を
-  手元に置いたときだけ `TestRealPdfCodes` が走る（commit 禁止・無ければ skip）。
+- 検証: 共有ベクタの `margin_to_key` は `test_stock_code_contract.py` で常時走る
+  （kabulab-cf `margin.test.ts` と両側で固定）。stockStock 側のパーサと
+  実 PDF テスト（`TestRealPdfCodes`）は移行中止に伴い削除した。
 
 ## コアモジュール（実装済み・変更時は要注意）
 
@@ -132,7 +132,8 @@
 | `notion/client.py` | `NotionClient`（スロットル・429バックオフ・dry-run記録 `.ops`・`raw_api()`） |
 
 DB論理キー（`Settings.db_id()` / schema.py / upsert.py で共通）:
-`stock_master` / `prices` / `financials` / `disclosures` / `raw_files` / `exports` / `job_log`
+`stock_master` / `financials` / `disclosures` / `raw_files`
+（`prices` / `exports` / `job_log` は廃止）
 
 ## バンドル別ファイル所有権（並列実装時の衝突防止）
 
@@ -169,18 +170,6 @@ consolidated   : str  "連結"/"単体"/""（コンテキストから判別で�
 unit           : str  単位（原文のまま 例 JPY, shares。無ければ空）
 value          : str  値（**原文の文字列をそのまま**。数値化は transform 側で行う）
 ```
-
-## 移行の切替判定 (G-fin-1) は「値一致」ではない
-
-`cloud_store/fin_parity.py` が正本。③断面の writer 交代 (P5) の判定は
-**項目ごとに閾値が違う**。`per` / `pbr` だけ相対誤差 ≤ 1e-6（実測 worst
-1.4e-07）で、`eps` / `bps` / `roe` / `price` には**値一致の閾値を置かない**
-（Yahoo が TTM を改訂するので原理的に一致しない。実測 eps 1,611 行中
-1e-6 での一致は 76 行）。代わりに導出整合・符号・欠損パターンで見る。
-
-**「G-fin-1 が通った」を「値が一致した」と読み替えないこと。** 閾値なしの項目は
-レポートに「値一致は判定していない（観測のみ）」と出る。詳細と実測値は
-`fin_parity.py` の docstring と `docs/CF-CANONICAL-DESIGN.md` の P5 節。
 
 ## transform → upsert の受け渡し
 

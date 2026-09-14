@@ -22,7 +22,7 @@ from jp_stock_pipeline.cloud_store.d1 import D1Error, D1Store
 from jp_stock_pipeline.config import CloudStoreSettings
 from jp_stock_pipeline.jobs import license_map, runner
 
-from test_core_stocks_migrate import PROD_DDL
+from test_core_stocks_migrate import APPLIED_DDL, PROD_DDL
 
 _D1_ENV = {
     "NOTION_TOKEN": "dummy-token",
@@ -49,7 +49,7 @@ class _FakeStore(D1Store):
         # `core_stocks` は本番の実 DDL + P4a の 12 列。地図が本番の 21 列すべてを
         # 見るので、ここを削ると網羅性の検査が意味を失う。
         self.con.executescript(PROD_DDL)
-        for stmt in cs.plan_ddl(set(), set()):
+        for stmt in APPLIED_DDL:
             self.con.execute(stmt)
         # kabulab-cf 所有の表。**区分の宣言から名前を導いている**（ここに
         # リテラルで並べると宣言と二重管理になり、どちらが古いか分からなくなる）。

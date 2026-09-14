@@ -167,7 +167,7 @@ def margin_code_to_key(code: str | None) -> str | None:
 
     ## 採らなかった案
     - ISIN を rows に足す: 公開 API が行を丸ごとスプレッドするため公開面が
-      広がり、`cloud_store.margin.SNAPSHOT_CONTRACT` (キー固定) を破る。
+      広がり、rows[] のキー固定契約 (kabulab-cf `margin.test.ts` が固定) を破る。
     - 非 "0" 行を捨てる: 上記のとおり実在証券のデータ欠損になる。
 
     ## 範囲

@@ -1,11 +1,12 @@
-"""①銘柄マスタへの列追加（移行 P4a）のテスト。
+"""`core_stocks` の列定義の地図（E7）と孤児検査（G-core-5）のテスト。
 
-最重要は **G-core-1**: 発行する SQL にサロゲートキー `id` が SET 句として
-一度も現れないこと。`core_stocks.id` は 14 子表が `stock_id` で参照しており、
-書き換えた瞬間に全子表の紐付けが壊れる（多くは ON DELETE cascade）。
+P4a の列追加は適用済みで、DDL 発行コード（`--apply` / `plan_ddl` /
+`build_column_update`）は削除した（D-14-1）。このファイルが固定するのは
+「本番 PRAGMA が正で 21 列」の地図と、検証用 SQL の形だけである。
 
-型でも lint でも「どの列を SET したか」は検出できないので、
-**SQL を実行せず組み立てだけして静的に検査する**（設計書 G-core-1 の字義どおり）。
+`PROD_DDL` と `set_targets` と `APPLIED_DDL` は他のテストからも使う
+（`test_core_stocks_job.py` / `test_core_stocks_sector33.py` /
+`test_license_map.py` が本番と同一 DDL の複製を作る）。
 """
 
 from __future__ import annotations
@@ -13,10 +14,8 @@ from __future__ import annotations
 import re
 import sqlite3
 
-import pytest
-
 from jp_stock_pipeline.cloud_store import core_stocks as cs
-from jp_stock_pipeline.cloud_store.d1 import D1Error, D1Store
+from jp_stock_pipeline.cloud_store.d1 import D1Store
 from jp_stock_pipeline.config import CloudStoreSettings
 from jp_stock_pipeline.jobs import core_stocks_migrate as csm
 
@@ -46,13 +45,17 @@ CREATE TABLE yutai_benefits (
 );
 """
 
+# P4a の適用内容（適用済み）。テストが本番と同一の複製を作るための素材。
+# 本番の形をここで作文するのではなく `NEW_COLUMNS` / `NEW_INDEXES` から作る。
+APPLIED_DDL: list[str] = [
+    f"ALTER TABLE {cs.TABLE} ADD COLUMN {name} {coltype}"
+    for name, coltype in cs.NEW_COLUMNS.items()
+] + list(cs.NEW_INDEXES.values())
+
 _SET_RE = re.compile(r"\bSET\b(.*?)(?:\bWHERE\b|$)", re.IGNORECASE | re.DOTALL)
 _ASSIGN_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
 _FORBIDDEN_RE = re.compile(
     r"\b(DELETE|DROP|TRUNCATE|REPLACE\s+INTO|INSERT\s+OR\s+REPLACE)\b", re.IGNORECASE
-)
-_ALLOWED_HEAD_RE = re.compile(
-    r"^\s*(ALTER\s+TABLE|CREATE\s+INDEX|SELECT|PRAGMA|UPDATE)\b", re.IGNORECASE
 )
 
 
@@ -83,58 +86,25 @@ class TestSetTargetExtractor:
         assert set_targets("UPDATE t SET a = ? WHERE id = 5") == {"a"}
 
 
-class TestBuildColumnUpdate:
-    def test_新列だけの_UPDATE_を組み立てる(self) -> None:
-        sql, params = cs.build_column_update(
-            "7203", {"instrument_type": "equity", "sector33": "輸送用機器"}
-        )
-        assert sql == (
-            "UPDATE core_stocks SET instrument_type = ?, sector33 = ?,"
-            " updated_at = (unixepoch()) WHERE code = ?"
-        )
-        assert params == ["equity", "輸送用機器", "7203"]
+class TestAppliedDdl:
+    def test_12列と2索引の適用内容である(self) -> None:
+        assert len(APPLIED_DDL) == 14
+        assert sum(1 for s in APPLIED_DDL if s.startswith("ALTER")) == 12
+        assert sum(1 for s in APPLIED_DDL if s.startswith("CREATE INDEX")) == 2
 
-    def test_G_core_1_SET_句にサロゲートキーが現れない(self) -> None:
-        sql, _ = cs.build_column_update("7203", dict.fromkeys(cs.NEW_COLUMNS, "x"))
-        assert "id" not in set_targets(sql)
-        assert set_targets(sql) == set(cs.NEW_COLUMNS) | {"updated_at"}
+    def test_追加列は全て_nullable(self) -> None:
+        for sql in APPLIED_DDL:
+            if sql.startswith("ALTER"):
+                assert "NOT NULL" not in sql.upper()
+                assert "UNIQUE" not in sql.upper()
 
-    # 実装定数ではなくリテラルで列挙する。cs.PROTECTED_COLUMNS を parametrize に
-    # 使うと、定数から要素を削る変異をテストが追随してしまい検出できない。
-    @pytest.mark.parametrize(
-        "column",
-        [
-            "id",
-            "code",
-            "name",
-            "market",
-            "sector",
-            "is_active",
-            "is_yutai",
-            "created_at",
-        ],
-    )
-    def test_既存列は書けない(self, column: str) -> None:
-        with pytest.raises(D1Error, match="既存列は stockStock から書かない"):
-            cs.build_column_update("7203", {column: "x"})
-
-    def test_未知の列も書けない(self) -> None:
-        with pytest.raises(D1Error, match="追加対象外の列"):
-            cs.build_column_update("7203", {"nonexistent": 1})
-
-    def test_id_を混ぜたら止まる(self) -> None:
-        with pytest.raises(D1Error):
-            cs.build_column_update("7203", {"id": 999, "instrument_type": "equity"})
-
-    def test_code_なし_値なしは受け付けない(self) -> None:
-        with pytest.raises(D1Error):
-            cs.build_column_update("", {"instrument_type": "equity"})
-        with pytest.raises(D1Error):
-            cs.build_column_update("7203", {})
-
-    def test_WHERE_は_code_で_id_を使わない(self) -> None:
-        sql, _ = cs.build_column_update("7203", {"quality": "正常"})
-        assert sql.endswith("WHERE code = ?")
+    def test_適用すると本番の21列になる(self) -> None:
+        con = sqlite3.connect(":memory:")
+        con.executescript(PROD_DDL)
+        for sql in APPLIED_DDL:
+            con.execute(sql)
+        observed = {r[1] for r in con.execute("PRAGMA table_info(core_stocks)")}
+        assert observed == cs.EXPECTED_COLUMNS
 
 
 class TestExpectedColumns:
@@ -143,8 +113,8 @@ class TestExpectedColumns:
     地図は両リポジトリに散っている（本番 PRAGMA 21 列 / kabulab-cf の
     `core-schema.ts` 9 列 / drizzle `0008_snapshot.json` 9 列 / ここ 21 列）。
     ここが古くなると `--verify` の superset 方向が意味を失うので、
-    **実装定数ではなくリテラルで列挙する**（`test_既存列は書けない` と同じ理由。
-    定数から要素を削る変異をテストが追随してしまうと検出できない）。
+    **実装定数ではなくリテラルで列挙する**（定数から要素を削る変異を
+    テストが追随してしまうと検出できない）。
     """
 
     # 2026-09-12 に本番 D1 の PRAGMA table_info(core_stocks) から取得した 21 列。
@@ -181,8 +151,8 @@ class TestExpectedColumns:
     def test_BASE_COLUMNS_と_PROTECTED_COLUMNS_が食い違わない(self) -> None:
         """2 本のリテラルを持っている理由の突き合わせ。
 
-        `updated_at` だけは PROTECTED から外す。`build_column_update` が明示的に
-        進める唯一の既存列で、PROTECTED に入れると自分の UPDATE が自分で弾かれる。
+        `updated_at` だけは PROTECTED から外す。kabulab-cf の `universe.ts`
+        が進める列で、stockStock 側の充填が触らないことを別途固定している。
         """
         assert set(cs.BASE_COLUMNS) - {"updated_at"} == cs.PROTECTED_COLUMNS
         assert "updated_at" not in cs.PROTECTED_COLUMNS
@@ -210,139 +180,6 @@ class TestExpectedColumns:
     def test_自動生成索引は誤検知しない(self) -> None:
         """列に UNIQUE が足されると sqlite_autoindex_* が湧く。宣言対象ではない。"""
         assert cs.unexpected_indexes({"sqlite_autoindex_core_stocks_1"}) == []
-
-
-class TestDdlShape:
-    def test_発行するのは_ALTER_と_CREATE_INDEX_だけ(self) -> None:
-        for sql in cs.plan_ddl(set(), set()):
-            assert _ALLOWED_HEAD_RE.match(sql), sql
-            assert not _FORBIDDEN_RE.search(sql), sql
-            assert not set_targets(sql), f"DDL に SET 句がある: {sql}"
-
-    def test_12列と2索引を計画する(self) -> None:
-        pending = cs.plan_ddl(set(), set())
-        assert len(pending) == 14
-        assert sum(1 for s in pending if s.startswith("ALTER")) == 12
-        assert sum(1 for s in pending if s.startswith("CREATE INDEX")) == 2
-
-    def test_適用済みなら何も計画しない(self) -> None:
-        assert cs.plan_ddl(set(cs.NEW_COLUMNS), set(cs.NEW_INDEXES)) == []
-
-    def test_部分適用でも残りだけを計画する(self) -> None:
-        pending = cs.plan_ddl({"instrument_type", "sector33"}, {"idx_core_stocks_edinet"})
-        assert len(pending) == 11
-        assert not any("instrument_type" in s for s in pending)
-        assert not any("idx_core_stocks_edinet" in s for s in pending)
-
-    def test_追加列は全て_nullable(self) -> None:
-        for sql in cs.plan_ddl(set(), set()):
-            if sql.startswith("ALTER"):
-                assert "NOT NULL" not in sql.upper()
-                assert "UNIQUE" not in sql.upper()
-
-    def test_対象外の列の_ALTER_は作れない(self) -> None:
-        with pytest.raises(D1Error):
-            cs.add_column_sql("id")
-
-
-class TestAgainstRealSchema:
-    """本番と同一 DDL の複製へ実際に流して壊れないことを確かめる。"""
-
-    @pytest.fixture()
-    def con(self) -> sqlite3.Connection:
-        con = sqlite3.connect(":memory:")
-        con.executescript(PROD_DDL)
-        con.execute(
-            "INSERT INTO core_stocks (code,name,market,sector)"
-            " VALUES ('7203','トヨタ自動車','プライム（内国株式）','輸送用機器')"
-        )
-        con.execute("INSERT INTO yutai_benefits (stock_id) VALUES (1)")
-        con.commit()
-        return con
-
-    def test_DDL_は既存行と子表を壊さない(self, con: sqlite3.Connection) -> None:
-        before = con.execute("SELECT id,code,name,market,sector FROM core_stocks").fetchall()
-        seq_before = con.execute(
-            "SELECT seq FROM sqlite_sequence WHERE name='core_stocks'"
-        ).fetchone()
-        for sql in cs.plan_ddl(set(), set()):
-            con.execute(sql)
-        con.commit()
-        assert (
-            con.execute("SELECT id,code,name,market,sector FROM core_stocks").fetchall()
-            == before
-        )
-        assert (
-            con.execute("SELECT seq FROM sqlite_sequence WHERE name='core_stocks'").fetchone()
-            == seq_before
-        )
-        orphans = con.execute(
-            "SELECT COUNT(*) FROM yutai_benefits c"
-            " LEFT JOIN core_stocks s ON s.id=c.stock_id WHERE s.id IS NULL"
-        ).fetchone()[0]
-        assert orphans == 0
-        cols = {r[1] for r in con.execute("PRAGMA table_info(core_stocks)")}
-        assert set(cs.NEW_COLUMNS) <= cols
-
-    def test_移行元の_upsert_は列追加後も通る(self, con: sqlite3.Connection) -> None:
-        """kabulab-cf の universe.ts:181-190 と等価の文。新規上場の INSERT 経路。"""
-        for sql in cs.plan_ddl(set(), set()):
-            con.execute(sql)
-        upsert = (
-            "INSERT INTO core_stocks (code,name,market,sector,is_active)"
-            " VALUES (?,?,?,?,1)"
-            " ON CONFLICT(code) DO UPDATE SET name=excluded.name,"
-            " market=excluded.market, sector=excluded.sector, is_active=1,"
-            " updated_at=(unixepoch())"
-        )
-        con.execute(upsert, ("9999", "新規上場", "グロース（内国株式）", "情報・通信業"))
-        con.execute(upsert, ("7203", "トヨタ自動車", "プライム（内国株式）", "輸送用機器"))
-        con.commit()
-        assert con.execute("SELECT COUNT(*) FROM core_stocks").fetchone()[0] == 2
-
-    def test_部分_upsert_は既存行でも失敗する(self, con: sqlite3.Connection) -> None:
-        """name が NOT NULL・既定値なしのため、新列だけの upsert は成立しない。
-
-        この事実が「P4a の書込は UPDATE 一択」の根拠。
-        """
-        for sql in cs.plan_ddl(set(), set()):
-            con.execute(sql)
-        with pytest.raises(sqlite3.IntegrityError, match="core_stocks.name"):
-            con.execute(
-                "INSERT INTO core_stocks (code,instrument_type) VALUES ('7203','equity')"
-                " ON CONFLICT(code) DO UPDATE SET instrument_type=excluded.instrument_type"
-            )
-
-    def test_build_column_update_が実際に効く(self, con: sqlite3.Connection) -> None:
-        for sql in cs.plan_ddl(set(), set()):
-            con.execute(sql)
-        sql, params = cs.build_column_update(
-            "7203", {"instrument_type": "equity", "sector33": "輸送用機器"}
-        )
-        con.execute(sql, params)
-        con.commit()
-        assert con.execute(
-            "SELECT instrument_type, sector33 FROM core_stocks WHERE code='7203'"
-        ).fetchone() == ("equity", "輸送用機器")
-        # 既存列は1バイトも変わっていない
-        assert con.execute("SELECT name, market, sector FROM core_stocks").fetchone() == (
-            "トヨタ自動車",
-            "プライム（内国株式）",
-            "輸送用機器",
-        )
-
-    def test_索引が実際に使われる(self, con: sqlite3.Connection) -> None:
-        for sql in cs.plan_ddl(set(), set()):
-            con.execute(sql)
-        plan = con.execute(
-            "EXPLAIN QUERY PLAN SELECT id FROM core_stocks WHERE edinet_code='E02144'"
-        ).fetchall()
-        assert any("idx_core_stocks_edinet" in str(r) for r in plan), plan
-        plan = con.execute(
-            "EXPLAIN QUERY PLAN SELECT id FROM core_stocks"
-            " WHERE is_active=1 AND market='プライム（内国株式）'"
-        ).fetchall()
-        assert any("idx_core_stocks_active_market" in str(r) for r in plan), plan
 
 
 class TestOrphanCheck:
@@ -404,10 +241,7 @@ class TestOrphanCheck:
 
 
 class _RecordingD1Store(D1Store):
-    """`query()` を「SQL を積むだけ」に差し替えた D1Store（通信しない）。
-
-    設計書 G-core-1 の「書き込み SQL を実行せずダンプする」を実装で担保する。
-    """
+    """`query()` を「SQL を積むだけ」に差し替えた D1Store（通信しない）。"""
 
     def __init__(self) -> None:
         super().__init__(CloudStoreSettings(), writer="test")
@@ -418,47 +252,40 @@ class _RecordingD1Store(D1Store):
         return []
 
 
-class TestFillWouldBlindTheFreshnessMonitor:
-    """`build_column_update` で月次充填してはいけない理由を機械可読な事実として固定する。
+class TestObserveShape:
+    """`_observe` は列・索引・孤児だけを読む。行断面は読まない。"""
 
-    `cloud_store/datasets.py` は `core_stocks` に日付列が無いため鮮度を
-    `MAX(updated_at)` で測っており、`build_column_update` は `updated_at` を
-    明示的に進める。これで月次に 3,818 行を充填すると `MAX(updated_at)` が毎月
-    必ず進み、kabulab-cf の universe sync が死んでいても `core_stocks` の SLO
-    （33 日で黄・46 日で赤）が発火しなくなる。JPX の 404 で銘柄マスタが 33 日
-    止まったのに誰も気づかなかった、というまさに検知したかった事象を自分の
-    書き込みで隠すことになる（設計書 B-8 の「now を入れると永久に緑」と同型）。
+    def test_列と索引と孤児だけを観測する(self) -> None:
+        store = _RecordingD1Store()
+        state = csm._observe(store)  # noqa: SLF001
+        assert set(state) == {"columns", "indexes", "orphans"}
+        allowed = (
+            {cs.TABLE_INFO_SQL, cs.INDEX_LIST_SQL}
+            | set(cs.orphan_check_statements())
+        )
+        assert store.sqls, "1 文も発行していない（観測していない）"
+        assert set(store.sqls) <= allowed, set(store.sqls) - allowed
+        assert cs.TABLE_INFO_SQL in store.sqls
+        assert cs.INDEX_LIST_SQL in store.sqls
 
-    2026-09-13 に `sector33` だけは充填を始めたが、`updated_at` を進めない専用の
-    `build_sector33_updates` で書く（その SQL に `updated_at` が現れないことは
-    `tests/test_core_stocks_sector33.py` が固定する）。したがって下の 3 つの事実は
-    今も成り立っていなければならない。`build_column_update` を `jobs/` から
-    呼び始めるなら、先に鮮度の基準を `updated_at` から外すこと（P4b）。
+
+class TestMigrationPrepSymbolsAreGone:
+    """移行準備の書込口は「呼び出し 0」ではなく「シンボル不在」で固定する（F4）。
+
+    D-14-1 で `plan_ddl` / `build_column_update` / `normalize_sql` を削除した。
+    復活させるなら P4b の前提（鮮度の基準を `updated_at` から外す等）を先に解くこと。
     """
 
-    def test_鮮度の基準が_updated_at_である(self) -> None:
-        from jp_stock_pipeline.cloud_store.datasets import DATASET_SOURCE_BY_NAME
+    def test_core_stocks_に書込口のシンボルが無い(self) -> None:
+        for name in ("plan_ddl", "add_column_sql", "build_column_update", "normalize_sql"):
+            assert not hasattr(cs, name), f"{name} が復活している"
 
-        source = DATASET_SOURCE_BY_NAME["core_stocks"]
-        assert "MAX(updated_at)" in source.sql
-        assert "NULL AS latest_date" in source.sql  # 日付列が無い
-
-    def test_充填の_UPDATE_が_updated_at_を進める(self) -> None:
-        sql, _ = cs.build_column_update("7203", {"sector33": "輸送用機器"})
-        assert "updated_at = (unixepoch())" in sql
-
-    def test_充填を実行するコードがまだ存在しない(self) -> None:
-        """`build_column_update` の呼び出し元が「組み立てるだけ」であること。
-
-        本番の書込経路（`jobs/`）から呼ばれ始めたら、上の 2 つの事実のどちらかが
-        先に崩れている必要がある。
-        """
+    def test_jobs_から書込口を呼んでいない(self) -> None:
         import ast
         import pathlib
 
         # **文字列検索ではなく AST の Call ノードで見る。** docstring で
-        # 「この関数は呼ばない」と説明している箇所を「呼んでいる」と誤検出する
-        # （実際に誤検出した。`jobs/master_sync.py` が理由を書いている）。
+        # 「この関数は呼ばない」と説明している箇所を「呼んでいる」と誤検出する。
         jobs = pathlib.Path(cs.__file__).resolve().parent.parent / "jobs"
         callers = []
         for path in sorted(jobs.glob("*.py")):
@@ -468,92 +295,6 @@ class TestFillWouldBlindTheFreshnessMonitor:
                     continue
                 func = node.func
                 name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-                if name == "build_column_update":
+                if name in ("plan_ddl", "build_column_update"):
                     callers.append(path.name)
-        assert callers == [], (
-            f"{callers} が充填を実行しようとしている。"
-            "core_stocks の鮮度が MAX(updated_at) で測られている間は"
-            "毎月の充填が監視を恒久的に緑にする（P4b の前提条件を先に解くこと）"
-        )
-
-
-class TestObserveDoesNotScanRowsWithoutABaseline:
-    """比較相手が無いとき `core_stocks` の行を 1 行も走査しないこと（D1 は走査行課金）。
-
-    G-core-2（件数・sqlite_sequence）と G-core-3（既存行の sha256）は適用前の
-    状態と突き合わせて初めて意味を持つ判定で、`_verify` は `before is None` で
-    早期 return する。それでも `_observe` は `SNAPSHOT_SQL`（全 3,818 行）と
-    `COUNTS_SQL`（同）を毎回投げており、**`ops_check.yml` の日次実行が毎日
-    7,636 行を走査してハッシュを捨てていた**。
-
-    孤児検査（G-core-5）は `before` なしでも判定に使うので、消えていないことを
-    同時に固定する（走査を減らす変更が本物の検査を一緒に削っていないこと）。
-    """
-
-    def test_verify_単独では断面を読まない(self) -> None:
-        store = _RecordingD1Store()
-        state = csm._observe(store, baseline=False)
-        joined = " | ".join(store.sqls)
-        assert cs.SNAPSHOT_SQL not in store.sqls
-        assert cs.COUNTS_SQL not in store.sqls
-        assert cs.SEQ_SQL not in store.sqls
-        assert cs.TABLE_INFO_SQL in store.sqls
-        assert cs.INDEX_LIST_SQL in store.sqls
-        assert "LEFT JOIN core_stocks" in joined  # 孤児検査は残っている
-        # 未観測は 0 ではなく None。0 だと「件数が 0 に変わった」と誤報告しうる。
-        assert state["rows"] is None
-        assert state["rows_sha256"] is None
-        assert state["counts"] is None
-
-    def test_比較相手があるときは断面を読む(self) -> None:
-        store = _RecordingD1Store()
-        csm._observe(store, baseline=True)
-        assert cs.SNAPSHOT_SQL in store.sqls
-        assert cs.COUNTS_SQL in store.sqls
-        assert cs.SEQ_SQL in store.sqls
-
-    def test_未観測の断面は_G_core_2_の差分として報告されない(self) -> None:
-        """未観測(None)を値として比べると「3,818 -> None」という嘘の差分が出る。"""
-        before = {
-            "columns": {}, "indexes": {}, "orphans": {},
-            "counts": {"total": 3818}, "sqlite_sequence": 4000,
-            "rows": 3818, "rows_sha256": "a" * 64,
-        }
-        after = dict(before, counts=None, sqlite_sequence=None, rows=None, rows_sha256=None)
-        problems = csm._verify(after, before)
-        assert not [p for p in problems if "G-core-2" in p or "G-core-3" in p], problems
-
-
-class TestD1StoreUpsertIsNotUsable:
-    """`D1Store.upsert` を core_stocks に使ってはいけない理由の固定。
-
-    conflict 以外の全列を `c = excluded.c` へ機械展開する設計なので、
-    `id` を渡した瞬間にサロゲートキーが SET 句に現れる。ラッパ
-    (`core_stocks.build_column_update`) を必ず通すこと。
-    """
-
-    def test_汎用_upsert_に_id_を渡すと_SET_句へ出てしまう(self) -> None:
-        store = _RecordingD1Store()
-        store.upsert(
-            "core_stocks",
-            ["code", "id", "name"],
-            [["7203", 1, "X"]],
-            conflict=["code"],
-        )
-        assert len(store.sqls) == 1
-        assert "id" in set_targets(store.sqls[0])
-
-    def test_ラッパ経由なら_id_は絶対に出ない(self) -> None:
-        sql, _ = cs.build_column_update("7203", {"instrument_type": "equity"})
-        assert "id" not in set_targets(sql)
-
-    def test_P4a_のジョブが発行する文は_ALTER_と_CREATE_INDEX_だけ(self) -> None:
-        """ダンプした全文が禁止文を含まず、SET 句も持たないこと。"""
-        store = _RecordingD1Store()
-        for sql in cs.plan_ddl(set(), set()):
-            store.query(sql)
-        assert len(store.sqls) == 14
-        for sql in store.sqls:
-            assert _ALLOWED_HEAD_RE.match(sql), sql
-            assert not _FORBIDDEN_RE.search(sql), sql
-            assert not set_targets(sql), sql
+        assert callers == [], f"{callers} が移行準備の書込口を呼んでいる"

@@ -1,6 +1,6 @@
 """master_sync: EDINETコードリスト → ① 銘柄マスタ同期 (DESIGN.md §8.2, P1)。
 
-フロー (§8.1): fetch → save raw → convert → ⑤UL(必須) → parse → ① upsert → ⑦記録。
+フロー (§8.1): fetch → save raw → convert → ⑤UL(必須) → parse → ① upsert → D1 実行記録。
 原本(⑤)を Notion・ローカルの両系統に保存できなかった取得単位のみ構造化を書かず中止する
 （片系統に原本が残れば構造化は書く。① upsert 自体も Notion/ローカル独立 §7.1/§3-3）。
 
@@ -11,15 +11,15 @@
 **D1 `core_stocks.sector33` へは東証33業種の名称へ正規化してから**書く
 （`contracts/sector33.py`。公開面が33業種で表示するため）。
 
-以前はここで充填しなかった。`cloud_store/core_stocks.build_column_update` が
-`updated_at = (unixepoch())` を進めるので、月次に充填すると
+以前はここで充填しなかった。汎用の列充填（旧 `build_column_update`。D-14-1 で
+削除）が `updated_at = (unixepoch())` を進めるので、月次に充填すると
 `cloud_store/datasets.py` が `core_stocks` の鮮度に使う `MAX(updated_at)` が
 **毎月必ず進み**、kabulab-cf の月次 universe sync が死んでいても SLO が発火
 しなくなるからである（JPX の 404 で銘柄マスタが 33 日止まったのに誰も気づか
 なかった事象を、自分の書き込みで隠す）。
 
-今回は `build_column_update` を使わず、**`sector33` だけを SET する専用の
-UPDATE**（`core_stocks.build_sector33_updates`）で解いた。`updated_at` を
+**`sector33` だけを SET する専用の UPDATE**
+（`core_stocks.build_sector33_updates`）で解いた。`updated_at` を
 進めるのは kabulab-cf だけのままなので、鮮度の意味は変わらない。詳細は
 `cloud_store/core_stocks.py` の「sector33 の充填で updated_at を進めない理由」。
 

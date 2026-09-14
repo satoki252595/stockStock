@@ -29,7 +29,7 @@ from jp_stock_pipeline.licensing import source_license
 from jp_stock_pipeline.models import Source
 from jp_stock_pipeline.rawstore import save_raw
 
-from test_core_stocks_migrate import PROD_DDL, set_targets
+from test_core_stocks_migrate import APPLIED_DDL, PROD_DDL, set_targets
 
 _D1_ENV = {
     "CF_ACCOUNT_ID": "acct",
@@ -172,7 +172,7 @@ class TestPlanSector33Updates:
 def _seeded_connection(rows: list[tuple[str, str | None]]) -> sqlite3.Connection:
     con = sqlite3.connect(":memory:")
     con.executescript(PROD_DDL)
-    for stmt in cs.plan_ddl(set(), set()):
+    for stmt in APPLIED_DDL:
         con.execute(stmt)
     for code, sector33 in rows:
         con.execute(
