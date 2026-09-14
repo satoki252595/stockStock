@@ -191,7 +191,7 @@
 `export_weekly` のトラックB（`prices_all_*.parquet`）は 5年×4,445銘柄×245営業日 = 5.45M行で、R2 `daily/` と**同一粒度・同一期間**。重複禁止規則 R1 に直接違反し、かつ旧容量表に1行も計上されていなかった（2.9〜3.9 GB の未計上）。代わりに `export/latest.json` に `daily/` のキー一覧と各 `last_date` を書く。
 
 **注3: 母集団は 3,818/3,900 ではなく 4,445**
-R2 `daily/` の 4,444ファイルの母集団は `core_stocks`(3,818) ではなく `kabulab-cf/public/vwap-analysis/data/stocks.json`（プライム1,558/スタンダード1,575/グロース595/ETF・ETN 466/PRO 181/REIT等63/外国株5/出資証券2）。`core_stocks.instrument_type` の追加は、stockStock の母集団で `daily/` を上書きして ETF 1321 等を更新停止させる事故を**型で防ぐ**ためのもの。ただし `instrument_type` は JPX 由来＝personal-only なので、**R2 `daily/` の payload には出さない**（r2_spec 参照）。
+R2 `daily/` の 4,444ファイルの母集団は `core_stocks`(3,818) ではなく `kabulab-cf/public/vwap-analysis/data/stocks.json`（プライム1,558/スタンダード1,575/グロース595/ETF・ETN 466/PRO 181/REIT等63/外国株5/出資証券2）。`core_stocks.instrument_type` の追加は、stockStock の母集団で `daily/` を上書きして日経225連動のETF1本等を更新停止させる事故を**型で防ぐ**ためのもの。ただし `instrument_type` は JPX 由来＝personal-only なので、**R2 `daily/` の payload には出さない**（r2_spec 参照）。
 
 **注4: 銘柄マスタの物理コピーは CF 上に依然として複数残る**
 (1) D1 `core_stocks`、(2) `kabulab-cf/public/vwap-analysis/data/stocks.json`（ビルド生成物に降格しても Static Assets 上の物理コピーは残る）、(3) kabuMCP の Static Assets `entities` 27シャード、(4) R2 `daily/{code}.json` のキー空間そのもの。本仕様が解消を確定できるのは (1)(2) の**生成元の統一**までで、(3) は別サービス・別デプロイのため**要判断**。新たな検索索引を作る場合は (3) の再利用を優先し、同機能のシャード索引を2本目として作らないこと。
@@ -433,7 +433,7 @@ yfinance 日足バッチを外す理由は容量。4,445銘柄×490営業日＝�
 **`instrument` を入れない（旧設計からの変更）**
 旧設計は `instrument` を `equity|etf|etn|reit|pro|foreign|preferred` で持たせ、母集団事故を型で防ぐとしていた。しかし `instrument` の供給元は `core_stocks.instrument_type` ＝ JPX data_j.xls 由来で **personal-only** に分類される列であり、007 の `/api/daily` は `passthrough(o.body, 3600)` で本文を素通しするため（`services/vwap-analysis/app.ts:62-69`）、payload に入れた瞬間に無認証の公開 API に出る。
 
-代替の事故防止策: **PUT 前に「対象コードが `core_stocks` に存在し `instrument_type` が非 NULL である」ことを writer 側で検査する**。さらに「対象コード集合 ⊇ R2 に既に存在する `daily/` のキー集合」を書込前に検査し、満たさなければ1件も書かずに異常終了する。これで ETF 1321 等の更新停止を防げる。
+代替の事故防止策: **PUT 前に「対象コードが `core_stocks` に存在し `instrument_type` が非 NULL である」ことを writer 側で検査する**。さらに「対象コード集合 ⊇ R2 に既に存在する `daily/` のキー集合」を書込前に検査し、満たさなければ1件も書かずに異常終了する。これで日経225連動のETF1本等の更新停止を防げる。
 
 > 同じ理由で `license` と `writer` と `schema` も公開される。これらは personal-only の**分類を示す文字列**であって personal-only の**データそのものではない**ため許容するが、007 側を許可キーのホワイトリストで再構成するレスポンダに変える選択肢も残る（本仕様では決めない）。
 
@@ -1527,7 +1527,7 @@ D1 の課金軸は**走査行数**で `LIMIT` では下がらない。自由な 
 
 | 追加 | 型 | 備考 |
 |---|---|---|
-| **銘柄種別** | select（内国普通株/ETF/ETN/REIT/PRO/外国株/優先株・出資証券） | D1 `core_stocks.instrument_type` と一致。母集団 3,818→4,445 拡張の事故（ETF 1321 の更新停止）を型で防ぐ |
+| **銘柄種別** | select（内国普通株/ETF/ETN/REIT/PRO/外国株/優先株・出資証券） | D1 `core_stocks.instrument_type` と一致。母集団 3,818→4,445 拡張の事故（日経225連動のETF1本の更新停止）を型で防ぐ |
 | **D1 stock_id** | number | id 再採番禁止の人間可読な証跡 |
 | **R2 日足キー** | rich_text | |
 | **CF銘柄URL** | url | kabulab-cf 銘柄詳細への deep link |
@@ -1920,7 +1920,7 @@ stockStock 側の UPSERT は `SET` 句を**ホワイトリストで列挙**す�
 
 **`prices` テーブルを投入経路にしてはならない**: `prices_daily.py` は `compute_technicals` の返す最新1本のスナップショットを1行だけ書くので実行日以降しか行が増えず、`local_store/schema.py` の `prices` に `adj` 列が無い。`collectors/yfinance_prices.py` には splits 取得が1行も無い（`yf.download` のみ）。
 
-**母集団の罠**: R2 `daily/` の 4,444ファイルの母集団は `core_stocks`(3,818) ではなく `kabulab-cf/public/vwap-analysis/data/stocks.json`(4,445・ETF/ETN 466 + PRO 181 + REIT等63 + 外国株5 + 出資証券2 を含む)。**書く前に「対象コード集合 ⊇ R2 に既に存在する `daily/` のキー集合」を検査し、満たさなければ1件も書かずに異常終了する。** 満たさないまま書くと ETF 1321 が更新停止し、`株ラボ-新高値ブレイク検証`（日経平均代理に 1321 を使う）が直撃する。
+**母集団の罠**: R2 `daily/` の 4,444ファイルの母集団は `core_stocks`(3,818) ではなく `kabulab-cf/public/vwap-analysis/data/stocks.json`(4,445・ETF/ETN 466 + PRO 181 + REIT等63 + 外国株5 + 出資証券2 を含む)。**書く前に「対象コード集合 ⊇ R2 に既に存在する `daily/` のキー集合」を検査し、満たさなければ1件も書かずに異常終了する。** 満たさないまま書くと日経225連動のETF1本が更新停止し、`株ラボ-新高値ブレイク検証`（日経平均代理にこのETFを使う）が直撃する。
 
 **`daily/{code}.json` に `instrument` を入れない。** 007 の `/api/daily` は R2 JSON の素通し（`passthrough(o.body, 3600)`）なので、入れた値はそのまま無認証の公開 API に現れる。`instrument` は JPX `data_j.xls` 由来＝personal-only に分類される列であり、公開面に出すべきではない。母集団事故の防止は上記の writer 側の事前検査で担保する。追加してよいのは `schema` / `source` / `license` / `first_date` / `last_date` / `writer` / `bars[].adj_source` まで。
 
@@ -3309,7 +3309,7 @@ P5 完了後、P6 の直前に実施する（§2.1）。
 4. 調整値の由来を2値で明示する（推定しない）。
 5. **銘柄種別を公開オブジェクトに入れない**（serving §7.5。母集団事故の防止は PUT 前のコード側ガードで行う）。
 
-**母集団の罠**: per-code 日足の母集団は①マスタ（従来3,818）ではなく静的ファイル（4,445件・ETF/ETN 466 + PRO 181 + REIT等63 + 外国株5 + 出資証券2 を含む）。stockStock の母集団で置き換えると ETF 1321 が更新停止し、外部読者（日経平均代理に 1321 を使う検証リポジトリ）が直撃する。
+**母集団の罠**: per-code 日足の母集団は①マスタ（従来3,818）ではなく静的ファイル（4,445件・ETF/ETN 466 + PRO 181 + REIT等63 + 外国株5 + 出資証券2 を含む）。stockStock の母集団で置き換えると日経225連動のETF1本が更新停止し、外部読者（日経平均代理にこのETFを使う検証リポジトリ）が直撃する。
 → P4b 完了を前提に、**書く前に「対象コード集合 ⊇ R2 に既に存在する日足キー集合」を検査し、満たさなければ1件も書かずに異常終了**する。
 
 > **2026-09-13 追記（kabulab-cf PR #30 の絞り込みとの関係）**
@@ -3320,7 +3320,7 @@ P5 完了後、P6 の直前に実施する（§2.1）。
 - G-daily-1（後退なし）: 全件でバー数が減らず、期間の始端が後退しない。
 - G-daily-2（値一致）: 直近20営業日の OHLCV が完全一致。**調整値は分割で遡及改訂されるため、不一致があれば分割イベントに紐づくかを確認し、紐づかない不一致がゼロ**であること。
 - G-daily-3（契約キー）: 契約ファイルによる機械検証。
-- G-daily-4（母集団）: 対象コード集合が既存キー集合を包含し、ETF 1321 を含む。
+- G-daily-4（母集団）: 対象コード集合が既存キー集合を包含し、日経225連動のETF1本を含む。
 - G-daily-5（外部読者）: 外部読者が調整値の欠損行を除外する実装のため、**除外行数が切替前後で増えていない**こと。
 - G-daily-6（読み口）: `/api/daily` を代表200件で切替前後比較。
 

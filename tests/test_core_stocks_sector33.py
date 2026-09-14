@@ -144,7 +144,7 @@ class TestPlanSector33Updates:
     def test_コードリストに無い銘柄を触らない(self) -> None:
         """REIT やコードリストの一時的な欠落で既存値を NULL に潰さない。"""
         current = [
-            {"code": "8951", "sector33": "不動産業"},  # コードリストに居ない
+            {"code": "1201", "sector33": "不動産業"},  # コードリストに居ない
             {"code": "7203", "sector33": None},
         ]
         changes = cs.plan_sector33_updates(current, [("72030", "輸送用機器")])
@@ -254,7 +254,7 @@ def fake_d1(monkeypatch):
 
 class TestSyncSector33:
     def test_差分だけ書き_updated_at_は動かない(self, fake_d1) -> None:
-        store = fake_d1([("7203", "輸送用機器"), ("9301", None), ("8951", "不動産業")])
+        store = fake_d1([("7203", "輸送用機器"), ("9301", None), ("1201", "不動産業")])
         ctx = _ctx(dry_run=False)
         master_sync._sync_sector33(
             ctx,
@@ -264,7 +264,7 @@ class TestSyncSector33:
         assert store.values() == {
             "7203": ("輸送用機器", 1000),
             "9301": ("倉庫・運輸関連業", 1000),
-            "8951": ("不動産業", 1000),  # コードリストに居ないので触らない
+            "1201": ("不動産業", 1000),  # コードリストに居ないので触らない
         }
         assert len(store.writes) == 1
 

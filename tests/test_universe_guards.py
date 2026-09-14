@@ -462,8 +462,8 @@ class TestDeactivation:
         assert should_deactivate_universe_code("25935", frozenset({"25935"}))
 
     def test_raw_codes_は内国株に絞る前の全行であること(self) -> None:
-        """ETF を内国株フィルタ後の集合で判定すると毎回対象外化されてしまう。"""
-        raw_all = frozenset({"7203", "1321"})  # 1321 は ETF
-        assert not should_deactivate_universe_code("1321", raw_all)
+        """ETF 等の非普通株を内国株フィルタ後の集合で判定すると毎回対象外化されてしまう。"""
+        raw_all = frozenset({"7203", "1202"})  # 1202 は合成 ETF コード
+        assert not should_deactivate_universe_code("1202", raw_all)
         equities_only = frozenset({"7203"})
-        assert should_deactivate_universe_code("1321", equities_only)
+        assert should_deactivate_universe_code("1202", equities_only)

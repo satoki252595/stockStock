@@ -254,7 +254,7 @@ type StockCode = string & { readonly __brand: "StockCode" };
 parseStockCode(raw: string): StockCode | null   // 実装は1つだけ
 ```
 
-生の `string` を受ける API を型で禁じる。現状 `to_ticker` は検証なしで `f"{code}.T"` と連結するため `' 7203 '` → `' 7203 .T'`、`'16714'` → `'16714.T'` が例外にならず、yfinance が空フレームを返すので**欠測として静かに消える**。ブランド型ならこの経路が消える。
+生の `string` を受ける API を型で禁じる。現状 `to_ticker` は検証なしで `f"{code}.T"` と連結するため `' 7203 '` → `' 7203 .T'`、`'12024'` → `'12024.T'` が例外にならず、yfinance が空フレームを返すので**欠測として静かに消える**。ブランド型ならこの経路が消える。
 
 ETF・優先株は別エンティティとして型を分ける（`jss_supply_latest` の distinct code 4,351 件中 592 件が `core_stocks` に無く大半が ETF、`core_stocks` に 4 文字契約を破る行が 6 件ある、という現状の孤児はこれで表現される）。
 

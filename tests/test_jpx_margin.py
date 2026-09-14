@@ -76,7 +76,7 @@ B 株式会社合成食品第１種優先株式 25935 JP0000000029 10 0 20 ▲ 5
 B 合成通信　普通株式 94340 JP0000000037 3,000 300 4,000 ▲ 400 0 0 3,000 300 0 0 4,000 ▲ 400
 B 合成通信株式会社第１回社債型種類株式 94345 JP0000000045 0 0 30 3 0 0 0 0 0 0 30 3
 B 合成通信株式会社第２回社債型種類株式 94346 JP0000000052 0 0 0 0 0 0 0 0 0 0 0 0
-J 合成ＴＯＰＩＸ連動型上場投信　受益証券13060 JP0000000060 5,000 50 6,000 60 0 0 5,000 50 0 0 6,000 60
+J 合成ＴＯＰＩＸ連動型上場投信　受益証券12020 JP0000000060 5,000 50 6,000 60 0 0 5,000 50 0 0 6,000 60
 B 合成新興　普通株式 130A0 JP0000000078 7 ▲ 1 8 1 0 0 7 ▲ 1 0 0 8 1
 """
 
@@ -86,7 +86,7 @@ SYNTHETIC_EXPECTED = [
     {"code": "9434", "sell": 3000, "sell_chg": 300, "buy": 4000, "buy_chg": -400},
     {"code": "94345", "sell": 0, "sell_chg": 0, "buy": 30, "buy_chg": 3},
     {"code": "94346", "sell": 0, "sell_chg": 0, "buy": 0, "buy_chg": 0},
-    {"code": "1306", "sell": 5000, "sell_chg": 50, "buy": 6000, "buy_chg": 60},
+    {"code": "1202", "sell": 5000, "sell_chg": 50, "buy": 6000, "buy_chg": 60},
     {"code": "130A", "sell": 7, "sell_chg": -1, "buy": 8, "buy_chg": 1},
 ]
 
@@ -119,7 +119,7 @@ class TestFiveCharCodeToKey:
     def test_etf_glued_to_name_keeps_four_char_code(self):
         """銘柄名とコードの間に空白が無い行 (実 PDF で毎週 49 行) も拾う。"""
         rows = {r.code: r for r in jm.parse_margin_text(SYNTHETIC_TEXT).rows}
-        assert rows["1306"].buy == 6000
+        assert rows["1202"].buy == 6000
 
 
 def _real_pdf_paths():
