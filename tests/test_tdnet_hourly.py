@@ -22,8 +22,8 @@ from jp_stock_pipeline.notion.client import NotionClient
 UTC = timezone.utc
 
 
-def _ctx() -> JobContext:
-    settings = load_settings(env={"RAW_DATA_DIR": "/tmp"}, dry_run=True)
+def _ctx(raw_data_dir: str) -> JobContext:
+    settings = load_settings(env={"RAW_DATA_DIR": raw_data_dir}, dry_run=True)
     ctx = JobContext(
         settings=settings,
         client=NotionClient(None, rps=1000.0, dry_run=True),
@@ -57,7 +57,7 @@ def _record(doc_id: str = "81234567") -> DisclosureRecord:
 
 
 class TestProcessFinancialXbrlSavesDocId:
-    def test_save_raw_receives_the_disclosure_doc_id(self, monkeypatch):
+    def test_save_raw_receives_the_disclosure_doc_id(self, monkeypatch, tmp_path):
         captured: dict = {}
 
         def fake_save_raw(content, **kwargs):
@@ -81,7 +81,7 @@ class TestProcessFinancialXbrlSavesDocId:
             lambda tidy, code, prov, *, disclosed_at: types.SimpleNamespace(code="7203"),  # noqa: ARG005
         )
 
-        ctx = _ctx()
+        ctx = _ctx(str(tmp_path))
         record = _record(doc_id="81234567")
         mod._process_financial_xbrl(  # noqa: SLF001
             ctx, record, "https://example/xbrl.zip", master_id="M1", master_resolved=True
