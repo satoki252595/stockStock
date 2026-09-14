@@ -32,10 +32,10 @@ class TestZandaka:
 
     def test_amounts_and_turn_days_are_read(self):
         rows = {r.code: r for r in jsf.parse_zandaka(_bytes("zandaka"))}
-        toshin = rows["1306"]
-        assert toshin.loan_bal_amount == 198478785
-        assert toshin.stock_bal_amount == 114162816
-        assert toshin.turn_days_total == 3.9
+        row = rows["1306"]
+        assert row.loan_bal_amount == 198478785
+        assert row.stock_bal_amount == 114162816
+        assert row.turn_days_total == 3.9
 
     def test_ratio_is_none_when_denominator_is_zero(self):
         """信用倍率は分母0で無限大を作らない。"""
