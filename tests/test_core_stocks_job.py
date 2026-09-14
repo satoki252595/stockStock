@@ -32,6 +32,7 @@ CHILD_STUBS = "".join(
     "CREATE TABLE jss_financials (id INTEGER PRIMARY KEY, stock_id INTEGER);"
     # 本番と同じく stock_id が PRIMARY KEY（NOT NULL。FK 宣言なし）。
     "CREATE TABLE p_momentum (stock_id INTEGER PRIMARY KEY NOT NULL);"
+    "CREATE TABLE p_yuho_growth (stock_id INTEGER PRIMARY KEY NOT NULL);"
 )
 
 
@@ -113,9 +114,9 @@ class TestVerifyDetectsDamage:
 
 
 class TestDailyOrphanScope:
-    """L-16: 日次は宣言の無い 2 表だけ。FK 強制の無い環境では全表に戻す。"""
+    """L-16: 日次は宣言の無い 3 表だけ。FK 強制の無い環境では全表に戻す。"""
 
-    def test_fk_on_では宣言の無い2表だけを数える(self, store: FakeStore) -> None:
+    def test_fk_on_では宣言の無い3表だけを数える(self, store: FakeStore) -> None:
         _apply_ddl(store)
         store.con.execute("PRAGMA foreign_keys = ON")
         store.sql_log.clear()
