@@ -95,23 +95,14 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
         run: |
           set -euo pipefail
-          # $3 に pending-peer を渡すと、相手リポにファイルが無い場合を
-          # **無条件に warning へ落とす**。導入したばかりのファイル専用の猶予で、
-          # 相手リポへ入ったら必ずこの引数を外すこと（外し忘れると「相手が
-          # 消しても緑」になり、この突合が意味を失う）。下の既定経路は
-          # 「自 main にあるのに相手に無い = 共有の破棄」で落とす。
+          # 共有契約ファイルの突合。「自 main にあるのに相手に無い = 共有の破棄」
+          # で落とす。pending-peer 猶予は L-36 で畳んだ（両リポ導入済みのため撤去）。
           compare_contract() {
             REL="$1"
             LABEL="$2"
-            GRACE="${3:-}"
             MINE="$REL"
             PEER=".peer-kabulab-cf/$REL"
             test -f "$MINE" || { echo "::error::$MINE が無い"; return 1; }
-            if [ ! -f "$PEER" ] && [ "$GRACE" = "pending-peer" ]; then
-              echo "::warning::${LABEL}を相手リポへ導入していない（pending-peer）。"
-              echo "::warning::kabulab-cf 側へ $REL を入れたら ci.yml の pending-peer を外すこと。"
-              return 0
-            fi
             if [ ! -f "$PEER" ]; then
               # 移行期の例外はここだけ。**自リポの main にまだファイルが無い間**に
               # 限って通す。両リポへ入り終わった後 (= 自 main にファイルがある) の
