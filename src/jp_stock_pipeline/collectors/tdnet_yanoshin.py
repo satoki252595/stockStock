@@ -303,10 +303,11 @@ def normalize_company_code(raw_code: str | None) -> str | None:
     - `"130a"`（小文字）と `"７２０３"`（全角）を None にしていた。
 
     **挙動が変わる点:** 末尾検査文字が "0" でない5文字（旧 docstring が
-    「ETF等は "4"」として挙げていた `"16714"` → `"1671"`）は None を返す。
-    本番 `ir_disclosures` 37,641 行の `company_code` は全件が末尾 "0" で
-    （実測）、ETF の `1671` は `core_stocks` に不在（母集団は内国普通株のみ）
-    なので、旧実装でも次段の母集団突合で落ちていた。取りこぼしは増えない。
+    「末尾は "4" の実例もある」として挙げていた `"12024"` → `"1202"`）は
+    None を返す。本番 `ir_disclosures` 37,641 行の `company_code` は全件が
+    末尾 "0" で（実測）、合成コード `1202` は `core_stocks` に不在（母集団は
+    内国普通株のみ）なので、旧実装でも次段の母集団突合で落ちていた。
+    取りこぼしは増えない。
     """
     return source_code_to_ticker(raw_code)
 

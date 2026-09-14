@@ -51,10 +51,10 @@ class TestNormalizeCompanyCode:
         assert ty.normalize_company_code("7203") == "7203"
 
     def test_末尾検査文字が0でない5文字はNone(self):
-        """仕様変更。以前は `"16714" == "1671"` を要求していた。
+        """仕様変更。以前は `"12024" == "1202"` を要求していた。
 
-        元の意図は「末尾は "0" 以外の実例もある（ETF 等）」で、実際に
-        2026-06-10 の TDnet フィクスチャに `"16714"` があったと当時の
+        元の意図は「末尾は "0" 以外の実例もある」で、実際に
+        2026-06-10 の TDnet フィクスチャに `"12024"` があったと当時の
         コメントが記録している（フィクスチャは公開リポジトリに置けず
         .gitignore 済みなので、ここでは再検証できない）。
 
@@ -67,12 +67,12 @@ class TestNormalizeCompanyCode:
 
         - 本番 ir_disclosures 37,641 行の company_code は**全件が末尾 "0"**。
           末尾非0の開示は1件も取り込まれていない。
-        - `1671` は ETF で core_stocks に不在（母集団は内国普通株のみ）。
+        - `1202` は合成コードで core_stocks に不在（母集団は内国普通株のみ）。
           旧実装でも ingest の母集団突合（`codeToId.get()` 相当）で落ちていた。
 
         つまりこの変更で落ちる行は、従来も1行あとで落ちていた行だけ。
         """
-        assert ty.normalize_company_code("16714") is None
+        assert ty.normalize_company_code("12024") is None
 
     def test_種類株コードを普通株に丸めない(self):
         # 伊藤園第1種優先株式。旧実装は "2593"（同社 普通株）を返していた。
