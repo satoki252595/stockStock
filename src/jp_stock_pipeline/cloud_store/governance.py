@@ -238,7 +238,8 @@ TABLE_LICENSE: dict[str, TableLicense] = {
     "swing_sector_daily": _uniform(
         LicenseTag.PERSONAL_ONLY,
         "JPX data_j.xlsx の33業種 × Yahoo 日足の騰落率",
-        "本番 DDL に sector / pct_1d / pct_5d がある（2026-09-13 sqlite_master 実測）。"
+        "本番 DDL に sector / pct_1d がある（2026-09-13 sqlite_master 実測）。"
+        "旧 pct_5d 列は kabulab-cf K5d の 0018 で DROP（P4 適用で確定）。"
         "sector は core_stocks.sector と同じ JPX 由来なので personal-only",
     ),
     # 優待ジャンル。`description` は kabulab-cf が自作して公開面に出している
