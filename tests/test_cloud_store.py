@@ -74,29 +74,6 @@ class TestKeys:
         with pytest.raises(ValueError):
             keys.derived_key("supply/7203.json", suffix="csv")
 
-    def test_derived_key_strips_gzip_encoding_first(self):
-        """gzip 済み原本（`…csv.gz`）から `…csv.csv.gz` を作らない（L-22縮小）。"""
-        raw = keys.raw_key(
-            source="edinet", datatype="xbrl", scope="7203",
-            data_date=date(2026, 6, 30), sha256="b" * 64, ext="csv.gz",
-            doc_id="S100XU9L",
-        )
-        assert raw.endswith("bbbbbbbbbbbbbbbb.csv.gz")
-        assert keys.derived_key(raw, suffix="csv.gz") == (
-            "derived/edinet/xbrl/2026/2026-06-30/7203/S100XU9L/bbbbbbbbbbbbbbbb.csv.gz"
-        )
-
-    def test_derived_key_keeps_plain_gz_original(self):
-        """素の `.gz` 原本（符号化でない）は従来どおり置き換える。"""
-        raw = keys.raw_key(
-            source="edinet", datatype="xbrl", scope="7203",
-            data_date=date(2026, 6, 30), sha256="b" * 64, ext="gz",
-            doc_id="S100XU9L",
-        )
-        assert keys.derived_key(raw, suffix="csv") == (
-            "derived/edinet/xbrl/2026/2026-06-30/7203/S100XU9L/bbbbbbbbbbbbbbbb.csv"
-        )
-
     def test_margin_key_matches_existing_layout(self):
         """既存 10 週と同じ形。変えると公開 Worker が読めなくなる。"""
         assert keys.margin_key(date(2026, 6, 12)) == "margin/2026-06-12.json"

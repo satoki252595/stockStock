@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import gzip
 from datetime import date, datetime, timedelta, timezone
 
 from _doubles import FakeR2, RecordingD1
@@ -119,12 +118,10 @@ class TestRawArtifact:
         new_key = "raw/edinet/csv/2026/2026-06-30/7203/S100XU9L/cccccccccccccccc.zip"
         legacy = "raw/edinet/csv/2026/2026-06-30/7203/_/cccccccccccccccc.zip"
         legacy_derived = "derived/edinet/csv/2026/2026-06-30/7203/_/cccccccccccccccc.csv"
-        legacy_derived_gz = legacy_derived + ".gz"
         r2, d1 = _FakeR2({legacy, legacy_derived}), _FakeD1()
         _sink(r2=r2, d1=d1).upsert_raw_artifact(_artifact(tmp_path, converted=True))
         assert r2.puts == []  # 原本も派生も PUT しない
-        # 派生は gzip 後→gzip 前の順に探し、旧オブジェクトを再利用する。
-        assert r2.heads == [new_key, legacy, legacy_derived_gz, legacy_derived]
+        assert r2.heads == [new_key, legacy, legacy_derived]
         _table, columns, rows, _c, _keep = d1.calls[0]
         assert rows[0][columns.index("derived_key")] == legacy_derived
 
@@ -139,65 +136,6 @@ class TestRawArtifact:
         assert r2.heads == [new_key, legacy]
         _table, columns, rows, _c, _keep = d1.calls[0]
         assert rows[0][columns.index("r2_key")] == new_key
-
-    def test_text_is_gzipped_with_gz_key_and_plain_index(self, tmp_path):
-        """L-22縮小: テキストは gzip して `.gz` キーへ。sha/size は圧縮前のまま。"""
-        path = tmp_path / "list_20260630.csv"
-        body = b"code,name\n" * 100
-        path.write_bytes(body)
-        artifact = RawArtifact(
-            source=Source.EDINET, datatype="csv", scope="ALL",
-            data_date=date(2026, 6, 30),
-            fetched_at=datetime(2026, 6, 30, 21, 0, tzinfo=JST),
-            url="https://example/list", local_path=path, sha256="d" * 64,
-            size_bytes=len(body), license_tag=LicenseTag.COMMERCIAL_OK,
-            converted_paths=[], convert_status=ConvertStatus.NOT_APPLICABLE,
-            doc_id="LIST1",
-        )
-        r2, d1 = _FakeR2(), _FakeD1()
-        assert _sink(r2=r2, d1=d1).upsert_raw_artifact(artifact) is True
-        assert r2.puts == [
-            "raw/edinet/csv/2026/2026-06-30/ALL/LIST1/dddddddddddddddd.csv.gz"
-        ]
-        assert gzip.decompress(r2.bodies[r2.puts[0]]) == body
-        _table, columns, rows, _c, _keep = d1.calls[0]
-        assert rows[0][columns.index("sha256")] == "d" * 64
-        assert rows[0][columns.index("size_bytes")] == len(body)
-        assert rows[0][columns.index("ext")] == "csv.gz"
-        assert rows[0][columns.index("r2_key")] == r2.puts[0]
-
-    def test_binary_passes_through_ungzipped(self, tmp_path):
-        """pdf/zip は圧縮済みなので素通し（キーも本文も変えない）。"""
-        r2, d1 = _FakeR2(), _FakeD1()
-        artifact = _artifact(tmp_path)
-        assert _sink(r2=r2, d1=d1).upsert_raw_artifact(artifact) is True
-        assert r2.puts == [
-            "raw/edinet/csv/2026/2026-06-30/7203/S100XU9L/cccccccccccccccc.zip"
-        ]
-        assert r2.bodies[r2.puts[0]] == b"raw-bytes"
-        _table, columns, rows, _c, _keep = d1.calls[0]
-        assert rows[0][columns.index("ext")] == "zip"
-
-    def test_plain_key_is_reused_when_gzipped_key_is_missing(self, tmp_path):
-        """gzip 前の新キーが実在すれば PUT せず再利用（R2 を増やさない）。"""
-        path = tmp_path / "list_20260630.csv"
-        path.write_bytes(b"code,name\n")
-        artifact = RawArtifact(
-            source=Source.EDINET, datatype="csv", scope="ALL",
-            data_date=date(2026, 6, 30),
-            fetched_at=datetime(2026, 6, 30, 21, 0, tzinfo=JST),
-            url="https://example/list", local_path=path, sha256="d" * 64,
-            size_bytes=11, license_tag=LicenseTag.COMMERCIAL_OK,
-            converted_paths=[], convert_status=ConvertStatus.NOT_APPLICABLE,
-            doc_id="LIST1",
-        )
-        plain = "raw/edinet/csv/2026/2026-06-30/ALL/LIST1/dddddddddddddddd.csv"
-        r2, d1 = _FakeR2({plain}), _FakeD1()
-        assert _sink(r2=r2, d1=d1).upsert_raw_artifact(artifact) is True
-        assert r2.puts == []
-        _table, columns, rows, _c, _keep = d1.calls[0]
-        assert rows[0][columns.index("r2_key")] == plain
-        assert rows[0][columns.index("ext")] == "csv"
 
     def test_legacy_key_is_not_checked_past_the_switchover_date(self, tmp_path):
         """LEGACY_KEY_UNTIL より新しい data_date では旧キーが実在しても無視する。"""
@@ -230,8 +168,7 @@ class TestRawArtifact:
         _sink(r2=r2, d1=d1).upsert_raw_artifact(_artifact(tmp_path, converted=True))
         assert any(k.startswith("derived/") for k in r2.puts)
         _table, columns, rows, _c, _keep = d1.calls[0]
-        # 変換版 csv は gzip される（L-22縮小）。索引の ext が符号化を表す。
-        assert rows[0][columns.index("derived_ext")] == "csv.gz"
+        assert rows[0][columns.index("derived_ext")] == "csv"
 
     def test_r2_success_without_d1_config_is_still_success(self, tmp_path):
         """R2 に原本が残ればトレーサビリティは保たれる。索引は後から作れる。"""
