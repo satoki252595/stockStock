@@ -18,6 +18,10 @@ db_ids.local.json
 .direnv/
 result
 
+# wrangler (worker/) のログ退避先。既定の ~/Library/Preferences/.wrangler/logs には
+# 書かせない (flake.nix の shellHook) が、デバッグ用に書いた場合はここに残す。
+.wrangler/
+
 # codegraph ツール生成物
 .codegraph/
 
