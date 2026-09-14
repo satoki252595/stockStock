@@ -1,25 +1,16 @@
-"""①銘柄マスタ `core_stocks` への唯一の書込口（移行 P4a）。
+"""①銘柄マスタ `core_stocks` の列定義の地図と検証用 SQL（移行 P4a 適用済み）。
 
 `core_stocks` は移行元 kabulab-cf が所有する既存表で、**14個の子テーブル**が
-`stock_id` で参照している（設計書は12個としているが実測は14個）。したがって
-うっかり1文でも壊すと影響が広い。この表へ出す SQL は必ずここを通す。
-
-## なぜ upsert を使わないか
-
-`core_stocks` は `name` / `market` が NOT NULL で既定値が無い。そのため
-「code と新列だけを渡す部分 upsert」は**既存行が相手でも失敗する**
-（実測: `NOT NULL constraint failed: core_stocks.name`。ON CONFLICT の判定より
-先に INSERT の NOT NULL 検査が走るため）。よって新列の書込は **UPDATE 一択**。
+`stock_id` で参照している（設計書は12個としているが実測は14個）。P4a の列追加
+（12 列 + 2 索引）は適用済みで、DDL 発行コード（`--apply` / `plan_ddl` /
+`build_column_update`）は削除した（D-14-1）。残る stockStock の書込は
+`sector33` の充填（`build_sector33_updates`）だけである。
 
 `D1Store.upsert()` は conflict 以外の全列を `c = excluded.c` に機械展開する
 設計なので、この表には使えない（`id` を渡せば `id = excluded.id` が生まれる）。
-ここではその関数を一切呼ばない。
-
-## SQL を「組み立てるだけ」にしてある理由
-
-設計書の G-core-1 は「書き込み SQL を実行せずダンプし、サロゲートキー列が
-SET 句に一度も現れないことを静的に検査する」ことを求めている。実行と生成が
-同じ関数に同居していると、その検査ができない。
+`name` / `market` が NOT NULL で既定値が無いため「code と新列だけの部分
+upsert」も既存行相手に失敗する（実測: `NOT NULL constraint failed:
+core_stocks.name`）。書込は UPDATE 一択で、ここではその関数を一切呼ばない。
 
 ## sector33 の充填で updated_at を進めない理由（2026-09-13。書き換える前に必ず読むこと）
 
@@ -33,7 +24,7 @@ commercial-ok。`collectors/edinet_codelist.py` の `_COL_SECTOR`）。2026-09-1
 
 **(1) 鮮度監視を恒久的に緑にしてしまう → `updated_at` を SET しない専用の
 UPDATE で解く。** `cloud_store/datasets.py` の `core_stocks` は日付列を持たない
-ので、鮮度を `MAX(updated_at)` で測っている。`build_column_update` は
+ので、鮮度を `MAX(updated_at)` で測っている。汎用の列充填（D-14-1 で削除）は
 `updated_at = (unixepoch())` を明示的に進めるので、これで月次に充填すると
 **`MAX(updated_at)` が毎月必ず進み**、kabulab-cf の月次 universe sync が死んで
 いても `core_stocks` の SLO（33 日で黄・46 日で赤）が発火しない（JPX の 404 で
@@ -41,7 +32,7 @@ UPDATE で解く。** `cloud_store/datasets.py` の `core_stocks` は日付列�
 設計書 B-8 の「`now` を入れると永久に緑」と同型）。
 そこで `build_sector33_updates` は `sector33` だけを SET する。`updated_at` に
 触るのは kabulab-cf の `universe.ts` だけなので、鮮度の意味は変わらない。
-`build_column_update` は他の P4a 列（P4b）のために**そのまま残す**。
+汎用の列充填（旧 `build_column_update`）は D-14-1 で削除した。
 SQL に `updated_at` が現れないことは `tests/test_core_stocks_sector33.py` が固定する。
 本番 `core_stocks` に trigger が無いこと（UPDATE が裏で `updated_at` を進めない
 こと）は 2026-09-13 に `sqlite_master` で確認した。
@@ -69,15 +60,17 @@ from collections.abc import Iterable, Mapping
 
 from ..contracts.sector33 import normalize_sector33
 from ..contracts.stock_code import source_code_to_ticker
-from .d1 import MAX_BOUND_PARAMS, MAX_COMPOUND_SELECT_TERMS, D1Error
+from .d1 import MAX_BOUND_PARAMS, MAX_COMPOUND_SELECT_TERMS
 
 TABLE = "core_stocks"
 
 # 移行元 kabulab-cf が所有する既存列。stockStock は**読むだけ**で書かない。
 # `id` はサロゲートキーで 14 子表が参照しており、SET 句に入れたら破滅する。
+# `build_sector33_updates` が既存列を SET しないことは
+# `tests/test_core_stocks_sector33.py` が固定する。
 #
-# `updated_at` は意図的に入れていない。`build_column_update` が明示的に進める
-# 唯一の既存列なので、ここに入れると自分の UPDATE が自分で弾かれる。
+# `updated_at` は意図的に入れていない。kabulab-cf の `universe.ts` が進める
+# 列で、stockStock 側の充填が触らないことを別途固定している。
 PROTECTED_COLUMNS: frozenset[str] = frozenset(
     {
         "id",
@@ -110,8 +103,8 @@ BASE_COLUMNS: tuple[str, ...] = (
     "updated_at",
 )
 
-# P4a で追加する列。すべて nullable（SQLite の ALTER は既定値の無い NOT NULL も
-# UNIQUE も付けられない。実測で両方エラーになることを確認済み）。
+# P4a で追加した列（適用済み）。すべて nullable（SQLite の ALTER は既定値の無い
+# NOT NULL も UNIQUE も付けられない。実測で両方エラーになることを確認済み）。
 NEW_COLUMNS: dict[str, str] = {
     "instrument_type": "TEXT",  # equity/etf/... JPX 由来 → personal-only
     # EDINET コードリストの「提出者業種」(33業種相当) → commercial-ok。
@@ -188,66 +181,12 @@ def unexpected_indexes(observed: set[str]) -> list[str]:
     )
 
 
-def add_column_sql(column: str) -> str:
-    """1列分の ALTER。SQLite に `ADD COLUMN IF NOT EXISTS` は無い。"""
-    if column not in NEW_COLUMNS:
-        raise D1Error(f"P4a の追加対象外の列: {column!r}")
-    return f"ALTER TABLE {TABLE} ADD COLUMN {column} {NEW_COLUMNS[column]}"
-
-
-def plan_ddl(existing_columns: set[str], existing_indexes: set[str]) -> list[str]:
-    """まだ適用されていない DDL だけを返す（冪等）。
-
-    `PRAGMA table_info` と `sqlite_master` の実測を渡す。既にある列へ
-    `ADD COLUMN` を投げると `duplicate column name` で落ちるため、
-    事前に差分を取ってから流す。
-    """
-    statements = [
-        add_column_sql(name) for name in NEW_COLUMNS if name not in existing_columns
-    ]
-    statements += [
-        sql for name, sql in NEW_INDEXES.items() if name not in existing_indexes
-    ]
-    return statements
-
-
-def build_column_update(code: str, values: dict[str, object]) -> tuple[str, list]:
-    """新列だけを埋める UPDATE を**組み立てて返す**（実行しない）。
-
-    - 既存列（`PROTECTED_COLUMNS`）が1つでも混ざったら `D1Error`
-    - P4a の追加対象外の列も `D1Error`
-    - `WHERE code = ?` で1行に限定する（`id` は使わない）
-    - `updated_at` は明示的に進める。`src_fetched_at`（一次データの取得時刻）
-      とは別物なので混同しない
-    """
-    if not code:
-        raise D1Error("build_column_update: code は必須")
-    if not values:
-        raise D1Error("build_column_update: 更新する列が無い")
-    protected = sorted(set(values) & PROTECTED_COLUMNS)
-    if protected:
-        raise D1Error(
-            f"core_stocks の既存列は stockStock から書かない: {protected}"
-            "（所有者は kabulab-cf の universe.ts）"
-        )
-    unknown = sorted(set(values) - set(NEW_COLUMNS))
-    if unknown:
-        raise D1Error(f"P4a の追加対象外の列: {unknown}")
-
-    columns = sorted(values)
-    assignments = ", ".join(f"{c} = ?" for c in columns)
-    sql = (
-        f"UPDATE {TABLE} SET {assignments}, updated_at = (unixepoch()) WHERE code = ?"
-    )
-    return sql, [values[c] for c in columns] + [code]
-
-
 # --- sector33 の充填（EDINET「提出者業種」）----------------------------------
 #
-# `build_column_update` を使わず専用の UPDATE を持つ理由は、モジュール docstring の
-# 「sector33 の充填で updated_at を進めない理由」を読むこと。要点だけ書くと、
-# `core_stocks` の鮮度は `MAX(updated_at)` で測っているので、月次の充填が
-# `updated_at` を進めると kabulab-cf の universe sync が死んでも SLO が鳴らない。
+# 専用の UPDATE を持つ理由は、モジュール docstring の「sector33 の充填で
+# updated_at を進めない理由」を読むこと。要点だけ書くと、`core_stocks` の
+# 鮮度は `MAX(updated_at)` で測っているので、月次の充填が `updated_at` を
+# 進めると kabulab-cf の universe sync が死んでも SLO が鳴らない。
 
 SECTOR33_COLUMN = "sector33"
 
@@ -356,27 +295,10 @@ def render_sector33_backfill(changes: Mapping[str, str | None]) -> str:
 
 TABLE_INFO_SQL = f"PRAGMA table_info({TABLE})"
 # `sql` も取る。名前だけ見ていると「同名で別定義の索引が既にある」を
-# 素通りさせてしまう（CREATE INDEX IF NOT EXISTS は no-op になる）。
+# 素通りさせてしまう。
 INDEX_LIST_SQL = (
     f"SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='{TABLE}'"
 )
-
-
-def normalize_sql(sql: str | None) -> str:
-    """索引定義の比較用。空白の揺れと引用符・IF NOT EXISTS を落とす。"""
-    text = " ".join(str(sql or "").split())
-    for ch in ("`", '"', "[", "]"):
-        text = text.replace(ch, "")
-    return text.replace("IF NOT EXISTS ", "").replace(" (", "(").upper()
-SNAPSHOT_SQL = (
-    f"SELECT id, code, name, market, sector, is_active, is_yutai FROM {TABLE}"
-    " ORDER BY id"
-)
-COUNTS_SQL = (
-    f"SELECT COUNT(*) AS total, SUM(is_active) AS active,"
-    f" SUM(CASE WHEN sector IS NULL THEN 1 ELSE 0 END) AS sector_null FROM {TABLE}"
-)
-SEQ_SQL = f"SELECT seq FROM sqlite_sequence WHERE name='{TABLE}'"
 
 # `core_stocks.id` を参照する子表（2026-09-12 実測で14表。設計書の12は誤り）。
 # FK 宣言があるものは `stock_id` が NOT NULL。

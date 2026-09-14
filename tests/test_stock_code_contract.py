@@ -100,14 +100,3 @@ class TestCallSitesDelegate:
 
     def test_edinet_sec_code(self, vector):
         assert normalize_sec_code(vector["input"]) == vector["source_to_ticker"]
-
-
-class TestUniverseGuardsReExport:
-    """`cloud_store.universe_guards` からも同じ実装が見えること（import 元を壊さない）。"""
-
-    def test_same_objects(self):
-        from jp_stock_pipeline.cloud_store import universe_guards as ug
-
-        assert ug.normalize_stock_code is normalize_stock_code
-        assert ug.is_valid_stock_code is is_valid_stock_code
-        assert ug.STOCK_CODE_RE is STOCK_CODE_RE

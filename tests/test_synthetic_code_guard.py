@@ -5,13 +5,11 @@
 
 (1) `tests/fixtures/contracts/stock-code-vectors.json`（両リポ共有・CI
     cross-repo-contract の突合対象。`test_stock_code_contract.py` が実装の入出力を
-    検証する側で、こちらはフィクスチャの値そのものを検査する）と
-    `tests/test_jpx_margin.py`（kabulab-cf `services/vwap-analysis/lib/margin.test.ts`
-    と手動で値を揃えている合成 PDF フィクスチャ）。この 2 つが「種類株契約の根拠と
-    して実在コードを意図的に使う」場所そのものなので、許容リストもこの契約例
-    （先頭 4 桁）に絞る。
+    検証する側で、こちらはフィクスチャの値そのものを検査する）。
+    このベクタが「種類株契約の根拠として実在コードを意図的に使う」
+    場所そのものなので、許容リストもこの契約例（先頭 4 桁）に絞る。
 (2) 「合成コード」と注記したコード例 — `tests/test_tdnet_yanoshin.py` /
-    `tests/test_universe_guards.py` / `src/jp_stock_pipeline/collectors/tdnet_yanoshin.py`
+    `src/jp_stock_pipeline/collectors/tdnet_yanoshin.py`
     / `src/jp_stock_pipeline/contracts/stock_code.py` の docstring・コメント。
     区分値の形は取らないが、注記した値そのものが規約に違反していたら
     (= 実は合成でない) fail する。注記だけ残してコードを実在値へ書き戻す
@@ -34,9 +32,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VECTORS_PATH = REPO_ROOT / "tests" / "fixtures" / "contracts" / "stock-code-vectors.json"
-MARGIN_TEST_PATH = REPO_ROOT / "tests" / "test_jpx_margin.py"
 
-# 許容する実在コードの先頭 4 桁。この 2 ファイルが種類株契約の根拠として使っている
+# 許容する実在コードの先頭 4 桁。共有ベクタが種類株契約の根拠として使っている
 # 「普通株の基本例 + それに紐づく優先株・種類株」の組だけを載せる。区分の語や会社名は
 # ここに書かない（許容リストは数値だけを見る）。
 ALLOWED_REAL_PREFIXES = frozenset({7203, 2593, 9434})
@@ -71,19 +68,6 @@ def _vector_field_violations() -> list[str]:
     return offenders
 
 
-# tests/test_jpx_margin.py の `"code": "…"` を拾う (辞書キー code のみ)。
-_CODE_ASSIGNMENT_RE = re.compile(r'"code":\s*"(\d{4,5})"')
-
-
-def _margin_test_code_violations() -> list[str]:
-    source = MARGIN_TEST_PATH.read_text(encoding="utf-8")
-    return [
-        match.group(1)
-        for match in _CODE_ASSIGNMENT_RE.finditer(source)
-        if violates_synthetic_code_policy(match.group(1))
-    ]
-
-
 class TestViolatesSyntheticCodePolicy:
     """検出器そのものの単体テスト。"""
 
@@ -114,14 +98,9 @@ class TestViolatesSyntheticCodePolicy:
 class TestSharedFixturesFollowSyntheticCodePolicy:
     def test_走査対象が空振りしていない(self) -> None:
         assert len(_load_vectors()) > 15
-        source = MARGIN_TEST_PATH.read_text(encoding="utf-8")
-        assert len(_CODE_ASSIGNMENT_RE.findall(source)) > 3
 
     def test_stock_code_vectors_jsonに許容リスト外の1300以上コードが無い(self) -> None:
         assert _vector_field_violations() == []
-
-    def test_test_jpx_margin_pyのcodeに許容リスト外の1300以上コードが無い(self) -> None:
-        assert _margin_test_code_violations() == []
 
 
 # --- 「合成コード」と注記した値の整合性チェック ----------------------------------
@@ -133,7 +112,6 @@ _CODE_LITERAL_RE = re.compile(r"[`\"](\d{4,5})[`\"]")
 
 SYNTHETIC_MARKER_SCAN_TARGETS = (
     REPO_ROOT / "tests" / "test_tdnet_yanoshin.py",
-    REPO_ROOT / "tests" / "test_universe_guards.py",
     REPO_ROOT / "src" / "jp_stock_pipeline" / "collectors" / "tdnet_yanoshin.py",
     REPO_ROOT / "src" / "jp_stock_pipeline" / "contracts" / "stock_code.py",
 )

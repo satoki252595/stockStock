@@ -1,44 +1,31 @@
-"""core_stocks_migrate: ①銘柄マスタへの列追加（移行 P4a）。
+"""core_stocks_migrate: `core_stocks` の列定義ドリフトと孤児の日次検証（移行 P4a 適用済み）。
 
 `core_stocks` は移行元 kabulab-cf が所有する既存表で、14 子表が `stock_id` で
-参照している。P4a で発行するのは **`ALTER TABLE ... ADD COLUMN` と
-`CREATE INDEX` だけ**で、既存行・既存列・子表には1バイトも触れない。
+参照している。P4a の列追加（12 列 + 2 索引）は適用済みで、DDL 発行コード
+（`--apply` / `--sql-dump` / `--snapshot` / `--state-dump` / `--compare-to`）は
+削除した（D-14-1）。このジョブは `--verify` 専用で、**SELECT / PRAGMA しか
+発行しない**ので CI から毎日回せる。`.github/workflows/ops_check.yml` の
+第3ステップが呼ぶ。
 
-値の充填（`instrument_type` 等）は P4a の範囲外。列追加（DDL・1回きり）と
-値の充填（UPDATE・繰り返し）で承認とロールバックの単位が違うため、別フェーズに
-割っている。`sector33` の正本ソースと `instrument_type` の語彙が未決なのも理由
-（詳細は docs/CF-CANONICAL-DESIGN.md の P4a 実施記録）。
+## 判定内容
 
-## モード
+- G-core-5: 子表の孤児（`子表 LEFT JOIN core_stocks`）。`core_stocks` の索引行を
+  読む（2026-09-13 実測で `core_stock_financials` 1 表ぶんだけで `rows_read`
+  7,528）。「行を 1 行も走査しない」ではない
+- 追加列・追加索引の有無（適用済みの確認）と型・nullability
+- E7: 本番にあって stockStock の定義に無い列・索引（superset 方向）。
+  `core_stocks` の列定義は両リポジトリに散っていて**本番の PRAGMA が正**
+  （21 列）なので、kabulab-cf 側が列を足した瞬間に stockStock の地図が古くなる。
+  気づけるのはこの向きの検査だけ
 
-- `--check-only`（既定）: 何も書かず、現状と発行予定の差分だけを報告する
-- `--sql-dump PATH`: 発行予定の全文をファイルへ出す（G-core-1 の静的検査用）
-- `--apply`: DDL を実際に発行する。**唯一の書込モード**
-- `--verify`: 適用後の検証（G-core-2 / G-core-3 / G-core-5 / E7）だけを実行する。
-  **`core_stocks` へは SELECT / PRAGMA しか発行しないので CI から毎日回せる。**
-  `.github/workflows/ops_check.yml` の第3ステップが `--compare-to` なしで呼ぶ。
-  その形（比較相手なし）では **断面 (`SNAPSHOT_SQL`) と件数 (`COUNTS_SQL`) と
-  `sqlite_sequence` (`SEQ_SQL`) を発行しない**。G-core-2/3 は適用前の状態と
-  突き合わせて初めて意味を持つ判定なので、`--compare-to` / `--state-dump` を
-  渡したときだけ断面を読む（`_observe`）。
-  **「core_stocks の行を 1 行も走査しない」ではない**: 孤児検査 (G-core-5) は
-  比較相手なしでも判定に使い、`子表 LEFT JOIN core_stocks` なので core_stocks の
-  索引行を読む（2026-09-13 実測で `core_stock_financials` 1 表ぶんだけで
-  `rows_read` 7,528）。この PR が削ったのは「読んで捨てていた分」だけである。
-  なお「1 文も書かない」ではない: 他の全ジョブと同じく `jobs.runner.run_job` が
-  終了時に ⑦ `jss_job_runs` へ 1 行 INSERT する（移行対象表には触らないが、
-  読み取り専用トークンでは動かない）
-
-`--snapshot PATH` を付けると、既存 3,818 行のスナップショットを JSON で保存する
-（ロールバックの原本）。
+なお「1 文も書かない」ではない: 他の全ジョブと同じく `jobs.runner.run_job` が
+終了時に D1 `jss_job_runs` へ 1 行 INSERT する（移行対象表には触らないが、
+読み取り専用トークンでは動かない）。
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
-from pathlib import Path
 
 from ..cloud_store import core_stocks as cs
 from ..cloud_store.d1 import D1Error, D1Store
@@ -48,11 +35,11 @@ logger = logging.getLogger(__name__)
 
 JOB_NAME = "core_stocks_migrate"
 
-# 移行元 D1（kabulab-cf）を読む。正本 DB と同一なので既定はそちら。
+
 def _store(ctx: JobContext) -> D1Store | None:
     """D1 が使えないなら失敗として記録する。
 
-    検証・適用のジョブは「対象に触れなかった」を成功にしてはいけない。
+    検証のジョブは「対象に触れなかった」を成功にしてはいけない。
     環境変数名の間違いや `--dry-run` の付けっぱなしで、孤児が出ていても
     列が消えていても「成功 (processed=0)」に見えてしまう。
     """
@@ -70,33 +57,12 @@ def _store(ctx: JobContext) -> D1Store | None:
     return D1Store(cloud.settings, writer=JOB_NAME, database_id=database_id)
 
 
-def _observe(store: D1Store, *, baseline: bool) -> dict:
-    """現状を読む（SELECT / PRAGMA のみ）。
+def _observe(store: D1Store) -> dict:
+    """現状を読む（列・索引・孤児のみ。`core_stocks` の行断面は読まない）。
 
     名前だけでなく**定義**まで持つ。列名の集合しか見ていないと
-    「型の違う同名列」「(is_active, market) ではなく (sector) 上に作られた
-    同名索引」を素通りさせる（`CREATE INDEX IF NOT EXISTS` は no-op になる）。
-    行の値は `SNAPSHOT_SQL` のハッシュで丸ごと突き合わせる。
-
-    ## `baseline=False` で行を 1 行も走査しない理由（D1 は走査行課金）
-
-    G-core-2（件数・`sqlite_sequence`）と G-core-3（既存行の sha256）は
-    **適用前の状態と突き合わせて初めて意味を持つ**判定で、`_verify` は
-    `before is None` の時点で早期 return する。ところが `_observe` は
-    `before` の有無に関わらず `SNAPSHOT_SQL`（`core_stocks` 全 3,818 行）と
-    `COUNTS_SQL`（同 3,818 行）を必ず投げていた。
-
-    `.github/workflows/ops_check.yml` の第3ステップは `--compare-to` を渡さない
-    ので、**毎日 7,654 行を走査してハッシュを計算し、その結果を捨てていた**
-    （2026-09-13 の本番実測: `SNAPSHOT_SQL` 3,818 / `COUNTS_SQL` 3,818 /
-    `SEQ_SQL` 18。`SEQ_SQL` は `sqlite_sequence` の 18 行を走査するので 1 行では
-    ない）。D1 の課金軸は走査行数なので、これは料金だけを払って何も検知して
-    いない。比較相手がある経路（`--compare-to` / `--apply` / `--state-dump` /
-    `--snapshot`）だけで読む。
-
-    孤児検査（G-core-5）は `before` なしでも `_verify` が使うので常に読む。
-    こちらは `子表 LEFT JOIN core_stocks` で core_stocks の索引行も読むため、
-    この関数が「core_stocks を 1 行も走査しない」状態にはならない。
+    「型の違う同名列」を見逃す。行の値の突き合わせ（旧 G-core-2/3）は
+    適用前後の比較が要る移行時限定の判定だったので、適用済みの今は持たない。
     """
     columns = {
         str(r["name"]): {
@@ -106,58 +72,23 @@ def _observe(store: D1Store, *, baseline: bool) -> dict:
         }
         for r in store.query(cs.TABLE_INFO_SQL)
     }
-    indexes = {
-        str(r["name"]): cs.normalize_sql(r.get("sql")) for r in store.query(cs.INDEX_LIST_SQL)
-    }
+    indexes = {str(r["name"]): r.get("sql") for r in store.query(cs.INDEX_LIST_SQL)}
     orphans: dict[str, int] = {}
     for sql in cs.orphan_check_statements():
         orphans.update({str(r["t"]): int(r["n"] or 0) for r in store.query(sql)})
-    state: dict = {
-        "columns": columns,
-        "indexes": indexes,
-        "orphans": orphans,
-        # 比較相手が無いときは「測っていない」を明示する。0 や {} を入れると
-        # `_verify` が「件数が 0 に変わった」と誤って報告しうる。
-        "counts": None,
-        "sqlite_sequence": None,
-        "rows": None,
-        "rows_sha256": None,
-    }
-    if not baseline:
-        return state
-
-    counts = (store.query(cs.COUNTS_SQL) or [{}])[0]
-    seq_rows = store.query(cs.SEQ_SQL)
-    rows = store.query(cs.SNAPSHOT_SQL)
-    state["counts"] = {k: (int(v) if v is not None else None) for k, v in counts.items()}
-    state["sqlite_sequence"] = int(seq_rows[0]["seq"]) if seq_rows else None
-    state["rows"] = len(rows)
-    state["rows_sha256"] = hashlib.sha256(
-        json.dumps(rows, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()
-    return state
+    return {"columns": columns, "indexes": indexes, "orphans": orphans}
 
 
-def _report(state: dict, pending: list[str]) -> None:
+def _report(state: dict) -> None:
     logger.info(
         "列 %d 個 / 索引 %s", len(state["columns"]), sorted(state["indexes"])
     )
-    if state.get("rows_sha256") is None:
-        # 走査していないことを黙らせない。「0 行」と読めてしまうと、
-        # G-core-2/3 が通ったと誤解される。
-        logger.info("行・件数・sqlite_sequence: 未観測（比較相手が無いので走査しない）")
-    else:
-        logger.info("行 %s (sha256 %s)", state["rows"], str(state["rows_sha256"])[:16])
-        logger.info("件数: %s / sqlite_sequence=%s", state["counts"], state["sqlite_sequence"])
     bad = {t: n for t, n in state["orphans"].items() if n}
     logger.info("孤児: %s", bad or "全子表で 0 件")
-    logger.info("未適用の DDL: %d 文", len(pending))
-    for sql in pending:
-        logger.info("  %s", sql)
 
 
-def _verify(state: dict, before: dict | None) -> list[str]:
-    """G-core-2 / G-core-3 / G-core-5 / E7 を突き合わせる。差分の説明を返す。
+def _verify(state: dict) -> list[str]:
+    """G-core-5 / 追加列の有無 / E7 を突き合わせる。差分の説明を返す。
 
     列と索引は **両方向**で見る。`NEW_COLUMNS ⊆ 本番`（subset 方向）だけを
     見ていた頃は「本番にあって stockStock の定義に無い列」を素通りさせていた。
@@ -197,210 +128,37 @@ def _verify(state: dict, before: dict | None) -> list[str]:
             problems.append(f"{name} の型が違う: {got.get('type')!r} != {want_type!r}")
         if got.get("notnull"):
             problems.append(f"{name} が NOT NULL になっている（ALTER では付かないはず）")
-    for name, want_sql in cs.NEW_INDEXES.items():
-        got_sql = state["indexes"].get(name)
-        if got_sql is None:
+    for name in cs.NEW_INDEXES:
+        if name not in state["indexes"]:
             problems.append(f"追加索引が入っていない: {name}")
-        elif got_sql != cs.normalize_sql(want_sql):
-            problems.append(
-                f"同名だが定義の違う索引がある: {name} 実際={got_sql!r} 期待={cs.normalize_sql(want_sql)!r}"
-            )
-    if before is None:
-        return problems
-    # 片方でも未観測なら比較しない。未観測（None）を値として比べると
-    # 「件数が 3,818 から None に変わった」という嘘の差分が出る。
-    if before["counts"] is not None and state["counts"] is not None:
-        if before["counts"] != state["counts"]:
-            problems.append(f"G-core-2: 件数が変わった {before['counts']} -> {state['counts']}")
-        if before["sqlite_sequence"] != state["sqlite_sequence"]:
-            problems.append(
-                f"G-core-2: sqlite_sequence が動いた "
-                f"{before['sqlite_sequence']} -> {state['sqlite_sequence']}"
-            )
-    lost = set(before["columns"]) - set(state["columns"])
-    if lost:
-        problems.append(f"既存列が消えた: {sorted(lost)}")
-    for name in set(before["columns"]) & set(state["columns"]):
-        if before["columns"][name] != state["columns"][name]:
-            problems.append(
-                f"既存列 {name} の定義が変わった: "
-                f"{before['columns'][name]} -> {state['columns'][name]}"
-            )
-    lost_idx = set(before["indexes"]) - set(state["indexes"])
-    if lost_idx:
-        problems.append(f"既存索引が消えた: {sorted(lost_idx)}")
-    for name in set(before["indexes"]) & set(state["indexes"]):
-        if before["indexes"][name] != state["indexes"][name]:
-            problems.append(f"既存索引 {name} の定義が変わった")
-    # G-core-3: 既存行が1バイトでも変わっていないこと。件数一致だけでは
-    # 「全行の name を書き換えた」「is_active を反転した」を見逃す。
-    # 片方が未観測（None）なら比較しない。未観測を値として比べると
-    # 「sha256 が aaaa… から None に変わった」という嘘の差分になる。
-    if (
-        before.get("rows_sha256")
-        and state.get("rows_sha256")
-        and before["rows_sha256"] != state["rows_sha256"]
-    ):
-        problems.append(
-            f"G-core-3: 既存行の内容が変わった "
-            f"(sha256 {before['rows_sha256'][:16]} -> {str(state.get('rows_sha256'))[:16]})"
-        )
     return problems
-
-
-def _already_applied(exc: Exception) -> bool:
-    """「もう入っている」ことを示す D1 のエラーか。"""
-    text = str(exc).lower()
-    return "duplicate column name" in text or "already exists" in text
-
-
-def _snapshot(store: D1Store, path: Path) -> int:
-    rows = store.query(cs.SNAPSHOT_SQL)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
-    logger.info("スナップショット %d 行 -> %s", len(rows), path)
-    return len(rows)
 
 
 def execute(ctx: JobContext) -> None:
     store = _store(ctx)
     if store is None:
         return
-    args = ctx.args
-
-    # 既存行の断面（3,818 行）を読むのは、突き合わせる相手がある経路だけ。
-    # `--verify` 単独（= ops_check.yml の第3ステップ）は列・索引・孤児しか見ない
-    # ので走査しない（`_observe` の docstring を読むこと）。
-    # `--state-dump` は後で `--compare-to` に渡す「適用前の状態」を作るための口
-    # なので、断面を欠いた JSON を吐かせない（欠けた baseline を渡すと G-core-2/3
-    # が黙って比較をスキップし、検証が通ったように見える）。
-    verify_only = (
-        bool(getattr(args, "verify", False))
-        and not getattr(args, "compare_to", None)
-        and not getattr(args, "state_dump", None)
-    )
-    need_baseline = not verify_only
     try:
-        state = _observe(store, baseline=need_baseline)
+        state = _observe(store)
     except D1Error as exc:
         ctx.add_failure("observe", f"現状を読めない: {exc}")
         return
-
-    pending = cs.plan_ddl(set(state["columns"]), set(state["indexes"]))
-
-    snapshot_path = getattr(args, "snapshot", None)
-    if snapshot_path:
-        try:
-            _snapshot(store, Path(snapshot_path))
-        except (D1Error, OSError) as exc:
-            ctx.add_failure("snapshot", f"スナップショットを保存できない: {exc}")
-            return
-
-    state_path = getattr(args, "state_dump", None)
-    if state_path:
-        Path(state_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(state_path).write_text(
-            json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8"
-        )
-        logger.info("現状の state -> %s", state_path)
-
-    dump_path = getattr(args, "sql_dump", None)
-    if dump_path:
-        Path(dump_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(dump_path).write_text(
-            "".join(f"{sql};\n" for sql in pending), encoding="utf-8"
-        )
-        logger.info("発行予定 SQL %d 文 -> %s", len(pending), dump_path)
-
-    if getattr(args, "verify", False):
-        before = None
-        before_path = getattr(args, "compare_to", None)
-        if before_path and Path(before_path).exists():
-            before = json.loads(Path(before_path).read_text(encoding="utf-8"))
-        problems = _verify(state, before)
-        _report(state, pending)
-        if problems:
-            for p in problems:
-                ctx.add_failure("verify", p)
-            return
-        logger.info("検証 OK: G-core-2 / G-core-3 / G-core-5 / E7 をすべて満たす")
-        ctx.add_success()
-        return
-
-    if not getattr(args, "apply", False):
-        _report(state, pending)
-        logger.info("=== check-only（1文も発行していない）===")
-        ctx.add_success()
-        return
-
-    if not pending:
-        logger.info("未適用の DDL は無い（適用済み）")
-        ctx.add_success()
-        return
-
-    # --- ここからが唯一の書込。ALTER / CREATE INDEX 以外は出さない ---------
-    for sql in pending:
-        head = sql.split()[0].upper()
-        if head not in ("ALTER", "CREATE"):
-            ctx.add_failure("apply", f"P4a が発行してよいのは ALTER / CREATE INDEX のみ: {sql}")
-            return
-    for sql in pending:
-        try:
-            # 非冪等な DDL なので自動再送を止める。再送されると D1 側では
-            # 成功しているのに 2 回目が duplicate column name を返し、
-            # 「適用済みなのに失敗」と誤って報告される。
-            store.query(sql, idempotent=False)
-        except D1Error as exc:
-            if _already_applied(exc):
-                # 応答が失われただけで実体は入っている可能性がある。
-                # 打ち切らず、最後の _observe と _verify に判断させる。
-                logger.warning("既に適用済みとして続行: %s (%s)", sql, exc)
-                continue
-            ctx.add_failure(sql, f"DDL 発行に失敗: {exc}")
-            return
-        logger.info("適用: %s", sql)
-
-    try:
-        after = _observe(store, baseline=True)
-    except D1Error as exc:
-        ctx.add_failure("observe", f"適用後の状態を読めない: {exc}")
-        return
-    problems = _verify(after, state)
-    _report(after, cs.plan_ddl(set(after["columns"]), set(after["indexes"])))
+    problems = _verify(state)
+    _report(state)
     if problems:
         for p in problems:
             ctx.add_failure("verify", p)
         return
-    logger.info("P4a 完了: 列 %d / 索引 %s", len(after["columns"]), after["indexes"])
+    logger.info("検証 OK: G-core-5 と列・索引の有無・E7 をすべて満たす")
     ctx.add_success()
 
 
 def main(argv: list[str] | None = None, *, env: dict[str, str] | None = None) -> int:
-    parser = build_parser("①銘柄マスタ core_stocks への列追加 (移行 P4a)")
-    parser.add_argument(
-        "--check-only",
-        action="store_true",
-        help="何も書かず現状と差分だけ報告する（既定の挙動。明示用）",
-    )
-    parser.add_argument(
-        "--apply", action="store_true", help="DDL を実際に発行する（唯一の書込モード）"
-    )
+    parser = build_parser("core_stocks の列定義ドリフトと孤児の日次検証 (E7 / G-core-5)")
     parser.add_argument(
         "--verify",
         action="store_true",
-        help="検証だけ実行する (G-core-2/3/5 と E7 の列定義ドリフト)",
-    )
-    parser.add_argument(
-        "--sql-dump", metavar="PATH", help="発行予定 SQL を実行せずファイルへ出す"
-    )
-    parser.add_argument(
-        "--snapshot", metavar="PATH", help="既存行のスナップショットを JSON で保存する"
-    )
-    parser.add_argument(
-        "--state-dump", metavar="PATH", help="現状(列/索引/件数/孤児)を JSON で保存する"
-    )
-    parser.add_argument(
-        "--compare-to", metavar="PATH", help="--verify で突き合わせる適用前の状態 JSON"
+        help="検証を実行する（唯一のモード。ops_check.yml が渡す）",
     )
     return run_job(JOB_NAME, execute, argv, parser=parser, env=env)
 
