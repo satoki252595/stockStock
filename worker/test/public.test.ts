@@ -52,7 +52,7 @@ describe("公開面", () => {
 
   it("鮮度から personal-only の行を落とす", async () => {
     const res = await app.request("/v1/meta/freshness", {}, env([
-      { dataset: "prices_daily", license_tag: "personal-only" },
+      { dataset: "d1_core_stock_financials", license_tag: "personal-only" },
       { dataset: "ir_disclosures", license_tag: "factual-cite" },
     ]));
     const body = await res.json() as { data: { dataset: string }[] };

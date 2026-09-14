@@ -26,11 +26,9 @@ uv run pytest        # テスト
 | ジョブ | 実行 |
 |---|---|
 | 銘柄マスタ同期 | `uv run python -m jp_stock_pipeline.jobs.master_sync` |
-| 株価+テクニカル | `uv run python -m jp_stock_pipeline.jobs.prices_daily` |
 | TDnet開示 | `uv run python -m jp_stock_pipeline.jobs.tdnet_hourly` |
 | EDINET書類 | `uv run python -m jp_stock_pipeline.jobs.edinet_daily` |
-| 株価突合(stooq) | `uv run python -m jp_stock_pipeline.jobs.reconcile_weekly` |
-| エクスポート | `uv run python -m jp_stock_pipeline.jobs.export_weekly` |
+| 需給日次 | `uv run python -m jp_stock_pipeline.jobs.supply_daily` |
 
 全ジョブ `--dry-run` 対応（Notion に書き込まない）。
 
@@ -50,17 +48,17 @@ FastAPI(REST + APIキー)で逐次アクセスできる。`LOCAL_DB_HOST` を設
 - **cloud（既定）**: `LOCAL_DB_HOST` + `sslmode=require`。**クラウド(GitHub Actions 等)から端末B へ格納**。`require` は経路を暗号化するが**サーバ認証はしない**ため直公開は能動的 MITM に弱い → **VPN(Tailscale 等)経由を強く推奨**（VPN を使わないなら `sslmode=verify-full` + ルートCA を設定）。GitHub Actions は同名 Secrets を設定すれば cron 実行で自動 dual-write。
 - **lan**: `LOCAL_DB_LAN_HOST`(既定 localhost) + `sslmode=prefer`。同一 LAN で手動実行するとき `--db-target lan`。
 
-- **双方向フェールセーフ**。Notion とローカルへ独立に書き、**片方の保存が失敗してももう片方は必ず試み、どちらか一方にでも残ればその取得単位は成功扱い**（可用性最大化）。設計上の正本は Notion だが、ローカル API の可用性のため対称化。失敗は隠さず `notion_failed`/`mirror_failed` に計上し warning 記録、**両系統とも失敗した分だけ** ⑦ の failed に数える（§3-2）。原本 ⑤ のみ両系統失敗でその取得単位を中止（原本ゼロ＝トレーサビリティ喪失 §3-3）。
-- `②株価` はローカルでは `(code, data_date)` を主キーに**時系列を蓄積**。Notion の②は最新スナップショット。同じ値を①銘柄ページ配下の「株価テクニカル履歴」子DBへ営業日ごとに追記する（8,000行で次シャード）。
-- `②` は personal-only（yfinance/stooq）。**ローカル自己利用に限り、公開しないこと**。
+- **双方向フェールセーフ**。Notion とローカルへ独立に書き、**片方の保存が失敗してももう片方は必ず試み、どちらか一方にでも残ればその取得単位は成功扱い**（可用性最大化）。設計上の正本は Notion だが、ローカル API の可用性のため対称化。失敗は隠さず `notion_failed`/`mirror_failed` に計上し warning 記録、**両系統とも失敗した分だけ** failed に数える（§3-2）。原本 ⑤ のみ両系統失敗でその取得単位を中止（原本ゼロ＝トレーサビリティ喪失 §3-3）。実行履歴は D1 `jss_job_runs`。
+- 株価はローカルでは `(code, data_date)` を主キーに**時系列を蓄積**（Notion の②株価テクニカルは廃止）。
+- 株価は personal-only（yfinance/stooq）。**ローカル自己利用に限り、公開しないこと**。
 
 ```bash
 # 端末B: PostgreSQL に DB/ユーザーを用意（テーブルは初回ジョブ実行時に自動作成）
 createuser jp_stock --pwprompt && createdb -O jp_stock jp_stock
 
 # 端末A: クラウド(GitHub Secrets)or .env に LOCAL_DB_* を設定してジョブ実行（Notion と同時ミラー）
-nix develop -c uv run python -m jp_stock_pipeline.jobs.prices_daily                  # cloud（既定）
-nix develop -c uv run python -m jp_stock_pipeline.jobs.prices_daily --db-target lan  # 同一LAN
+nix develop -c uv run python -m jp_stock_pipeline.jobs.edinet_daily                  # cloud（既定）
+nix develop -c uv run python -m jp_stock_pipeline.jobs.edinet_daily --db-target lan  # 同一LAN
 
 # 端末B: API を起動（X-API-Key 認証は LOCAL_API_KEY）
 nix develop -c uv run uvicorn jp_stock_pipeline.local_store.api:app --host 0.0.0.0 --port 8000
@@ -69,10 +67,10 @@ nix develop -c uv run uvicorn jp_stock_pipeline.local_store.api:app --host 0.0.0
 | エンドポイント | 内容 |
 |---|---|
 | `GET /stocks` `GET /stocks/{code}` | ① 銘柄マスタ |
-| `GET /prices/{code}?from=&to=` | ② 株価テクニカル（時系列・data_date 降順） |
+| `GET /prices/{code}?from=&to=` | 株価（時系列・data_date 降順） |
 | `GET /financials/{code}` | ③ 財務サマリ |
 | `GET /disclosures?code=&doc_type=&from=&to=` | ④ 開示書類 |
-| `GET /raw` `GET /jobs` | ⑤原本メタ / ⑦ジョブログ |
+| `GET /raw` `GET /jobs` | ⑤原本メタ / ジョブログ |
 | `GET /facts?doc_id=&code=&element=&text_only=` | ⑧ XBRL 全ファクト（数値＋定性 textBlock・ローカル専用） |
 | `GET /facts/search?q=&code=` | ⑧ 定性 textBlock の日本語全文検索（PGroonga、無ければ ILIKE） |
 | `GET /health` | 死活確認（認証不要） / `GET /docs` Swagger UI |

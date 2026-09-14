@@ -48,12 +48,9 @@ jobs:
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DB_STOCK_MASTER: ${{ secrets.NOTION_DB_STOCK_MASTER }}
-          NOTION_DB_PRICES: ${{ secrets.NOTION_DB_PRICES }}
           NOTION_DB_FINANCIALS: ${{ secrets.NOTION_DB_FINANCIALS }}
           NOTION_DB_DISCLOSURES: ${{ secrets.NOTION_DB_DISCLOSURES }}
           NOTION_DB_RAW_FILES: ${{ secrets.NOTION_DB_RAW_FILES }}
-          NOTION_DB_EXPORTS: ${{ secrets.NOTION_DB_EXPORTS }}
-          NOTION_DB_JOB_LOG: ${{ secrets.NOTION_DB_JOB_LOG }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}

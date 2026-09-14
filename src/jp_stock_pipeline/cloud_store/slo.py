@@ -18,10 +18,10 @@
 
 ## なぜ営業日で加齢するか
 
-収集ジョブの cron は平日のみ（prices_daily `30 10 * * 1-5` / edinet_daily
-`0 12 * * 1-5` / supply_daily `17 3 * * 1-5` / tdnet_hourly `0 0-10 * * 1-5`）。
+収集ジョブの cron は平日のみ（edinet_daily `0 12 * * 1-5` /
+supply_daily `17 3 * * 1-5` / tdnet_hourly `0 0-10 * * 1-5`）。
 暦時間の 30h/48h をそのまま当てると、土曜に jsf_supply が黄、日曜〜月曜が赤、
-prices_daily / edinet / tdnet も日曜〜月曜が黄〜赤になる。**週 3 日鳴る通知は
+日足断面 / edinet / tdnet も日曜〜月曜が黄〜赤になる。**週 3 日鳴る通知は
 見なくなる通知**で、`jobs/ops_check.py` 冒頭のコメント自身が警戒している状態。
 だから日次データセットは土日を差し引いて加齢する。
 
@@ -98,7 +98,7 @@ _DAY = 24.0
 # 2026-09-12 の実測を踏まえた初期値。
 SLOS: tuple[FreshnessSlo, ...] = (
     FreshnessSlo(
-        "prices_daily", 30, 48,
+        "d1_core_stock_financials", 30, 48,
         "日次。実測 2.4h。営業日翌朝までに入っていれば緑",
         business_days=True,
     ),

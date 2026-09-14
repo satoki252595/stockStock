@@ -32,8 +32,6 @@ from jp_stock_pipeline.contracts.stock_code import (
     parse_stock_code,
     source_code_to_ticker,
 )
-from jp_stock_pipeline.transform.reconcile import normalize_code
-
 VECTORS_PATH = (
     Path(__file__).parent / "fixtures" / "contracts" / "stock-code-vectors.json"
 )
@@ -92,7 +90,7 @@ class TestCanonicalImplementation:
 
 @pytest.mark.parametrize("vector", VECTORS, ids=_ids())
 class TestCallSitesDelegate:
-    """取込 3 系統が共有実装へ委譲しきっていることを公開 API 側から確認する。
+    """取込 2 系統が共有実装へ委譲しきっていることを公開 API 側から確認する。
 
     片方だけ独自実装に戻ると落ちる。
     """
@@ -102,9 +100,6 @@ class TestCallSitesDelegate:
 
     def test_edinet_sec_code(self, vector):
         assert normalize_sec_code(vector["input"]) == vector["source_to_ticker"]
-
-    def test_reconcile_second_source_code(self, vector):
-        assert normalize_code(vector["input"]) == vector["source_to_ticker"]
 
 
 class TestUniverseGuardsReExport:

@@ -18,14 +18,13 @@ DEFAULT_PARENT_PAGE_ID = "205d74ff84cd809e92b4dd1adc5cf186"
 DEFAULT_NOTION_RPS = 2.5  # §6.1
 
 # DB論理キー → (環境変数名, Notion上のDBタイトル)
+# ②株価テクニカル・⑥時系列エクスポート・⑦収集ジョブログは廃止
+# (prices_daily / export_weekly 廃止、⑦は D1 jss_job_runs に一本化)。
 DB_REGISTRY: dict[str, tuple[str, str]] = {
     "stock_master": ("NOTION_DB_STOCK_MASTER", "① 銘柄マスタ"),
-    "prices": ("NOTION_DB_PRICES", "② 株価テクニカル"),
     "financials": ("NOTION_DB_FINANCIALS", "③ 財務サマリ"),
     "disclosures": ("NOTION_DB_DISCLOSURES", "④ 開示書類"),
     "raw_files": ("NOTION_DB_RAW_FILES", "⑤ 原本ファイル"),
-    "exports": ("NOTION_DB_EXPORTS", "⑥ 時系列エクスポート"),
-    "job_log": ("NOTION_DB_JOB_LOG", "⑦ 収集ジョブログ"),
 }
 
 
@@ -198,11 +197,6 @@ class Settings:
     notion_rps: float
     raw_data_dir: Path
     dry_run: bool
-    # stooq は 2026年時点でブラウザ検証(PoW)を返し CSV を一切返さない＝実質死亡。
-    # 既定 False で「死んだ第2ソース」を即 fast-fail し、PoW 計算と HTTP 往復を
-    # 丸ごと省く(reconcile_weekly の 46分タイムアウト / prices_daily フォールバックの
-    # 浪費を排除)。復活時は env STOOQ_ENABLED=true で従来挙動に戻る(コード変更不要)。
-    stooq_enabled: bool = False
     db_ids: dict[str, str] = field(default_factory=dict)
     local_store: LocalStoreSettings = field(
         default_factory=lambda: LocalStoreSettings(
@@ -255,7 +249,6 @@ def load_settings(*, dry_run: bool | None = None, env: dict[str, str] | None = N
         notion_rps=float(env.get("NOTION_RPS", DEFAULT_NOTION_RPS)),
         raw_data_dir=Path(env.get("RAW_DATA_DIR", "data/raw")),
         dry_run=resolved_dry_run,
-        stooq_enabled=_truthy(env.get("STOOQ_ENABLED")),
         db_ids=_load_db_ids(env),
         local_store=_load_local_store(env),
         cloud_store=_load_cloud_store(env),

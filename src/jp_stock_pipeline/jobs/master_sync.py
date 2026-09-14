@@ -206,7 +206,7 @@ def _detect_delistings(
         logger.warning("① マップ未取得のため上場廃止検知をスキップ (§3-2)")
         return
     # 安全弁: 取得コードが既存に対し極端に少ない＝異常取得とみなし一括廃止を防ぐ。
-    # 1件でも誤って全銘柄を listed=False にすると prices_daily が全停止するため (§3-2)。
+    # 1件でも誤って全銘柄を listed=False にすると全ジョブの取得が止まるため (§3-2)。
     if existing and len(fetched_codes) < MIN_CODELIST_COVERAGE * len(existing):
         ctx.add_failure(
             "codelist",

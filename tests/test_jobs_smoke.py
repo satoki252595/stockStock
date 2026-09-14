@@ -15,7 +15,6 @@ import re
 from datetime import date, datetime
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
 from conftest import fixture_path
@@ -24,13 +23,10 @@ from jp_stock_pipeline.collectors import (
     edinet,
     edinet_codelist,
     tdnet_yanoshin,
-    yfinance_prices,
 )
 from jp_stock_pipeline.jobs import (
     edinet_daily,
     master_sync,
-    prices_daily,
-    reconcile_weekly,
     runner,
     tdnet_hourly,
 )
@@ -169,10 +165,7 @@ class TestMasterSync:
 
         client = captured_clients[0]
         assert _ops_with_prop(client, S.MASTER_PROP_NAME) == []  # ① への書き込みなし
-        # ⑦ ジョブログには 失敗 が記録される
-        logs = _ops_with_prop(client, S.JOB_PROP_NAME)
-        assert len(logs) == 1
-        assert logs[0].payload["properties"][S.JOB_PROP_STATUS]["select"]["name"] == "失敗"
+        # 失敗終了する（実行履歴は D1 jss_job_runs。Notion ⑦ は廃止）
 
     def test_delisting_detection_marks_absent(self, monkeypatch, tmp_path, captured_clients):
         """コードリストから消えた銘柄を listed=False にする (§ Phase3)。
@@ -214,7 +207,9 @@ class TestMasterSync:
         # 消失検知は listed=False のみ。状態=上場廃止 は一次開示由来に一本化 (§3-1/§3-7)
         assert S.MASTER_PROP_STATUS not in props
 
-    def test_blast_radius_guard_blocks_mass_delisting(self, monkeypatch, tmp_path, captured_clients):
+    def test_blast_radius_guard_blocks_mass_delisting(
+        self, monkeypatch, tmp_path, captured_clients, caplog
+    ):
         """コードリストが既存の50%未満なら一括上場廃止せず中止する (§ Phase3 安全弁)。"""
         from jp_stock_pipeline.licensing import LicenseTag
         from jp_stock_pipeline.models import Provenance, StockMasterRecord, now_jst
@@ -239,7 +234,7 @@ class TestMasterSync:
             ]
         monkeypatch.setattr(NotionClient, "query_database", fake_query)
 
-        master_sync.main(["--dry-run"], env=_env(tmp_path))
+        code = master_sync.main(["--dry-run"], env=_env(tmp_path))
         client = captured_clients[0]
         # 上場廃止マーク (listed=False) が一切発行されない
         mass_delist = [
@@ -248,223 +243,9 @@ class TestMasterSync:
             and o.payload["properties"].get(S.MASTER_PROP_LISTED) == {"checkbox": False}
         ]
         assert mass_delist == []
-        # ⑦ に失敗が記録される（黙って中止せず可視化 §3-2）
-        logs = _ops_with_prop(client, S.JOB_PROP_NAME)
-        assert logs[0].payload["properties"][S.JOB_PROP_FAILED]["number"] >= 1
-
-
-class TestPricesDaily:
-    def test_dry_run_with_fixture_frames(self, monkeypatch, tmp_path, captured_clients):
-        csv_bytes = fixture_path("transform/yfinance_7203T_daily.csv").read_bytes()
-        df = pd.read_csv(fixture_path("transform/yfinance_7203T_daily.csv"))
-
-        def fake_batch(settings, codes, period="2y", **kwargs):
-            artifact = save_raw(
-                csv_bytes,
-                source=Source.YFINANCE,
-                datatype="daily_prices_batch",
-                scope="ALL",
-                data_date=date(2026, 6, 10),
-                url="fixture://prices/7203",
-                ext="csv",
-                license_tag=source_license(Source.YFINANCE),
-                base_dir=settings.raw_data_dir,
-            )
-            return artifact, {"7203": df}, []
-
-        monkeypatch.setattr(yfinance_prices, "fetch_daily_batch", fake_batch)
-        code = prices_daily.main(
-            ["--dry-run", "--codes", "7203", "--skip-valuation"], env=_env(tmp_path)
-        )
-        assert code == 0
-
-        client = captured_clients[0]
-        price_ops = _ops_with_prop(client, S.PRICE_PROP_RSI14)
-        assert len(price_ops) == 1
-        props = price_ops[0].payload["properties"]
-        # 計算値が実データから算出され、ライセンスは personal-only を継承 (§2.2)
-        assert props[S.PROP_LICENSE_TAG]["select"]["name"] == LicenseTag.PERSONAL_ONLY.value
-        assert 0 <= props[S.PRICE_PROP_RSI14]["number"] <= 100
-        assert props[S.PRICE_PROP_CLOSE]["number"] == pytest.approx(float(df["Close"].iloc[-1]))
-        # 原本 (⑤) は ② より先
-        raw_idx = next(
-            i for i, op in enumerate(client.ops)
-            if S.RAW_PROP_SHA256 in (op.payload.get("properties") or {})
-        )
-        price_idx = client.ops.index(price_ops[0])
-        assert raw_idx < price_idx
-
-    def test_all_sources_failed_is_recorded_as_failure(
-        self, monkeypatch, tmp_path, captured_clients
-    ):
-        """yfinance も stooq も失敗 → 欠損として記録、ダミーを書かない (§3-1/3-2)。"""
-        from jp_stock_pipeline.collectors import stooq_prices
-        from jp_stock_pipeline.http import FetchError
-
-        def empty_batch(settings, codes, period="2y", **kwargs):
-            artifact = save_raw(
-                b"code,date\n",  # 取得ゼロでも「取得単位」の原本は実在 (空応答の事実)
-                source=Source.YFINANCE,
-                datatype="daily_prices_batch",
-                scope="ALL",
-                data_date=date(2026, 6, 10),
-                url="fixture://prices/empty",
-                ext="csv",
-                license_tag=source_license(Source.YFINANCE),
-                base_dir=settings.raw_data_dir,
-            )
-            return artifact, {}, list(codes)
-
-        def stooq_fail(settings, code, **kwargs):
-            raise FetchError("テスト: stooq 取得失敗")
-
-        monkeypatch.setattr(yfinance_prices, "fetch_daily_batch", empty_batch)
-        monkeypatch.setattr(stooq_prices, "fetch_daily", stooq_fail)
-        code = prices_daily.main(
-            ["--dry-run", "--codes", "7203", "--skip-valuation"], env=_env(tmp_path)
-        )
-        assert code == 1  # processed=0 failed=1 → 失敗
-
-        client = captured_clients[0]
-        assert _ops_with_prop(client, S.PRICE_PROP_RSI14) == []  # ② に何も書かれない
-        logs = _ops_with_prop(client, S.JOB_PROP_NAME)
-        props = logs[0].payload["properties"]
-        assert props[S.JOB_PROP_FAILED]["number"] == 1
-        assert "7203" in props[S.JOB_PROP_FAILED_CODES]["rich_text"][0]["text"]["content"]
-
-    def test_split_jump_flags_needs_review(self, monkeypatch, tmp_path, captured_clients):
-        """直近に分割/併合の不連続がある銘柄は ② データ品質=要確認 (§ Phase1)。"""
-        dates = pd.date_range("2025-01-01", periods=60, freq="D")
-        series = [3000.0] * 30 + [1000.0] * 30  # 1→3分割相当の不連続
-        df = pd.DataFrame(
-            {"Date": dates, "Open": series, "High": series, "Low": series,
-             "Close": series, "Volume": [1_000_000.0] * 60}
-        )
-        csv_bytes = df.to_csv(index=False).encode()
-
-        def fake_batch(settings, codes, period="2y", **kwargs):
-            artifact = save_raw(
-                csv_bytes, source=Source.YFINANCE, datatype="daily_prices_batch",
-                scope="ALL", data_date=date(2025, 3, 1), url="fixture://split",
-                ext="csv", license_tag=source_license(Source.YFINANCE),
-                base_dir=settings.raw_data_dir,
-            )
-            return artifact, {"7203": df}, []
-
-        monkeypatch.setattr(yfinance_prices, "fetch_daily_batch", fake_batch)
-        code = prices_daily.main(
-            ["--dry-run", "--codes", "7203", "--skip-valuation"], env=_env(tmp_path)
-        )
-        assert code == 0
-        client = captured_clients[0]
-        price_ops = _ops_with_prop(client, S.PRICE_PROP_CLOSE)
-        assert len(price_ops) == 1
-        quality = price_ops[0].payload["properties"][S.PROP_QUALITY]["select"]["name"]
-        assert quality == "要確認"  # 自動調整はせず人間判断に委ねる (§3-5)
-
-    def test_notion_read_failure_degrades_without_crash(
-        self, monkeypatch, tmp_path, captured_clients
-    ):
-        """① relation read(load_stock_master_map)が Notion 障害で失敗しても、
-        ジョブは crash せず ② を書き切る（双方向フェールセーフの read 側 §3-2）。
-        Notion 断でもローカル PG へ ② を残せるようにするための degrade。"""
-        csv_bytes = fixture_path("transform/yfinance_7203T_daily.csv").read_bytes()
-        df = pd.read_csv(fixture_path("transform/yfinance_7203T_daily.csv"))
-
-        def fake_batch(settings, codes, period="2y", **kwargs):
-            artifact = save_raw(
-                csv_bytes, source=Source.YFINANCE, datatype="daily_prices_batch",
-                scope="ALL", data_date=date(2026, 6, 10), url="fixture://prices/7203",
-                ext="csv", license_tag=source_license(Source.YFINANCE),
-                base_dir=settings.raw_data_dir,
-            )
-            return artifact, {"7203": df}, []
-
-        def selective_query(self, db_id, *args, **kwargs):
-            # ① stock_master への relation read のみ Notion 障害を模す
-            # (⑤ SHA256 重複クエリ等は正常＝空リストで返す)
-            if "stock_master" in str(db_id):
-                raise RuntimeError("テスト: ① への Notion read 全断")
-            return []
-
-        monkeypatch.setattr(yfinance_prices, "fetch_daily_batch", fake_batch)
-        monkeypatch.setattr(NotionClient, "query_database", selective_query)
-        code = prices_daily.main(
-            ["--dry-run", "--codes", "7203", "--skip-valuation"], env=_env(tmp_path)
-        )
-        assert code == 0  # ① read 失敗でも crash しない（degrade して続行）
-        client = captured_clients[0]
-        # master_id 解決不能でも ② は書かれる（relation 空で継続）
-        assert len(_ops_with_prop(client, S.PRICE_PROP_RSI14)) == 1
-
-    def _patch_history_fixtures(self, monkeypatch, tmp_path):
-        """履歴子DB系テストの共通差し替え。"""
-        from jp_stock_pipeline.notion import price_history
-
-        csv_bytes = fixture_path("transform/yfinance_7203T_daily.csv").read_bytes()
-        df = pd.read_csv(fixture_path("transform/yfinance_7203T_daily.csv"))
-
-        def fake_batch(settings, codes, period="2y", **kwargs):
-            artifact = save_raw(
-                csv_bytes, source=Source.YFINANCE, datatype="daily_prices_batch",
-                scope="ALL", data_date=date(2026, 6, 10), url="fixture://prices/7203",
-                ext="csv", license_tag=source_license(Source.YFINANCE),
-                base_dir=settings.raw_data_dir,
-            )
-            return artifact, {"7203": df}, []
-
-        monkeypatch.setattr(yfinance_prices, "fetch_daily_batch", fake_batch)
-        monkeypatch.setattr(
-            price_history,
-            "load_stock_master_state",
-            lambda client, settings: {
-                "7203": price_history.StockMasterState(page_id="master-7203")
-            },
-        )
-
-    def test_history_child_db_is_off_by_default(
-        self, monkeypatch, tmp_path, captured_clients
-    ):
-        """既定では履歴子DBを作らない（Notion 日次リクエストの 71% を占めるため）。
-
-        同じ日足とテクニカルは R2 daily/{code}.json（10年）とローカルPG prices に
-        あり、子DBは3番目のコピーになる。復活させたいときは --enable-history。
-        """
-        self._patch_history_fixtures(monkeypatch, tmp_path)
-        code = prices_daily.main(
-            ["--dry-run", "--codes", "7203", "--skip-valuation"], env=_env(tmp_path)
-        )
-        assert code == 0
-        client = captured_clients[0]
-        assert [op for op in client.ops if op.op == "create_database"] == []
-        # ② 本体は従来どおり書かれる
-        assert len(_ops_with_prop(client, S.PRICE_PROP_RSI14)) == 1
-
-    def test_history_child_db_appended_when_explicitly_enabled(
-        self, monkeypatch, tmp_path, captured_clients
-    ):
-        """--enable-history を渡せば従来どおり子DBを作り同日分を追記する。"""
-        from jp_stock_pipeline.notion import price_history
-
-        del price_history  # 共通差し替えで使うのでここでは参照しない
-        self._patch_history_fixtures(monkeypatch, tmp_path)
-        code = prices_daily.main(
-            ["--dry-run", "--codes", "7203", "--skip-valuation", "--enable-history"],
-            env=_env(tmp_path),
-        )
-        assert code == 0
-        client = captured_clients[0]
-        db_ops = [op for op in client.ops if op.op == "create_database"]
-        assert len(db_ops) == 1
-        assert db_ops[0].payload["parent"]["page_id"] == "master-7203"
-        assert db_ops[0].payload["title"][0]["text"]["content"] == S.HISTORY_DB_TITLE
-        hist_rows = [
-            op for op in client.ops
-            if op.op == "create_page"
-            and S.HISTORY_PROP_DATE_TITLE in (op.payload.get("properties") or {})
-        ]
-        assert len(hist_rows) == 1
-        assert S.PRICE_PROP_RSI14 in hist_rows[0].payload["properties"]
+        # 中止を警告ログに出す（黙って中止せず可視化 §3-2。履歴は D1 jss_job_runs）
+        assert "上場廃止検知を中止" in caplog.text
+        assert code == 0  # processed>0 & failed>0 = 一部失敗は exit 0
 
 
 class TestTdnetHourly:
@@ -585,13 +366,14 @@ class TestEdinetDailyTargetDate:
         assert edinet_daily.default_target_date(started) == expected
 
     def test_empty_document_list_is_recorded_as_failure(
-        self, monkeypatch, tmp_path, captured_clients
+        self, monkeypatch, tmp_path
     ):
         """一覧 0 件を「成功」で黙って終えない (§3-2 欠損を隠さない)。
 
         取得単位が 1 件も成立していないので runner の規則どおり「失敗」= 終了コード 1。
         国民の祝日は EDINET 提出が 0 件のため、この経路で毎回赤くなるのは想定内で、
         エラー通知が未実装の現状ではこれが唯一の生存確認を兼ねる (README に明記)。
+        実行履歴は D1 jss_job_runs に残る（Notion ⑦ は廃止）。
         """
         payload = b'{"metadata": {"status": "200"}, "results": []}'
 
@@ -615,98 +397,14 @@ class TestEdinetDailyTargetDate:
         )
         assert code == 1  # 黙って success で終わらない（11営業日の無言欠測の再発防止）
 
-        client = captured_clients[0]
-        job_rows = _ops_with_prop(client, S.JOB_PROP_FAILED)
-        assert job_rows, "⑦ ジョブログ行が記録されていない"
-        props = job_rows[-1].payload["properties"]
-        assert props[S.JOB_PROP_FAILED]["number"] == 1
-        assert props[S.JOB_PROP_STATUS]["select"]["name"] == "失敗"
-        failed_codes = props[S.JOB_PROP_FAILED_CODES]["rich_text"][0]["text"]["content"]
-        assert "EDINET一覧_2026-09-10" in failed_codes
-
-
-class TestReconcileWeekly:
-    """第2ソース(stooq)による②終値突合の純粋ロジック検証 (§3-5)。"""
-
-    def test_stooq_close_on_matches_date(self):
-        df = pd.DataFrame(
-            {"Date": [date(2026, 3, 10), date(2026, 3, 11)], "Close": [3000.0, 3100.0]}
-        )
-        assert reconcile_weekly.stooq_close_on(df, date(2026, 3, 11)) == 3100.0
-
-    def test_stooq_close_on_absent_date_returns_none(self):
-        df = pd.DataFrame({"Date": [date(2026, 3, 10)], "Close": [3000.0]})
-        assert reconcile_weekly.stooq_close_on(df, date(2026, 3, 11)) is None
-        # 空フレーム・基準日 None も None（捏造しない §3-1）
-        assert reconcile_weekly.stooq_close_on(pd.DataFrame(), date(2026, 3, 11)) is None
-
-    def test_build_reconcile_inputs_flags_only_deviation(self):
-        from jp_stock_pipeline.transform import reconcile
-
-        # ② スナップショット: (page_id, code, close, data_date)
-        snapshot = [
-            ("p1", "7203", 3000.0, date(2026, 3, 11)),  # stooq 3100 → 乖離
-            ("p2", "6758", 2000.0, date(2026, 3, 11)),  # stooq 2001 → 閾内
-            ("p3", "9999", 100.0, date(2026, 3, 11)),   # stooq 無し → 対象外
-        ]
-        stooq_by_code = {
-            "7203": pd.DataFrame({"Date": [date(2026, 3, 11)], "Close": [3100.0]}),
-            "6758": pd.DataFrame({"Date": [date(2026, 3, 11)], "Close": [2001.0]}),
-        }
-        ours, theirs_df, skipped = reconcile_weekly.build_reconcile_inputs(
-            snapshot, stooq_by_code
-        )
-        assert skipped == ["9999"]  # stooq 未取得は突合対象外 (§3-1)
-        discrepancies = reconcile.reconcile_prices(theirs_df, ours, close_col="Close")
-        assert [d.code for d in discrepancies] == ["7203"]
-
-    def test_build_reconcile_inputs_date_mismatch_skipped(self):
-        """② 基準日と同一日の stooq 行が無ければ突合しない (§3-3 実在しない対を作らない)。"""
-        snapshot = [("p1", "7203", 3000.0, date(2026, 3, 11))]
-        stooq_by_code = {
-            "7203": pd.DataFrame({"Date": [date(2026, 3, 10)], "Close": [3100.0]})
-        }
-        ours, theirs_df, skipped = reconcile_weekly.build_reconcile_inputs(
-            snapshot, stooq_by_code
-        )
-        assert skipped == ["7203"]
-        assert ours == []
-
-    def test_dry_run_completes_with_empty_snapshot(self, tmp_path):
-        """dry-run の合成DB IDでは②クエリが空 → 突合対象0で正常完走 (§10・ネットワーク非依存)。"""
-        code = reconcile_weekly.main(["--dry-run"], env=_env(tmp_path))
-        assert code == 0
-
-    def test_stooq_disabled_early_exits_without_snapshot_or_fetch(
-        self, monkeypatch, tmp_path, captured_clients
-    ):
-        """stooq 無効(既定)時は ② スナップショット読みも fetch ループも行わず即終了する
-        (成果ゼロの 46分タイムアウトを排除 §3-2)。"""
-        from jp_stock_pipeline.collectors import stooq_prices
-
-        def _no_snapshot(*a, **k):
-            raise AssertionError("stooq 無効時に ② スナップショット読みへ到達してはならない")
-
-        def _no_fetch(*a, **k):
-            raise AssertionError("stooq 無効時に fetch_daily へ到達してはならない")
-
-        monkeypatch.setattr(reconcile_weekly, "load_price_snapshot", _no_snapshot)
-        monkeypatch.setattr(stooq_prices, "fetch_daily", _no_fetch)
-        # STOOQ_ENABLED を設定しない env = 既定 False
-        code = reconcile_weekly.main(["--dry-run"], env=_env(tmp_path))
-        assert code == 0  # 突合スキップは正常完了（設定状態でCIを赤にしない）
-
 
 class TestWorkflowCrons:
     """§8.2 スケジュール (JST) と cron (UTC) の対応検証。"""
 
     EXPECTED = {
         "master_sync": "0 21 1 * *",
-        "prices_daily": "30 10 * * 1-5",
         "tdnet_hourly": "0 0-10 * * 1-5",
         "edinet_daily": "0 12 * * 1-5",
-        "reconcile_weekly": "0 0 * * 6",
-        "export_weekly": "0 0 * * 0",
         "supply_daily": "17 3 * * 1-5",
     }
 

@@ -11,8 +11,8 @@
 # ## cron を 10:00 UTC から動かした理由（前提が逆だった）
 #
 # 旧版のコメントは「日次ジョブが出揃った後。10:00 UTC」と書いていたが、
-# **prices_daily は 10:30 UTC 開始（timeout 150分）、edinet_daily は 12:00 UTC 開始
-# （timeout 120分）で ops_check より後**だった。つまり毎日「まだ走っていない
+# **edinet_daily は 12:00 UTC 開始（timeout 120分）で ops_check より後**だった。
+# つまり毎日「まだ走っていない
 # ジョブの鮮度」を測って赤にしていた。日次ジョブが全部終わり得る 14:00 UTC の
 # 後ろへ移す（14:30 UTC = 23:30 JST。JST の暦日を跨がない時刻に置くことで、
 # データ基準日ベースの加齢が 1 日ずれないようにしてある）。
@@ -52,7 +52,7 @@ name: ops_check
 
 on:
   schedule:
-    # 日次ジョブ（prices_daily 10:30 / edinet_daily 12:00 UTC）が出揃った後。
+    # 日次ジョブ（edinet_daily 12:00 UTC）が出揃った後。
     # 14:30 UTC = 23:30 JST
     - cron: "30 14 * * *"
   workflow_dispatch:
@@ -91,7 +91,6 @@ jobs:
         id: probe
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DB_JOB_LOG: ${{ secrets.NOTION_DB_JOB_LOG }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
@@ -104,7 +103,6 @@ jobs:
         if: always()
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DB_JOB_LOG: ${{ secrets.NOTION_DB_JOB_LOG }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
@@ -142,7 +140,6 @@ jobs:
         if: always()
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DB_JOB_LOG: ${{ secrets.NOTION_DB_JOB_LOG }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
@@ -185,7 +182,6 @@ jobs:
         if: always()
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DB_JOB_LOG: ${{ secrets.NOTION_DB_JOB_LOG }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
