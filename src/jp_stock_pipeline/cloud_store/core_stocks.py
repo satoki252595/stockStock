@@ -274,7 +274,8 @@ INDEX_LIST_SQL = (
     f"SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='{TABLE}'"
 )
 
-# `core_stocks.id` を参照する子表（2026-09-12 実測で14表。設計書の12は誤り）。
+# `core_stocks.id` を参照する子表（2026-09-12 実測で14表。設計書の12は誤り。
+# L-52 で `swing_stock_screening` を抜いて 13 表）。
 # FK 宣言があるものは `stock_id` が NOT NULL。
 CHILD_TABLES: tuple[str, ...] = (
     "core_stock_annual_financials",
@@ -286,7 +287,6 @@ CHILD_TABLES: tuple[str, ...] = (
     "swing_daily_ohlcv",
     "swing_entry_signals",
     "swing_stock_indicators",
-    "swing_stock_screening",
     "yuho_documents",
     "yuho_order_facts",
     "yuho_overseas_facts",
