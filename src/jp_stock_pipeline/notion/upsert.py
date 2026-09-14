@@ -669,22 +669,13 @@ def _master_map_from_pages(pages: list[dict]) -> dict[str, str]:
     return _oldest_page_ids(pages, code_of)
 
 
-def load_edinet_code_map(client: NotionClient, settings: Settings) -> dict[str, str]:
-    """① 全行の {EDINETコード: 銘柄コード} を一括取得する。
+def _edinet_map_from_pages(pages: list[dict]) -> dict[str, str]:
+    """① のページ配列から {EDINETコード: 銘柄コード} を組み立てる（純粋関数）。
 
     大量保有報告書 (350/360) は**保有者が提出する**ため `secCode` が入らない
     (実測 992 件中 956 件が空)。対象会社は `issuerEdinetCode` にしか出ないので、
     EDINETコードから銘柄コードへ引くための逆引きが要る。
-
-    load_stock_master_map と同じ ① の全件スキャンを使うので、呼び出し側で
-    まとめれば追加の API 呼び出しは発生しない。
     """
-    pages = client.query_database(settings.db_id("stock_master"))
-    return _edinet_map_from_pages(pages)
-
-
-def _edinet_map_from_pages(pages: list[dict]) -> dict[str, str]:
-    """① のページ配列から {EDINETコード: 銘柄コード} を組み立てる（純粋関数）。"""
     out: dict[str, str] = {}
     for page in pages:
         props = page.get("properties", {})

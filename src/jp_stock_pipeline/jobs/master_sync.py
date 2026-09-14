@@ -119,19 +119,11 @@ def execute(ctx: JobContext) -> None:
 
 
 def _sector33_store(ctx: JobContext) -> D1Store | None:
-    """`core_stocks` がある D1 への接続。資格情報が無ければ None。
-
-    `KABULAB_D1_DATABASE_ID` があればそちらを使う（`freshness_probe` /
-    `core_stocks_migrate` と同じ解決。`core_stocks` は移行元 kabulab-cf 所有の表）。
-    """
+    """`core_stocks` がある D1（正本）への接続。資格情報が無ければ None。"""
     settings = ctx.settings.cloud_store
     if not settings.d1_enabled():
         return None
-    return D1Store(
-        settings,
-        writer=JOB_NAME,
-        database_id=settings.kabulab_d1_database_id or settings.d1_database_id,
-    )
+    return D1Store(settings, writer=JOB_NAME)
 
 
 def _sync_sector33(ctx: JobContext, records: list) -> None:

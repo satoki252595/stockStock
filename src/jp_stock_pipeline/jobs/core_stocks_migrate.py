@@ -51,10 +51,7 @@ def _store(ctx: JobContext) -> D1Store | None:
             " --dry-run では ctx.cloud が張られないので使えない",
         )
         return None
-    database_id = (
-        cloud.settings.kabulab_d1_database_id or cloud.settings.d1_database_id
-    )
-    return D1Store(cloud.settings, writer=JOB_NAME, database_id=database_id)
+    return D1Store(cloud.settings, writer=JOB_NAME)
 
 
 def _observe(store: D1Store) -> dict:

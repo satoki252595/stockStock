@@ -62,7 +62,10 @@
 
 - **計算指標の汚染防止**: `personal-only`データを入力に含む計算結果も`personal-only`を継承する（最も厳しいタグを継承）
 - 公開ページ・エクスポートAPIは`commercial-ok`（+`factual-cite`のメタデータ）のみをフィルタして提供する実装とする
-- **商用化判断時のチェックリスト**（実装に含める）: J-Quants Pro契約可否、JPX TDnet API契約可否、株価ベンダー選定、公開前の各規約再確認
+- **商用化判断時のチェックリスト**（公開・商用ローンチ前に必ず実行。旧 `licensing.COMMERCIALIZATION_CHECKLIST` を文章化）:
+  JPX TDnet API（有料）の契約可否 / 商用利用可能な株価データベンダーの選定（yfinance/stooq を置換。例: J-Quants Pro 等の商用契約）/
+  公開対象が commercial-ok / factual-cite（メタデータのみ）でフィルタされていることの検証 / 各ソースの規約原文の再確認（必要に応じて専門家確認）/
+  出典表記（EDINET 等）と編集・加工の明記が全公開面に存在することの確認 / 免責（情報提供のみ・投資助言ではない）が公開面に明記されていることの確認
 
 > 注: 本評価は2026-06-10時点の各公開規約の調査に基づく整理であり、法的助言ではない。商用ローンチ前に必ず原文規約の確認（必要に応じ専門家確認）を行うこと。
 
@@ -140,8 +143,9 @@ APIコール1回 or ダウンロード1回で得たレスポンス/ファイル 
 | EDINET XBRL(zip) | zipそのまま | **CSV + Parquet**（財務項目をフラットなtidy形式: 銘柄コード, 期間, 項目, 値, 単位, コンテキスト） | EDINET type=5のCSVを優先取得し、無い書類はlxmlでパース |
 | EDINET/TDnet PDF | PDFそのまま | **テキスト(.txt)**（抽出可能な場合のみ。抽出不能ならスキップし変換版なしと記録） | pypdfium2等。OCRはしない（真実性優先） |
 | APIレスポンスJSON | JSONそのまま | **CSV + Parquet**（正規化テーブル） | pandas |
-| xls/xlsx | そのまま | **CSV** | openpyxl/pandas |
 | 株価履歴 | 取得生CSV/JSON | **Parquet**（型付き: date, code, OHLCV, adj） | pandas |
+
+（xls/xlsx → CSV 変換は L-12 で削除。本番経路で未使用のため）
 
 - 命名規則: 原本 `{source}_{datatype}_{scope}_{YYYYMMDD}.{ext}` / 変換版 `{同}_converted.{csv|parquet|txt}`
 - 変換版は原本と同じDB行のファイルプロパティに併置（1行=1取得単位、ファイル複数添付）し、「変換状態」プロパティで管理
@@ -274,7 +278,7 @@ jp-stock-data-pipeline/
 │   ├── config.py          # NOTION_TOKEN, EDINET_API_KEY, DB IDs
 │   ├── licensing.py       # ライセンスタグ定義・継承ルール(§2.2)・公開フィルタ
 │   ├── collectors/        # edinet / tdnet_yanoshin(+tdnet_official_fallback) / yfinance_prices / stooq_prices / edinet_codelist
-│   ├── convert/           # xbrl_to_csv / json_to_parquet / pdf_to_text / xls_to_csv(値不変・§5.2)
+│   ├── convert/           # xbrl_to_csv / json_to_parquet / pdf_to_text(値不変・§5.2)
 │   ├── transform/         # technicals.py / normalize.py / reconcile.py(突合検証§3-5)
 │   ├── notion/            # client.py(2.5req/sスロットル) / schema.py(7DB+ビュー冪等セットアップ) / upsert.py / file_upload.py(20MB/マルチパート)
 │   └── jobs/              # スケジュール単位エントリポイント(全てdry-run対応)

@@ -15,7 +15,6 @@ import pytest
 
 from jp_stock_pipeline.collectors import tdnet_yanoshin as ty
 from jp_stock_pipeline.config import load_settings
-from jp_stock_pipeline.http import FetchError
 from jp_stock_pipeline.licensing import LicenseTag
 from jp_stock_pipeline.models import Source, now_jst
 from jp_stock_pipeline.rawstore import sha256_bytes
@@ -210,39 +209,3 @@ def test_list_disclosures_recentはdata_dateなし(tmp_path, monkeypatch):
     assert artifact.scope == "recent"
     assert len(records) == len(json.loads(raw)["items"])
 
-
-# ---------------------------------------------------------------------------
-# fetch_disclosure_pdf（実PDFフィクスチャ）
-# ---------------------------------------------------------------------------
-
-
-def test_fetch_disclosure_pdf(tmp_path, monkeypatch):
-    pdf = fixture_path("tdnet/disclosure_140120260610567733.pdf").read_bytes()
-    payload = _load("tdnet/yanoshin_list_20260610.json")
-    records = ty.parse_list_payload(payload, fetched_at=now_jst())
-    rec = next(r for r in records if r.doc_id == "140120260610567733")
-
-    fetched_urls: list[str] = []
-
-    def stub(url, **kw):
-        fetched_urls.append(url)
-        return _StubResponse(pdf)
-
-    monkeypatch.setattr(ty, "fetch", stub)
-    artifact = ty.fetch_disclosure_pdf(_settings(tmp_path), rec)
-
-    assert fetched_urls == [rec.source_url]
-    assert artifact.datatype == "tdnet_pdf"
-    assert artifact.scope == rec.doc_id  # doc_id でファイル名衝突を防ぐ
-    assert artifact.license_tag is LicenseTag.FACTUAL_CITE
-    assert artifact.local_path.read_bytes() == pdf  # 無加工 (§5.2)
-    assert artifact.data_date == rec.disclosed_at.date()
-
-
-def test_fetch_disclosure_pdf_PDF以外は原本にしない(tmp_path, monkeypatch):
-    """エラーページ等を PDF 原本として保存しない（ダミー原本の禁止 §3）。"""
-    payload = _load("tdnet/yanoshin_list_20260610.json")
-    rec = ty.parse_list_payload(payload, fetched_at=now_jst())[0]
-    monkeypatch.setattr(ty, "fetch", lambda url, **kw: _StubResponse(b"<html>error</html>"))
-    with pytest.raises(FetchError):
-        ty.fetch_disclosure_pdf(_settings(tmp_path), rec)

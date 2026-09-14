@@ -9,7 +9,6 @@ yfinance info は実フィクスチャを使用する。
 
 from __future__ import annotations
 
-import json
 from datetime import date
 
 import pandas as pd
@@ -23,10 +22,7 @@ from jp_stock_pipeline.transform.normalize import (
     derive_fiscal_period_end,
     parse_numeric,
     tidy_to_financial_record,
-    yf_info_to_valuation,
 )
-
-from conftest import fixture_path
 
 TIDY_COLUMNS = [
     "code", "doc_id", "element", "context_ref", "period_start",
@@ -299,24 +295,6 @@ class TestDerivations:
         ])
         record = tidy_to_financial_record(tidy, "7203", prov(), disclosure_type="修正")
         assert record.disclosure_type == "修正"
-
-
-class TestYfValuation:
-    def test_real_info_fixture(self):
-        """実フィクスチャ (7203.T info, 2026-06-10 取得) で抽出を検証。"""
-        info = json.loads(fixture_path("transform/yfinance_7203T_info.json").read_text())
-        val = yf_info_to_valuation(info)
-        assert val["per"] == pytest.approx(info["trailingPE"])
-        assert val["pbr"] == pytest.approx(info["priceToBook"])
-        assert val["market_cap"] == info["marketCap"]
-        # yfinance 1.x は % 単位 (実フィクスチャで 3.53 = 3.53% を確認)
-        assert val["dividend_yield_pct"] == pytest.approx(info["dividendYield"])
-        assert 0 < val["dividend_yield_pct"] < 15
-
-    def test_missing_keys_stay_none(self):
-        assert yf_info_to_valuation({}) == {
-            "per": None, "pbr": None, "market_cap": None, "dividend_yield_pct": None,
-        }
 
 
 class TestInterimDisclosureType:

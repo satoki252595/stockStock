@@ -13,12 +13,8 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from typing import TYPE_CHECKING, Any
 
 from .r2 import R2Store
-
-if TYPE_CHECKING:
-    from ..models import SupplyRecord
 
 logger = logging.getLogger(__name__)
 
@@ -28,26 +24,6 @@ SCHEMA_VERSION = 1
 CONTRACT: dict[str, tuple[str, ...]] = {
     "$": ("code", "schema", "updated", "series"),
 }
-
-
-def _point(record: "SupplyRecord") -> dict[str, Any]:
-    """系列 1 点。値が None のキーは落とす。
-
-    欠測は「キーの不在」で表し、実値の 0 とは区別される (§3-1 推測で埋めない)。
-    4,351 銘柄 × 多数の点になるので、null を書かないぶんサイズも小さくなる。
-    """
-    point: dict[str, Any] = {
-        "d": record.data_date.isoformat(),
-        "ex": record.exchange or None,
-        "loan_bal": record.loan_bal,
-        "loan_chg": record.loan_chg,
-        "stock_bal": record.stock_bal,
-        "stock_chg": record.stock_chg,
-        "ratio": record.ratio,
-        "turn_days": record.turn_days,
-    }
-    point.update(record.extra or {})
-    return {k: v for k, v in point.items() if v is not None}
 
 
 def merge_series(

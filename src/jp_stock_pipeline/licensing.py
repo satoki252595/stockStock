@@ -110,13 +110,3 @@ ATTRIBUTION: dict[Source, str] = {
     Source.EDINET: "出典: EDINET（金融庁）。本データは EDINET 公表情報を編集・加工して作成。",
     Source.TDNET: "出典: TDnet（東京証券取引所 適時開示情報閲覧サービス）。原文は各社開示資料。",
 }
-
-# 商用化判断時のチェックリスト (§2.2。公開・商用ローンチ前に必ず実行)
-COMMERCIALIZATION_CHECKLIST: tuple[str, ...] = (
-    "JPX TDnet API（有料）の契約可否を確認する",
-    "商用利用可能な株価データベンダーを選定する（yfinance/stooq を置換。例: J-Quants Pro 等の商用契約。廃止した無料APIとは別物）",
-    "公開対象が commercial-ok / factual-cite(メタデータのみ) でフィルタされていることを検証する",
-    "各ソースの規約原文を再確認する（必要に応じて専門家確認）",
-    "出典表記（EDINET 等）と編集・加工の明記が全公開面に存在することを確認する",
-    "免責（情報提供のみ・投資助言ではない）が公開面に明記されていることを確認する",
-)

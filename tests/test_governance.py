@@ -96,7 +96,7 @@ class TestCoverageDoesNotScanRows:
     def test_判定は列名だけで行の値を受け取らない(self) -> None:
         """`coverage()` の入力は表名と DDL だけ。行を渡す口が無い。"""
         report = G.coverage(_observed())
-        assert report.clean, report.failures
+        assert report.failures == ()
 
 
 class TestFailOpenClosedBoundary:
@@ -104,7 +104,7 @@ class TestFailOpenClosedBoundary:
         """対向リポジトリの migration ごとに毎日赤くする検査は読まれなくなる。"""
         observed = dict(_observed(), swing_new_table="CREATE TABLE swing_new_table (a TEXT)")
         report = G.coverage(observed)
-        assert report.clean, report.failures
+        assert report.failures == ()
         assert any("swing_new_table" in w for w in report.warnings), report.warnings
 
     def test_宣言にあって本番に無い表は失敗させる(self) -> None:
@@ -112,7 +112,7 @@ class TestFailOpenClosedBoundary:
         observed = _observed()
         del observed["swing_daily_ohlcv"]
         report = G.coverage(observed)
-        assert not report.clean
+        assert report.failures != ()
         assert any("swing_daily_ohlcv" in f for f in report.failures)
 
     def test_内部表は未分類として報告しない(self) -> None:
@@ -122,7 +122,7 @@ class TestFailOpenClosedBoundary:
             _cf_KV="CREATE TABLE _cf_KV (k TEXT)",
         )
         report = G.coverage(observed)
-        assert report.clean, report.failures
+        assert report.failures == ()
         assert not [w for w in report.warnings if "d1_migrations" in w or "_cf_KV" in w]
 
     def test_行タグ前提なのに列が無ければ失敗させる(self) -> None:
@@ -130,14 +130,14 @@ class TestFailOpenClosedBoundary:
         observed = dict(_observed())
         observed["jss_supply_latest"] = "CREATE TABLE jss_supply_latest (code TEXT)"
         report = G.coverage(observed)
-        assert not report.clean
+        assert report.failures != ()
         assert any("license_tag" in f for f in report.failures)
 
     def test_列地図にあって本番に無い列は失敗させる(self) -> None:
         observed = dict(_observed())
         observed["core_stocks"] = CORE_STOCKS_DDL.replace("`sector33` TEXT, ", "")
         report = G.coverage(observed)
-        assert not report.clean
+        assert report.failures != ()
         assert any("sector33" in f for f in report.failures)
 
     def test_タグ未宣言の列は名前つきで警告する(self) -> None:
@@ -162,15 +162,15 @@ class TestFailOpenClosedBoundary:
             S.MIXED_LICENSE_COLUMNS, "swing_daily_ohlcv", {"close": LicenseTag.PERSONAL_ONLY}
         )
         report = G.coverage(_observed())
-        assert not report.clean
+        assert report.failures != ()
         assert any("食い違う" in f for f in report.failures)
 
 
 # 本番 D1 (`kabulab-cf`) の表名スナップショット。2026-09-13 に読み取り専用の
 # `SELECT name FROM sqlite_master WHERE type='table'` で取得した 32 件から、
 # 内部表 `_cf_KV` を除いた 31 件（`p_momentum` は同日 0011 で追加）のうち、
-# DROP する `finmath_price_snapshot` / `finmath_daily_ohlcv`（kabulab-cf
-# drizzle/d1/0012。`governance.RETIRED_TABLES`）を除いた 29 件。`TABLE_LICENSE` の登録漏れを検出するために
+# DROP 済みの `finmath_price_snapshot` / `finmath_daily_ohlcv`（kabulab-cf
+# drizzle/d1/0012）を除いた 29 件。`TABLE_LICENSE` の登録漏れを検出するために
 # **宣言とは独立した観測値**として置く（宣言から導くとテストが自明になる）。
 PROD_TABLE_NAMES: frozenset[str] = frozenset(
     {
@@ -186,63 +186,6 @@ PROD_TABLE_NAMES: frozenset[str] = frozenset(
         "yutai_benefits", "yutai_genres",
     }
 )
-
-
-class TestRetiredTables:
-    """削除する表を地図から外した後、本番の DROP の前後どちらでも赤くしない。
-
-    地図の変更（main へのマージ）と本番の `DROP TABLE`（人が手で流す）は同時に
-    起きないので、両方の順序を固定する。
-    """
-
-    def test_削除予定の表は地図に載っていない(self) -> None:
-        assert set(G.RETIRED_TABLES) == {"finmath_price_snapshot", "finmath_daily_ohlcv"}
-        assert not set(G.RETIRED_TABLES) & set(G.TABLE_LICENSE)
-        assert not set(G.RETIRED_TABLES) & PROD_TABLE_NAMES
-
-    def test_DROP_前_本番に残っていても失敗させず名前つきで警告する(self) -> None:
-        """地図の変更が先に入った窓。未登録の表と同じ文言にしない。"""
-        observed = dict(_observed())
-        for name in G.RETIRED_TABLES:
-            observed[name] = f"CREATE TABLE {name} (id INTEGER PRIMARY KEY, code TEXT)"
-        report = G.coverage(observed)
-        assert report.clean, report.failures
-        retiring = [w for w in report.warnings if "削除予定の表がまだ本番にある" in w]
-        assert len(retiring) == 1, report.warnings
-        for name in G.RETIRED_TABLES:
-            assert name in retiring[0], name
-        assert not [w for w in report.warnings if "地図に無い表" in w], report.warnings
-
-    def test_DROP_後_本番に無くても失敗させない(self) -> None:
-        observed = dict(_observed())
-        for name in G.RETIRED_TABLES:
-            observed.pop(name, None)
-        report = G.coverage(observed)
-        assert report.clean, report.failures
-        assert not [w for w in report.warnings if "削除予定" in w], report.warnings
-
-    def test_削除予定と地図の両方に載せたら失敗させる(self, monkeypatch) -> None:
-        """本番から消えたときに failure かどうかが読み方次第になるのを防ぐ。"""
-        monkeypatch.setitem(
-            G.TABLE_LICENSE,
-            "finmath_daily_ohlcv",
-            G._uniform(LicenseTag.PERSONAL_ONLY, "Yahoo", "テスト"),
-        )
-        report = G.coverage(_observed())
-        assert not report.clean
-        assert any("両方に載っている" in f for f in report.failures), report.failures
-
-    def test_本物の未登録の表は従来どおり地図に無い表として警告する(self) -> None:
-        """削除予定の除外が未知の表の検出まで黙らせていないこと。"""
-        observed = dict(
-            _observed(),
-            finmath_price_snapshot="CREATE TABLE finmath_price_snapshot (id INTEGER)",
-            swing_new_table="CREATE TABLE swing_new_table (a TEXT)",
-        )
-        report = G.coverage(observed)
-        unknown = [w for w in report.warnings if "地図に無い表" in w]
-        assert len(unknown) == 1 and "swing_new_table" in unknown[0], report.warnings
-        assert "finmath_price_snapshot" not in unknown[0]
 
 
 class TestProductionSnapshot:
@@ -266,7 +209,7 @@ class TestProductionSnapshot:
         for name in PROD_TABLE_NAMES:
             observed.setdefault(name, f"CREATE TABLE {name} (id INTEGER PRIMARY KEY)")
         report = G.coverage(observed)
-        assert report.clean, report.failures
+        assert report.failures == ()
         assert not [w for w in report.warnings if "地図に無い表" in w], report.warnings
 
     def test_JPX_の業種を持つ表を_personal_only_にしている(self) -> None:
@@ -386,9 +329,8 @@ class TestWriterClaimContract:
     def test_鮮度表の_writer_が_claim_と食い違わない(self) -> None:
         """`jss_dataset_freshness.writer` と `jss_writer_claims` の突合（§1.3-3）。
 
-        `core_stocks` / `yutai_benefits` はどちらも stockStock のジョブ名
-        （`master_sync` / `yutai_backup`）を書いていたが、実際に行を書いている
-        のは kabulab-cf で、`yutai_backup` はこの表を読むだけである。
+        `core_stocks` / `yutai_benefits` はどちらも stockStock のジョブ名を
+        書いていたが、実際に行を書いているのは kabulab-cf である。
         """
         from jp_stock_pipeline.cloud_store.datasets import DATASET_SOURCE_BY_NAME
 

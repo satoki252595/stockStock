@@ -148,9 +148,6 @@ class CloudStoreSettings:
     r2_secret_access_key: str | None = None
     cf_api_token: str | None = None          # D1 REST 用（R2 は S3 互換キーを使う）
     d1_database_id: str | None = None
-    # 移行元 kabulab-cf の D1。⑨優待の LLM 派生値を退避するときだけ読む（読み取り専用）。
-    # 未設定なら yutai_backup が no-op になる。
-    kabulab_d1_database_id: str | None = None
     bucket_timeseries: str = DEFAULT_R2_BUCKET_TIMESERIES
     bucket_raw: str = DEFAULT_R2_BUCKET_RAW
     bucket_supply: str = DEFAULT_R2_BUCKET_SUPPLY
@@ -182,7 +179,6 @@ def _load_cloud_store(env: dict[str, str]) -> CloudStoreSettings:
         r2_secret_access_key=env.get("R2_SECRET_ACCESS_KEY") or None,
         cf_api_token=env.get("CF_API_TOKEN") or None,
         d1_database_id=env.get("CF_D1_DATABASE_ID") or None,
-        kabulab_d1_database_id=env.get("KABULAB_D1_DATABASE_ID") or None,
         bucket_timeseries=env.get("R2_BUCKET_TIMESERIES") or DEFAULT_R2_BUCKET_TIMESERIES,
         bucket_raw=env.get("R2_BUCKET_RAW") or DEFAULT_R2_BUCKET_RAW,
         bucket_supply=env.get("R2_BUCKET_SUPPLY") or DEFAULT_R2_BUCKET_SUPPLY,

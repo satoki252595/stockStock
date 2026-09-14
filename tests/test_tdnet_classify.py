@@ -184,7 +184,7 @@ def test_corporate_action_attrs_only_for_relevant_types():
 class TestParticleInsertedSplitConsolidation:
     """「株式の分割」のように助詞「の」を挟む実開示表記を拾う。
 
-    KW_SPLIT="株式分割" の単純部分一致では拾えなかった実例が
+    「株式分割」の単純部分一致では拾えなかった実例が
     2026-09-11時点のTDnetフィクスチャ全3,137タイトル中に1件存在した
     （「株式の分割、定款の一部変更、期末配当予想の修正 及び株主優待制度の
     変更に関するお知らせ」）。この1件は比率を伴わず配当修正語も併記されて

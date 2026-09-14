@@ -125,7 +125,7 @@ kabulab-cf `services/vwap-analysis/lib/margin.ts` の `parseMarginText` は、
 | モジュール | 提供物 |
 |---|---|
 | `config.py` | `load_settings()` → `Settings`（トークン・APIキー・`db_id(key)`・`notion_rps`・`dry_run`・`raw_data_dir`） |
-| `licensing.py` | `LicenseTag`, `source_license()`, `inherit()`, `is_publishable()`, `is_metadata_publishable()`, `ATTRIBUTION`, `COMMERCIALIZATION_CHECKLIST` |
+| `licensing.py` | `LicenseTag`, `source_license()`, `inherit()`, `is_publishable()`, `is_metadata_publishable()`, `ATTRIBUTION` |
 | `models.py` | `Source`, `DataQuality`, `ConvertStatus`, `JST`, `now_jst()`, `Provenance`, `RawArtifact`, `StockMasterRecord`, `PriceTechnicalRecord`, `FinancialSummaryRecord`, `DisclosureRecord` |
 | `rawstore.py` | `save_raw()`, `raw_filename()`, `converted_filename()`, `sha256_bytes()` |
 | `http.py` | `fetch()`（リトライ3回・指数バックオフ）, `FetchError` |
@@ -143,7 +143,7 @@ DB論理キー（`Settings.db_id()` / schema.py / upsert.py で共通）:
 | B: EDINET | `collectors/edinet.py`, `collectors/edinet_codelist.py`, `convert/xbrl_to_csv.py`, `scripts/capture_edinet.py`, `tests/test_edinet*.py`, `tests/test_xbrl_to_csv.py`, `tests/fixtures/edinet/` |
 | C: TDnet | `collectors/tdnet_yanoshin.py`, `collectors/tdnet_official_fallback.py`, `scripts/capture_tdnet.py`, `tests/test_tdnet*.py`, `tests/fixtures/tdnet/` |
 | D: 株価系 | 廃止（`collectors/yfinance_prices.py`, `collectors/stooq_prices.py`, `scripts/capture_prices.py`, `tests/test_yfinance*.py`, `tests/test_stooq*.py` ごと） |
-| E: 変換(非XBRL) | `convert/json_to_parquet.py`, `convert/pdf_to_text.py`, `convert/xls_to_csv.py`, `scripts/capture_convert_fixtures.py`, `tests/test_convert*.py`, `tests/fixtures/convert/` |
+| E: 変換(非XBRL) | `convert/json_to_parquet.py`, `convert/pdf_to_text.py`, `scripts/capture_convert_fixtures.py`, `tests/test_convert*.py`, `tests/fixtures/convert/`（`xls_to_csv.py` と対応テストは廃止） |
 | F: transform | `transform/normalize.py`, `scripts/capture_transform_fixtures.py`, `tests/test_normalize.py`, `tests/fixtures/transform/`（`technicals.py` / `reconcile.py` と対応テストは廃止） |
 | G: ジョブ+CI | `jobs/*.py`, `.github/workflows/*.yml`, `tests/test_jobs*.py`（A〜F完了後に実装） |
 
