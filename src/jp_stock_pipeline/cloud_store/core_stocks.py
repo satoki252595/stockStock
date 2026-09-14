@@ -300,9 +300,10 @@ CHILD_TABLES: tuple[str, ...] = (
 SOFT_CHILD_TABLES: tuple[str, ...] = ("jss_financials",)
 
 # FK 宣言を持たないが `stock_id` でぶら下がる表（宣言が無いので DB が守らない）。
-# `p_momentum.stock_id` は PRIMARY KEY（NOT NULL）のため NULL 除外は要らない。
-# 本番 sqlite_master で `stock_id` を持つ 16 表（CHILD 14 + SOFT 1 + ここ 1）を確認。
-NOFK_CHILD_TABLES: tuple[str, ...] = ("p_momentum",)
+# `p_momentum.stock_id` / `p_yuho_growth.stock_id` は PRIMARY KEY（NOT NULL）のため
+# NULL 除外は要らない。本番 sqlite_master で `stock_id` を持つ 16 表
+# （CHILD 13 + SOFT 1 + ここ 2）を確認（p_yuho_growth は P4 適用後）。
+NOFK_CHILD_TABLES: tuple[str, ...] = ("p_momentum", "p_yuho_growth")
 
 ALL_CHECKED_TABLES: tuple[str, ...] = CHILD_TABLES + SOFT_CHILD_TABLES + NOFK_CHILD_TABLES
 

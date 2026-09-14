@@ -109,6 +109,10 @@
       "kind": "uniform",
       "tag": "personal-only"
     },
+    "p_yuho_growth": {
+      "kind": "uniform",
+      "tag": "commercial-ok"
+    },
     "rsi_percentile": {
       "kind": "uniform",
       "tag": "personal-only"

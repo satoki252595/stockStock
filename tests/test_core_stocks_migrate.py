@@ -183,22 +183,23 @@ class TestExpectedColumns:
 
 
 class TestOrphanCheck:
-    def test_13子表と_soft_参照1表と宣言無し1表を数える(self) -> None:
+    def test_13子表と_soft_参照1表と宣言無し2表を数える(self) -> None:
         # L-52 で swing_stock_screening を抜いて 13 表。
         assert len(cs.CHILD_TABLES) == 13  # FK 宣言のある子表
         assert cs.SOFT_CHILD_TABLES == ("jss_financials",)
-        assert cs.NOFK_CHILD_TABLES == ("p_momentum",)
-        assert len(cs.ALL_CHECKED_TABLES) == 15
+        assert cs.NOFK_CHILD_TABLES == ("p_momentum", "p_yuho_growth")
+        assert len(cs.ALL_CHECKED_TABLES) == 16
         joined = " ".join(cs.orphan_check_statements())
         for table in cs.ALL_CHECKED_TABLES:
             assert f"FROM {table} c" in joined
         assert not _FORBIDDEN_RE.search(joined)
 
-    def test_日次は宣言の無い2表だけを数える(self) -> None:
-        assert cs.DAILY_CHECK_TABLES == ("jss_financials", "p_momentum")
+    def test_日次は宣言の無い3表だけを数える(self) -> None:
+        assert cs.DAILY_CHECK_TABLES == ("jss_financials", "p_momentum", "p_yuho_growth")
         joined = " ".join(cs.daily_orphan_check_statements())
         assert "FROM jss_financials c" in joined
         assert "FROM p_momentum c" in joined
+        assert "FROM p_yuho_growth c" in joined
         for table in cs.CHILD_TABLES:
             assert f"FROM {table} c" not in joined
 
@@ -247,8 +248,8 @@ class TestOrphanCheck:
         assert statements, "孤児検査の文が空"
         for sql in statements:
             assert sql.count("UNION ALL") <= MAX_COMPOUND_SELECT_TERMS - 1, sql
-        assert len(statements) == 3  # 15 表 / 5 項（L-52 で screening を抜いた）
-        assert len(cs.daily_orphan_check_statements()) == 1  # 2 表
+        assert len(statements) == 4  # 16 表 / 5 項（K4b で p_yuho_growth を足した）
+        assert len(cs.daily_orphan_check_statements()) == 1  # 3 表
 
 
 class _RecordingD1Store(RecordingD1):

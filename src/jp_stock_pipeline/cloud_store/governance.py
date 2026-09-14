@@ -154,6 +154,14 @@ TABLE_LICENSE: dict[str, TableLicense] = {
         _YAHOO,
         "kabulab-cf src/shared/db/projection-schema.ts（2026-09-13 本番 sqlite_master で作成を確認）",
     ),
+    # L2 投影（kabulab-cf K4b / 0017 で作成予定）。yuho_order_facts /
+    # yuho_overseas_facts の CAGR・YoY・比率・地域比率を銘柄ごとに 1 行へ畳んだ
+    # もので、値の出所は EDINET 有報 XBRL のまま commercial-ok。
+    "p_yuho_growth": _uniform(
+        LicenseTag.COMMERCIAL_OK,
+        "EDINET 有価証券報告書 XBRL からの派生（licensing.inherit で commercial-ok を継承）",
+        "kabulab-cf src/shared/db/projection-schema.ts（P4 適用後に本番 sqlite_master で作成を確認する）",
+    ),
     "otakara_stock_financials": _uniform(LicenseTag.PERSONAL_ONLY, _YAHOO, _CHILD),
     "otakara_stock_scores": _uniform(LicenseTag.PERSONAL_ONLY, _YAHOO, _CHILD),
     # --- kabulab-cf 所有の開示・優待 ---------------------------------------
@@ -254,9 +262,10 @@ ROW_TAG_COLUMN = "license_tag"
 # `finmath_daily_ohlcv`）は kabulab-cf drizzle/d1/0012 で DROP 済み（本番
 # sqlite_master で不在を確認）。L-20 で `jss_notion_pages` を足して 30 表。
 # L-52 で `swing_stock_screening` を引いて 29 表（kabulab-cf 0015 で DROP）。
-# 表を消す側は stockStock の地図を先に main へ（B2）。DROP までの間は本番の
-# 残存表が「未知の表 = warning」で出るだけ（failure ではない）。
-OBSERVED_TABLE_COUNT = 29
+# K4b で `p_yuho_growth` を足して 30 表（kabulab-cf 0017 で CREATE 予定）。
+# 表を足す側も stockStock の地図を先に main へ（B2）。CREATE までの間は地図の
+# 余剰分が「未知の表 = warning」で出るだけ（failure ではない）。
+OBSERVED_TABLE_COUNT = 30
 
 # 本番 `sqlite_master` から除く名前。SQLite と D1 の内部表。
 _INTERNAL_PREFIXES = ("sqlite_", "_cf_", "d1_", "__drizzle")
