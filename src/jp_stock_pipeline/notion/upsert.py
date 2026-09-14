@@ -265,9 +265,9 @@ def stock_master_filter(code: str) -> dict:
 
 # ③ の旧開示種別。書き込み前のキー検索で、ラベル変更前の行も拾うために使う。
 # 決算期末 >= 2024-06-30 の第2四半期は、以前は「2Q」で書いていた
-# (transform/normalize.interim_disclosure_type)。移行スクリプト
-# (scripts/migrate_halfyear_labels.py) より先にラベル変更が本番に出ても、書き手が
-# 旧行を採用して「中間」へ書き直すので、同じ期が 2 行に割れない。
+# (transform/normalize.interim_disclosure_type)。既存行の移行 (2026-09 実施済み)
+# より先にラベル変更が本番に出ても、書き手が旧行を採用して「中間」へ書き直すので、
+# 同じ期が 2 行に割れない。
 # 期末 >= 2024-06-30 の「2Q」は新しいコードでは作られないので、移行後も害は無い。
 # normalize を import しないのは、upsert を pandas に依存させないため。
 LEGACY_DISCLOSURE_TYPES: dict[str, tuple[str, ...]] = {"中間": ("2Q",)}
