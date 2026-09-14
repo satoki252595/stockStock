@@ -143,7 +143,7 @@ kabulab-cf 側の対応版は同リポジトリの `docs/HANDOFF-2026-09.md`（�
 ### C. ライセンス境界（実効防御 = kabulab-cf）
 - **C1** `public-columns.ts`: `PUBLISH_JPX_DERIVED_COLUMNS=false` は 1 箇所のみ、`publicMarketColumn=NULL`、`publicSectorColumn=sector33`、`sector` へフォールバックしない。`SECTOR_DAILY_PUBLIC_KEY_SINCE` は一時ガードで L-64 の DELETE 後に撤去。
 - **C2** `core-stocks-license-boundary.test.ts` の 5 検査はパス・識別子ベース（`PUBLIC_SURFACE` 12 ファイル）。公開面ファイルの移動/改名は `PUBLIC_SURFACE` と `source-scan.ts` を同時更新。
-- **C3** `activeEquityCondition()` は WHERE/ON のみ・select しない。`instrument_type` の書き手は `universe.ts` だけ。取込は `ingestUniverseCondition()`。
+- **C3** `activeEquityCondition()` は WHERE/ON のみ・select しない。`instrument_type` の書き手は `universe.ts` だけ。取込は `disclosureIngestCondition()` (X-05 で改名)。
 - **C4** `yutai_benefits.description` は公開面 `app.ts` で `name="description"` と `g.description` 以外に出さない。`src/routes`・`src/views` は存在してはならない。stockStock 側は `RESTRICTED_COLUMNS` と `yutai.EXPORT_COLUMNS`。
 - **C5** 業種集計は分母・分子 `activeEquityCondition`、キー `sector33`、カバレッジ <90% で書かない、当日分のみ delete→insert。
 - **C6** `notion-archive` は ir-catalog 公開ページの `fetchPageFileUrl` が使う（消すと PDF リンクが死ぬ）。L-44 で消すのは旧フラット DB 退避コードだけ。
