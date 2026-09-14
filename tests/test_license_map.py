@@ -11,15 +11,13 @@
 
 from __future__ import annotations
 
-import sqlite3
-
 import pytest
+
+from _doubles import SqliteD1
 
 from jp_stock_pipeline.cloud_store import core_stocks as cs
 from jp_stock_pipeline.cloud_store import governance as G
 from jp_stock_pipeline.cloud_store import schema as S
-from jp_stock_pipeline.cloud_store.d1 import D1Error, D1Store
-from jp_stock_pipeline.config import CloudStoreSettings
 from jp_stock_pipeline.jobs import license_map, runner
 
 from test_core_stocks_migrate import APPLIED_DDL, PROD_DDL
@@ -32,8 +30,8 @@ _D1_ENV = {
 }
 
 
-class _FakeStore(D1Store):
-    """`query()` だけをローカル sqlite へ差し替えた D1Store。
+class _FakeStore(SqliteD1):
+    """sqlite 裏打ちの D1Store + 本番形の core_stocks と kabulab-cf 所有表。
 
     `upsert()` を自前で書かずに継承するのが要点。上書きすると
     「ON CONFLICT の SET 句をどう組み立てるか」という本番の振る舞いを
@@ -42,10 +40,7 @@ class _FakeStore(D1Store):
     """
 
     def __init__(self) -> None:
-        super().__init__(CloudStoreSettings(), writer="test")
-        self.con = sqlite3.connect(":memory:")
-        for stmt in S.SCHEMA_STATEMENTS:
-            self.con.execute(stmt)
+        super().__init__(ddl=S.SCHEMA_STATEMENTS)
         # `core_stocks` は本番の実 DDL + P4a の 12 列。地図が本番の 21 列すべてを
         # 見るので、ここを削ると網羅性の検査が意味を失う。
         self.con.executescript(PROD_DDL)
@@ -59,25 +54,6 @@ class _FakeStore(D1Store):
                 continue
             self.con.execute(f"CREATE TABLE IF NOT EXISTS {name} (id INTEGER PRIMARY KEY)")
         self.con.commit()
-        self.sql_log: list[str] = []
-
-    def query(self, sql: str, params: list | None = None, *, idempotent: bool = True):
-        self.sql_log.append(sql)
-        try:
-            cur = self.con.execute(sql, params or [])
-        except sqlite3.Error as exc:
-            raise D1Error(f"sqlite: {exc} sql={sql[:120]!r}") from exc
-        cols = [d[0] for d in cur.description] if cur.description else []
-        rows = [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
-        self.con.commit()
-        return rows
-
-    @property
-    def write_sql(self) -> list[str]:
-        return [
-            s for s in self.sql_log
-            if s.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE", "REPLACE"))
-        ]
 
     @property
     def reference_writes(self) -> list[str]:

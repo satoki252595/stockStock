@@ -2,7 +2,10 @@
 
 依頼者: satoki252595 / 設計: Claude Opus 5
 
-前提の事実は [CLOUDFLARE-CONSOLIDATION.md](CLOUDFLARE-CONSOLIDATION.md)（既存資産の棚卸し・重複マトリクス・触ってはいけないリソース）を参照。
+前提の事実だった `CLOUDFLARE-CONSOLIDATION.md`（2026-09-11 の棚卸し）は、
+「stockStock は Cloudflare リソースを 1 つも持たない」前提が S1–S5 で崩れた
+（R2/D1 書き込み・Worker が実装済み）ため 2026-09-14 に削除した。
+既存資産の現況は `governance.TABLE_LICENSE`（コードが正）を見ること。
 
 ## ユーザー決定（この設計の与件）
 

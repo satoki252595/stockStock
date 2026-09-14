@@ -12,6 +12,8 @@ from datetime import date, datetime
 
 import pytest
 
+from conftest import notion_env, provenance
+
 from jp_stock_pipeline.config import load_settings
 from jp_stock_pipeline.licensing import LicenseTag
 from jp_stock_pipeline.models import (
@@ -26,13 +28,7 @@ from jp_stock_pipeline.models import (
 from jp_stock_pipeline.notion import schema as S
 from jp_stock_pipeline.notion import upsert
 
-ENV = {
-    "NOTION_DB_IDS_FILE": "/nonexistent/db_ids.json",
-    "NOTION_DB_STOCK_MASTER": "db-master",
-    "NOTION_DB_FINANCIALS": "db-fin",
-    "NOTION_DB_DISCLOSURES": "db-disc",
-    "NOTION_DB_RAW_FILES": "db-raw",
-}
+ENV = notion_env()
 
 FETCHED_AT = datetime(2026, 6, 10, 19, 30, tzinfo=JST)
 
@@ -42,16 +38,8 @@ def make_settings():
 
 
 def prov(**overrides) -> Provenance:
-    kwargs = dict(
-        source=Source.EDINET,
-        license_tag=LicenseTag.COMMERCIAL_OK,
-        data_date=date(2026, 6, 10),
-        fetched_at=FETCHED_AT,
-        raw_page_id="raw-page-id-123",
-        quality=DataQuality.OK,
-    )
-    kwargs.update(overrides)
-    return Provenance(**kwargs)
+    overrides.setdefault("raw_page_id", "raw-page-id-123")
+    return provenance(**overrides)
 
 
 class TestProvenanceProperties:

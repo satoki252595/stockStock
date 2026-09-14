@@ -7,38 +7,22 @@ Notion ① の {コード: page_id} 写しを D1 で持つ。tdnet_hourly の毎
 
 from __future__ import annotations
 
-import sqlite3
 from types import SimpleNamespace
 
 import pytest
 
+from _doubles import SqliteD1
+
 from jp_stock_pipeline.cloud_store import notion_pages as npages
 from jp_stock_pipeline.cloud_store import schema as S
-from jp_stock_pipeline.cloud_store.d1 import D1Error, D1Store
+from jp_stock_pipeline.cloud_store.d1 import D1Error
 from jp_stock_pipeline.config import CloudStoreSettings
 from jp_stock_pipeline.jobs import master_sync
 from jp_stock_pipeline.notion import schema as NS
 
 
-class _FakeStore(D1Store):
-    def __init__(self) -> None:
-        super().__init__(CloudStoreSettings(), writer="test")
-        self.con = sqlite3.connect(":memory:")
-        for stmt in S.SCHEMA_STATEMENTS:
-            self.con.execute(stmt)
-        self.con.commit()
-        self.sql_log: list[str] = []
-
-    def query(self, sql: str, params: list | None = None, *, idempotent: bool = True):
-        self.sql_log.append(sql)
-        try:
-            cur = self.con.execute(sql, params or [])
-        except sqlite3.Error as exc:
-            raise D1Error(f"sqlite: {exc} sql={sql[:120]!r}") from exc
-        cols = [d[0] for d in cur.description] if cur.description else []
-        rows = [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
-        self.con.commit()
-        return rows
+def _FakeStore() -> SqliteD1:
+    return SqliteD1(ddl=S.SCHEMA_STATEMENTS)
 
 
 class TestRoundTrip:
@@ -157,11 +141,11 @@ class TestSyncNotionPages:
         """写しが古くても読み手はスキャンへ落ちる。同期は止めない。"""
         from jp_stock_pipeline.cloud_store.d1 import D1Error as _D1Error
 
-        class _Boom(_FakeStore):
+        class _Boom(SqliteD1):
             def upsert(self, *a, **k):
                 raise _D1Error("boom")
 
-        store = _Boom()
+        store = _Boom(ddl=S.SCHEMA_STATEMENTS)
         monkeypatch.setattr(master_sync, "D1Store", lambda *a, **k: store)
         ctx = _master_ctx()
         master_sync._sync_notion_pages(ctx, _entries(), True)

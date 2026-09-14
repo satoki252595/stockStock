@@ -12,20 +12,18 @@ import json
 from datetime import date
 
 import pytest
-from conftest import fixture_path
+from conftest import dry_settings, fixture_path
 
 from jp_stock_pipeline.collectors import edinet as mod
-from jp_stock_pipeline.config import ConfigError, load_settings
+from jp_stock_pipeline.config import ConfigError
 from jp_stock_pipeline.http import FetchError
 from jp_stock_pipeline.licensing import LicenseTag
 from jp_stock_pipeline.models import Source
 
 
 def _settings(tmp_path, api_key: str | None = "test-key"):
-    env = {"RAW_DATA_DIR": str(tmp_path)}
-    if api_key:
-        env["EDINET_API_KEY"] = api_key
-    return load_settings(env=env, dry_run=True)
+    extra = {"EDINET_API_KEY": api_key} if api_key else {}
+    return dry_settings(tmp_path, **extra)
 
 
 class TestDocTypeMapping:

@@ -11,6 +11,8 @@ from datetime import date, datetime, timedelta
 
 import pytest
 
+from conftest import notion_env
+
 from jp_stock_pipeline.config import load_settings
 from jp_stock_pipeline.licensing import LicenseTag
 from jp_stock_pipeline.models import (
@@ -26,13 +28,7 @@ from jp_stock_pipeline.notion import schema as S
 from jp_stock_pipeline.notion import upsert
 from jp_stock_pipeline.notion.client import NotionRequestError
 
-ENV = {
-    "NOTION_DB_IDS_FILE": "/nonexistent/db_ids.json",
-    "NOTION_DB_STOCK_MASTER": "db-master",
-    "NOTION_DB_FINANCIALS": "db-fin",
-    "NOTION_DB_DISCLOSURES": "db-disc",
-    "NOTION_DB_RAW_FILES": "db-raw",
-}
+ENV = notion_env()
 SAME_MINUTE = "2026-09-13T00:00:00.000Z"
 
 

@@ -10,6 +10,7 @@ from datetime import date
 
 import pytest
 
+from _doubles import FakeR2
 from conftest import fixture_path
 
 from jp_stock_pipeline.cloud_store import supply
@@ -74,25 +75,8 @@ class TestBuildPayload:
         assert "jsf_zandaka" in payload["series"]
 
 
-class _FakeR2:
-    def __init__(self, objects=None):
-        self.objects = dict(objects or {})
-        self.writer = "supply_daily"
-        self.puts = []
-
-    def get_json(self, key):
-        if key in self.objects:
-            return self.objects[key], True
-        return None, False
-
-    def put_json_guarded(self, key, payload, *, contract=None):
-        from jp_stock_pipeline.cloud_store.guards import check_no_regression
-
-        check_no_regression(
-            self.objects.get(key), payload, writer=self.writer, contract=contract
-        )
-        self.objects[key] = payload
-        self.puts.append(key)
+def _FakeR2(objects: dict | None = None) -> FakeR2:
+    return FakeR2(objects, writer="supply_daily")
 
 
 class TestUpsertSupplySeries:

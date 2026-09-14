@@ -14,9 +14,9 @@ from __future__ import annotations
 import re
 import sqlite3
 
+from _doubles import RecordingD1
+
 from jp_stock_pipeline.cloud_store import core_stocks as cs
-from jp_stock_pipeline.cloud_store.d1 import D1Store
-from jp_stock_pipeline.config import CloudStoreSettings
 from jp_stock_pipeline.jobs import core_stocks_migrate as csm
 
 # core_stocks は本番 D1 の実 DDL（2026-09-12 に sqlite_master から取得）。
@@ -250,16 +250,8 @@ class TestOrphanCheck:
         assert len(cs.daily_orphan_check_statements()) == 1  # 2 表
 
 
-class _RecordingD1Store(D1Store):
-    """`query()` を「SQL を積むだけ」に差し替えた D1Store（通信しない）。"""
-
-    def __init__(self) -> None:
-        super().__init__(CloudStoreSettings(), writer="test")
-        self.sqls: list[str] = []
-
-    def query(self, sql: str, params: list | None = None) -> list:  # type: ignore[override]
-        self.sqls.append(sql)
-        return []
+class _RecordingD1Store(RecordingD1):
+    """発行文の形だけ見る（通信しない）。"""
 
 
 class TestObserveShape:

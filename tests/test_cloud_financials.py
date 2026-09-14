@@ -20,9 +20,11 @@ from datetime import date, datetime, timezone
 
 import pytest
 
+from _doubles import SqliteD1
+
 from jp_stock_pipeline.cloud_store import financials as F
 from jp_stock_pipeline.cloud_store import schema as S
-from jp_stock_pipeline.cloud_store.d1 import MAX_BOUND_PARAMS, D1Error
+from jp_stock_pipeline.cloud_store.d1 import D1Error
 from jp_stock_pipeline.licensing import LicenseTag
 from jp_stock_pipeline.models import (
     DataQuality,
@@ -63,32 +65,17 @@ def _record(
     )
 
 
-class FakeStore:
-    """`D1Store` の最小スタブ。本物の DDL を流したローカル sqlite に当てる。"""
+class FakeStore(SqliteD1):
+    """sqlite 裏打ちの `D1Store` + `core_stocks(id, code)` の最小形。"""
 
     def __init__(self) -> None:
-        self.con = sqlite3.connect(":memory:")
-        for statement in S.SCHEMA_STATEMENTS:
-            self.con.execute(statement.strip())
-        self.con.execute(
-            "CREATE TABLE core_stocks (id INTEGER PRIMARY KEY, code TEXT NOT NULL)"
+        super().__init__(
+            ddl=(
+                *S.SCHEMA_STATEMENTS,
+                "CREATE TABLE core_stocks (id INTEGER PRIMARY KEY, code TEXT NOT NULL)",
+            ),
+            seed=(("INSERT INTO core_stocks (id, code) VALUES (11, '7203')", ()),),
         )
-        self.con.execute("INSERT INTO core_stocks (id, code) VALUES (11, '7203')")
-        self.con.commit()
-        self.sqls: list[str] = []
-
-    def query(self, sql: str, params: list | None = None, *, idempotent: bool = True):
-        self.sqls.append(sql)
-        if params and len(params) > MAX_BOUND_PARAMS:
-            raise D1Error(f"バインドパラメータ上限超過: {len(params)}")
-        cur = self.con.execute(sql, params or [])
-        cols = [d[0] for d in cur.description] if cur.description else []
-        rows = [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
-        self.con.commit()
-        return rows
-
-    def rows_per_request(self, column_count: int) -> int:
-        return max(1, MAX_BOUND_PARAMS // column_count)
 
     # --- テスト用の読み出し ---
     def fin_rows(self) -> list[dict]:
@@ -347,7 +334,7 @@ class TestRowShape:
         store = FakeStore()
         with pytest.raises(D1Error, match="値の数が列数と違う"):
             F.write(store, [[1, 2, 3]])
-        assert store.sqls == []
+        assert store.sql_log == []
 
     def test_chunking_respects_the_bind_limit(self) -> None:
         """33 列 → 3 行/リクエスト。超えると実行時に落ちる。"""
@@ -362,20 +349,20 @@ class TestRowShape:
             for i in range(7)
         ]
         assert F.write(store, rows) == 7
-        assert len(store.sqls) == 3  # 3 + 3 + 1
+        assert len(store.sql_log) == 3  # 3 + 3 + 1
         assert len(store.fin_rows()) == 7
 
     def test_empty_rows_is_a_noop(self) -> None:
         store = FakeStore()
         assert F.write(store, []) == 0
-        assert store.sqls == []
+        assert store.sql_log == []
 
 
 class TestStockId:
     def test_resolves_through_the_unique_code_index(self) -> None:
         store = FakeStore()
         assert F.resolve_stock_id(store, "7203") == 11
-        assert store.sqls == [F.STOCK_ID_SQL]
+        assert store.sql_log == [F.STOCK_ID_SQL]
 
     def test_absent_code_is_null_not_an_error(self) -> None:
         """ETF・優先株は core_stocks に無い。NULL が正しい（孤児ではない）。"""
@@ -385,21 +372,21 @@ class TestStockId:
     def test_empty_code_does_not_query(self) -> None:
         store = FakeStore()
         assert F.resolve_stock_id(store, "") is None
-        assert store.sqls == []
+        assert store.sql_log == []
 
     def test_cache_avoids_repeating_the_same_select(self) -> None:
         store = FakeStore()
         cache: dict[str, int | None] = {}
         assert F.resolve_stock_id(store, "7203", cache=cache) == 11
         assert F.resolve_stock_id(store, "7203", cache=cache) == 11
-        assert len(store.sqls) == 1
+        assert len(store.sql_log) == 1
 
     def test_cache_remembers_the_miss_too(self) -> None:
         store = FakeStore()
         cache: dict[str, int | None] = {}
         F.resolve_stock_id(store, "1234", cache=cache)
         F.resolve_stock_id(store, "1234", cache=cache)
-        assert len(store.sqls) == 1
+        assert len(store.sql_log) == 1
 
 
 class TestCountRows:
@@ -545,7 +532,7 @@ class TestPrefetchStockIds:
         store.con.commit()
         cache: dict[str, int | None] = {}
         assert F.prefetch_stock_ids(store, ["7203", "6758"], cache=cache) == 2
-        assert len(store.sqls) == 1
+        assert len(store.sql_log) == 1
         assert cache == {"7203": 11, "6758": 12}
 
     def test_misses_are_cached_so_they_do_not_fall_back_per_code(self) -> None:
@@ -555,13 +542,13 @@ class TestPrefetchStockIds:
         F.prefetch_stock_ids(store, ["1234"], cache=cache)
         assert cache == {"1234": None}
         F.resolve_stock_id(store, "1234", cache=cache)
-        assert len(store.sqls) == 1
+        assert len(store.sql_log) == 1
 
     def test_already_cached_codes_are_not_queried_again(self) -> None:
         store = FakeStore()
         cache: dict[str, int | None] = {"7203": 11}
         assert F.prefetch_stock_ids(store, ["7203"], cache=cache) == 0
-        assert store.sqls == []
+        assert store.sql_log == []
 
     def test_batches_stay_within_the_bind_limit(self) -> None:
         store = FakeStore()
@@ -569,14 +556,14 @@ class TestPrefetchStockIds:
         cache: dict[str, int | None] = {}
         assert F.prefetch_stock_ids(store, codes, cache=cache) == 200
         # 90 件/回 → 200 件は 3 回。1 件ずつなら 200 回だった。
-        assert len(store.sqls) == 3
+        assert len(store.sql_log) == 3
         assert len(cache) == 200
 
     def test_blank_codes_are_dropped(self) -> None:
         store = FakeStore()
         cache: dict[str, int | None] = {}
         assert F.prefetch_stock_ids(store, ["", None], cache=cache) == 0
-        assert store.sqls == []
+        assert store.sql_log == []
 
     def test_full_table_map_is_not_used(self) -> None:
         """`SELECT id, code FROM core_stocks` は 4,445 行を毎回読む。
@@ -586,7 +573,7 @@ class TestPrefetchStockIds:
         store = FakeStore()
         cache: dict[str, int | None] = {}
         F.prefetch_stock_ids(store, ["7203"], cache=cache)
-        assert "WHERE code IN (?)" in store.sqls[0]
+        assert "WHERE code IN (?)" in store.sql_log[0]
 
 
 class TestTdnetFinancialPredicate:

@@ -11,6 +11,8 @@ from __future__ import annotations
 import gzip
 from datetime import date, datetime, timedelta, timezone
 
+from _doubles import FakeR2, RecordingD1
+
 from jp_stock_pipeline.cloud_store.sink import CloudSink
 from jp_stock_pipeline.config import CloudStoreSettings
 from jp_stock_pipeline.licensing import LicenseTag
@@ -49,40 +51,19 @@ def _artifact(tmp_path, *, doc_id="S100XU9L", converted=False) -> RawArtifact:
     )
 
 
-class _FakeR2:
-    def __init__(self, existing: set[str] | None = None, *, fail_on_put=False):
-        self.existing = set(existing or ())
-        self.puts: list[str] = []
-        self.bodies: dict[str, bytes] = {}
-        self.heads: list[str] = []
-        self.fail_on_put = fail_on_put
-
-    def exists(self, key):
-        self.heads.append(key)
-        return key in self.existing
-
-    def put_bytes(self, key, body, *, content_type):
-        if self.fail_on_put:
-            from jp_stock_pipeline.cloud_store.r2 import R2Error
-
-            raise R2Error("boom")
-        self.existing.add(key)
-        self.puts.append(key)
-        self.bodies[key] = body
+def _FakeR2(existing: set[str] | None = None, *, fail_on_put: bool = False) -> FakeR2:
+    return FakeR2(existing, fail_on_put=fail_on_put)
 
 
-class _FakeD1:
-    def __init__(self, *, fail=False):
-        self.calls: list[tuple] = []
-        self.fail = fail
+class _FakeD1(RecordingD1):
+    """発行文の形だけ見る。`calls` は旧名の別名（呼び出し側はそのまま）。"""
 
-    def upsert(self, table, columns, rows, *, conflict, keep=None):
-        if self.fail:
-            from jp_stock_pipeline.cloud_store.d1 import D1Error
+    def __init__(self, *, fail: bool = False) -> None:
+        super().__init__(fail_on_upsert=fail)
 
-            raise D1Error("boom")
-        self.calls.append((table, columns, rows, conflict, keep))
-        return len(rows)
+    @property
+    def calls(self) -> list[tuple]:
+        return self.upserts
 
 
 def _sink(settings=None, *, r2=None, d1=None) -> CloudSink:
@@ -366,7 +347,7 @@ class TestFinancialSummary:
         )
         from jp_stock_pipeline.cloud_store import financials
 
-        assert store.sqls.count(financials.STOCK_ID_SQL) == 1
+        assert store.sql_log.count(financials.STOCK_ID_SQL) == 1
 
     def test_a_failing_stock_id_lookup_is_reported_as_false_not_raised(self):
         """SELECT を try の外に出すと True/False/None の契約が破れる。"""
@@ -422,7 +403,7 @@ class TestFinancialSummary:
         assert sink.upsert_financial_summary(
             self._record(), doc_id="S1", raw_sha256="a" * 64
         ) is None
-        assert store.sqls == []
+        assert store.sql_log == []
 
     def test_disabled_without_d1_config(self):
         store = self._store()
@@ -430,7 +411,7 @@ class TestFinancialSummary:
         assert sink.upsert_financial_summary(
             self._record(), doc_id="S1", raw_sha256="a" * 64
         ) is None
-        assert store.sqls == []
+        assert store.sql_log == []
 
 
 class TestJobContextFinancialWiring:

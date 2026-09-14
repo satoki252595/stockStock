@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 
+from _doubles import RecordingD1
+
 from jp_stock_pipeline.cloud_store import schema as S
 from jp_stock_pipeline.licensing import LicenseTag
 
@@ -155,18 +157,12 @@ class TestColumnLicense:
         assert S.column_license_rows() == S.column_license_rows()
 
 
-class _RecordingStore:
-    def __init__(self):
-        self.statements: list[str] = []
-        self.upserts: list[tuple] = []
+class _RecordingStore(RecordingD1):
+    """発行文の形だけ見る。`statements` は旧名の別名（呼び出し側はそのまま）。"""
 
-    def query(self, sql, params=None):
-        self.statements.append(sql)
-        return []
-
-    def upsert(self, table, columns, rows, *, conflict):
-        self.upserts.append((table, columns, rows, conflict))
-        return len(rows)
+    @property
+    def statements(self) -> list[str]:
+        return self.sqls
 
 
 class TestApply:

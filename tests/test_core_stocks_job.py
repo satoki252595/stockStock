@@ -13,10 +13,11 @@
 from __future__ import annotations
 
 import argparse
-import sqlite3
 from types import SimpleNamespace
 
 import pytest
+
+from _doubles import SqliteD1
 
 from jp_stock_pipeline.cloud_store import core_stocks as cs
 from jp_stock_pipeline.jobs import core_stocks_migrate as job
@@ -34,11 +35,11 @@ CHILD_STUBS = "".join(
 )
 
 
-class FakeStore:
-    """`D1Store` の最小スタブ。ローカル sqlite に対して本物の SQL を流す。"""
+class FakeStore(SqliteD1):
+    """sqlite 裏打ちの `D1Store` + 本番形 `core_stocks` と子表スタブ。"""
 
     def __init__(self) -> None:
-        self.con = sqlite3.connect(":memory:")
+        super().__init__()
         self.con.executescript(PROD_DDL)
         self.con.executescript(CHILD_STUBS)
         self.con.execute(
@@ -50,15 +51,6 @@ class FakeStore:
             " VALUES ('9999','旧上場','グロース（内国株式）',NULL,0)"
         )
         self.con.commit()
-        self.sqls: list[str] = []
-
-    def query(self, sql: str, params: list | None = None, *, idempotent: bool = True):
-        self.sqls.append(sql)
-        cur = self.con.execute(sql, params or [])
-        cols = [d[0] for d in cur.description] if cur.description else []
-        rows = [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
-        self.con.commit()
-        return rows
 
 
 class FakeCtx:
@@ -126,19 +118,19 @@ class TestDailyOrphanScope:
     def test_fk_on_では宣言の無い2表だけを数える(self, store: FakeStore) -> None:
         _apply_ddl(store)
         store.con.execute("PRAGMA foreign_keys = ON")
-        store.sqls.clear()
+        store.sql_log.clear()
         job._observe(store)  # noqa: SLF001
-        orphan_sqls = [s for s in store.sqls if "LEFT JOIN core_stocks" in s]
+        orphan_sqls = [s for s in store.sql_log if "LEFT JOIN core_stocks" in s]
         assert orphan_sqls == cs.daily_orphan_check_statements()
-        assert cs.FOREIGN_KEYS_PRAGMA in store.sqls
+        assert cs.FOREIGN_KEYS_PRAGMA in store.sql_log
 
     def test_fk_off_では全表検査に戻す(self, store: FakeStore) -> None:
         """素の SQLite の既定は 0。安全弁が無いと FK 表の孤児を見逃す。"""
         _apply_ddl(store)
         assert store.con.execute("PRAGMA foreign_keys").fetchone() == (0,)
-        store.sqls.clear()
+        store.sql_log.clear()
         job._observe(store)  # noqa: SLF001
-        orphan_sqls = [s for s in store.sqls if "LEFT JOIN core_stocks" in s]
+        orphan_sqls = [s for s in store.sql_log if "LEFT JOIN core_stocks" in s]
         assert orphan_sqls == cs.orphan_check_statements()
 
     def test_p_momentum_の孤児を日次で検出する(self, store: FakeStore) -> None:
@@ -188,13 +180,13 @@ class TestColumnDriftDetection:
     def test_verify_は読み取りだけで_CI_から回せる(self, store: FakeStore) -> None:
         """ops_check の cron から毎日呼ぶ前提。1 文でも書いたら本番で事故になる。"""
         _apply_ddl(store)
-        store.sqls.clear()
+        store.sql_log.clear()
         ctx = FakeCtx(store, verify=True)
         job.execute(ctx)
         assert ctx.failures == [], ctx.failures
         assert ctx.successes == 1
-        assert store.sqls, "1 文も発行していない（観測していない）"
-        for sql in store.sqls:
+        assert store.sql_log, "1 文も発行していない（観測していない）"
+        for sql in store.sql_log:
             assert sql.split()[0].upper() in ("SELECT", "PRAGMA"), sql
         # D1 は走査行課金。`core_stocks` の行断面は読まない（列・索引・孤児だけ）。
         allowed = (
@@ -202,9 +194,9 @@ class TestColumnDriftDetection:
             | set(cs.orphan_check_statements())
             | set(cs.daily_orphan_check_statements())
         )
-        assert set(store.sqls) <= allowed, set(store.sqls) - allowed
+        assert set(store.sql_log) <= allowed, set(store.sql_log) - allowed
         # 孤児検査 (G-core-5) は判定に使うので消えていないこと。
-        assert any("LEFT JOIN core_stocks" in sql for sql in store.sqls)
+        assert any("LEFT JOIN core_stocks" in sql for sql in store.sql_log)
 
     def test_ドリフトがあれば_verify_が失敗して_CI_が赤くなる(self, store: FakeStore) -> None:
         _apply_ddl(store)
