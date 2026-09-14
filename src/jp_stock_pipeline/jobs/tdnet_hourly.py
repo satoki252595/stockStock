@@ -10,13 +10,16 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date
+from functools import partial
 
+from ..cloud_store import notion_pages
+from ..cloud_store.d1 import D1Error, D1Store
 from ..collectors import tdnet_official_fallback, tdnet_yanoshin
 from ..convert import convert_artifact, xbrl_to_csv
 from ..http import FetchError, fetch
 from ..licensing import source_license
 from ..models import DisclosureRecord, Provenance, RawArtifact, Source, now_jst
-from ..notion import upsert
+from ..notion import file_upload, upsert
 from ..rawstore import save_raw
 from ..transform import normalize
 from .runner import JobContext, apply_limit, build_parser, main_exit, run_job
@@ -70,6 +73,8 @@ def _process_financial_xbrl(
     *,
     master_id: str | None = None,
     master_resolved: bool = False,
+    sha_map: dict[str, str] | None = None,
+    sha_map_date=None,
 ) -> None:
     """短信 XBRL → 原本⑤ → tidy → ③ upsert (§8.2)。
 
@@ -93,7 +98,7 @@ def _process_financial_xbrl(
         artifact.local_path.read_bytes(), record.code or "", record.doc_id
     )
     xbrl_to_csv.write_tidy(tidy, artifact)
-    raw_page_id = ctx.upload_raw(artifact)
+    raw_page_id = ctx.upload_raw(artifact, sha_map=sha_map, sha_map_date=sha_map_date)
 
     # ⑧ 短信 XBRL の全ファクトをローカル専用ストアへミラー（§7.1, factual-cite=内部利用）。
     ctx.mirror_xbrl_facts(tidy, artifact)
@@ -140,7 +145,7 @@ def _process_financial_xbrl(
     )
 
 
-def _load_map_guarded(loader, label: str) -> tuple[dict[str, str], bool]:
+def _load_map_guarded(loader, label: str):
     """事前マップを all-or-nothing でロードする。失敗時は ({}, False) で per-record へ。"""
     try:
         return loader(), True
@@ -157,19 +162,27 @@ def execute(ctx: JobContext) -> None:
     # 毎時実行は同一日の一覧を丸ごと再処理するため、開示ごとの ① 検索・④ 検索(各1req)が
     # 累積し 30分cap を脅かす。事前マップで per-record 検索を排除する(§8.3)。失敗時は
     # per-record 検索へ degrade(all-or-nothing)。
-    master_map, master_map_ok = _load_map_guarded(
-        lambda: upsert.load_stock_master_map(ctx.client, ctx.settings), "①"
-    )
-    disc_map, disc_map_ok = _load_map_guarded(
-        lambda: upsert.load_disclosure_page_map(
+    master_map, master_map_ok = _load_master_map(ctx)
+    disc_entries, disc_map_ok = _load_map_guarded(
+        lambda: upsert.load_disclosure_page_entries(
             ctx.client, ctx.settings, disclosed_date=target_date
         ),
         "④",
     )
+    disc_skipped = 0
+    # ⑤ 重複検索の事前マップ（L-21）。原本ごとの 1 req を対象日 1 回にまとめる。
+    # 失敗時は per-record 検索へ（upload 側の既定動作）。
+    try:
+        sha_map: dict[str, str] | None = file_upload.load_raw_page_map(
+            ctx.client, ctx.settings, data_date=target_date
+        )
+    except Exception as exc:  # noqa: BLE001 - 失敗時は per-record 検索へフォールバック
+        logger.warning("⑤ 事前マップ取得失敗 → per-record 検索にフォールバック: %s", exc)
+        sha_map = None
 
     for artifact, records, xbrl_urls in batches:
         # 原本必須: Notion⑤/ローカル⑤ の両系統とも失敗時のみ構造化を書かない (§7.1/§3-3)
-        raw_page_id = ctx.upload_raw(artifact)
+        raw_page_id = ctx.upload_raw(artifact, sha_map=sha_map, sha_map_date=target_date)
 
         # ③ の `core_stocks.id` を 1 回でまとめて解決する (§8.3 と同じ考え方)。
         # 毎時実行は同一日の一覧を丸ごと再処理するので、繁忙日（短信1,000件超）は
@@ -196,13 +209,25 @@ def execute(ctx: JobContext) -> None:
             disc_resolved = bool(
                 disc_map_ok and record.disclosed_at.date() == target_date
             )
+            disc_entry = disc_entries.get(record.doc_id) if disc_resolved else None
+            # L-20: 既存行と同値なら再 PATCH を省く（毎時 395 件 → 差分のみ）。
+            # ローカル系統には書く（persist の notion 側だけを no-op にする）。
+            if disc_entry is not None and upsert.disclosure_matches_page(
+                disc_entry[1], record, master_id
+            ):
+                notion_write = partial(_existing_page_id, disc_entry[0])
+                disc_skipped += 1
+            else:
+                notion_write = partial(
+                    upsert.upsert_disclosure,
+                    ctx.client, ctx.settings, record, master_id,
+                    existing_page_id=disc_entry[0] if disc_entry else None,
+                    page_resolved=disc_resolved,
+                )
             # ④ を Notion とローカルへ独立に書く（双方向フェールセーフ）
             if ctx.persist(
                 record,
-                lambda rec=record, mid=master_id, dr=disc_resolved: upsert.upsert_disclosure(
-                    ctx.client, ctx.settings, rec, mid,
-                    existing_page_id=disc_map.get(rec.doc_id), page_resolved=dr,
-                ),
+                notion_write,
                 label=f"④{record.doc_id}",
             ):
                 ctx.add_success()
@@ -232,10 +257,43 @@ def execute(ctx: JobContext) -> None:
                     _process_financial_xbrl(
                         ctx, record, xbrl_urls[record.doc_id],
                         master_id=master_id, master_resolved=master_resolved,
+                        sha_map=sha_map, sha_map_date=target_date,
                     )
                 except Exception as exc:
                     # ③ 反映失敗は欠損として記録 (④ は成立済み。ダミーで埋めない §3-1)
                     ctx.add_failure(record.doc_id, f"短信XBRL→③失敗: {exc}")
+
+    if disc_skipped:
+        logger.info("④ 同値 skip: %d 件の再 PATCH を省いた", disc_skipped)
+
+
+def _existing_page_id(pid: str) -> str:
+    """同値 skip 時の notion 書き込み（何も書かず既存 page_id を返す）。"""
+    return pid
+
+
+def _load_master_map(ctx: JobContext) -> tuple[dict[str, str], bool]:
+    """① マップを D1 写しから読む。無ければ Notion スキャンへ（L-20）。
+
+    毎時 39 req のスキャンを 1 SELECT に置き換える。写しが空・表が無い
+    （本番 DDL 前）・D1 未設定なら従来のスキャンへフォールバックする。
+    """
+    settings = ctx.settings.cloud_store
+    if settings.d1_enabled():
+        try:
+            mapping = notion_pages.load_stock_master_map(
+                D1Store(settings, writer=JOB_NAME)
+            )
+        except D1Error as exc:
+            logger.warning("① D1 写しを読めない → Notion スキャンにフォールバック: %s", exc)
+        else:
+            if mapping:
+                logger.info("① マップ: D1 写し %d 件（スキャンを省いた）", len(mapping))
+                return mapping, True
+            logger.warning("① D1 写しが空 → Notion スキャンにフォールバック")
+    return _load_map_guarded(
+        lambda: upsert.load_stock_master_map(ctx.client, ctx.settings), "①"
+    )
 
 
 def _has_financial_xbrl(record: DisclosureRecord, xbrl_urls: dict[str, str]) -> bool:

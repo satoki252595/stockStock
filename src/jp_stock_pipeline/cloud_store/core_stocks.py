@@ -299,7 +299,19 @@ CHILD_TABLES: tuple[str, ...] = (
 # 恒常的に赤くなり、本物の孤児検出が信用されなくなる）。
 SOFT_CHILD_TABLES: tuple[str, ...] = ("jss_financials",)
 
-ALL_CHECKED_TABLES: tuple[str, ...] = CHILD_TABLES + SOFT_CHILD_TABLES
+# FK 宣言を持たないが `stock_id` でぶら下がる表（宣言が無いので DB が守らない）。
+# `p_momentum.stock_id` は PRIMARY KEY（NOT NULL）のため NULL 除外は要らない。
+# 本番 sqlite_master で `stock_id` を持つ 16 表（CHILD 14 + SOFT 1 + ここ 1）を確認。
+NOFK_CHILD_TABLES: tuple[str, ...] = ("p_momentum",)
+
+ALL_CHECKED_TABLES: tuple[str, ...] = CHILD_TABLES + SOFT_CHILD_TABLES + NOFK_CHILD_TABLES
+
+# 日次 `--verify` で回す表。FK 宣言のある 14 表は `PRAGMA foreign_keys=1` の
+# 本番 D1 が INSERT 時に弾くので毎日走査しない（L-16。日次 −約 95 万 rows_read）。
+# 宣言の無い 2 表だけは DB が守らないので毎日数える。
+DAILY_CHECK_TABLES: tuple[str, ...] = SOFT_CHILD_TABLES + NOFK_CHILD_TABLES
+
+FOREIGN_KEYS_PRAGMA = "PRAGMA foreign_keys"
 
 
 def _orphan_term(table: str) -> str:
@@ -312,18 +324,25 @@ def _orphan_term(table: str) -> str:
     )
 
 
+def _chunked(tables: tuple[str, ...]) -> list[str]:
+    chunk = MAX_COMPOUND_SELECT_TERMS
+    return [
+        " UNION ALL ".join(_orphan_term(t) for t in tables[start : start + chunk])
+        for start in range(0, len(tables), chunk)
+    ]
+
+
 def orphan_check_statements() -> list[str]:
     """全子表の孤児件数を数える文を返す（G-core-5）。
 
     1文にまとめられない。D1 の compound SELECT は **5 項まで**で、6 項目から
     `too many terms in compound SELECT` を返す（本番実測。素の SQLite の既定
-    500 とは大きく違う）。15 表を1文の UNION ALL にすると必ず失敗するので、
+    500 とは大きく違う）。16 表を1文の UNION ALL にすると必ず失敗するので、
     上限ちょうどで分割する。
     """
-    chunk = MAX_COMPOUND_SELECT_TERMS
-    return [
-        " UNION ALL ".join(
-            _orphan_term(t) for t in ALL_CHECKED_TABLES[start : start + chunk]
-        )
-        for start in range(0, len(ALL_CHECKED_TABLES), chunk)
-    ]
+    return _chunked(ALL_CHECKED_TABLES)
+
+
+def daily_orphan_check_statements() -> list[str]:
+    """日次 `--verify` 用。宣言の無い表（SOFT + NOFK）だけを数える（L-16）。"""
+    return _chunked(DAILY_CHECK_TABLES)

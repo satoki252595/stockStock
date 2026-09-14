@@ -35,8 +35,10 @@
 from __future__ import annotations
 
 import logging
+import time
+from functools import partial
 
-from ..cloud_store import core_stocks
+from ..cloud_store import core_stocks, notion_pages
 from ..cloud_store.d1 import D1Error, D1Store
 from ..collectors import edinet_codelist
 from ..notion import upsert
@@ -76,33 +78,50 @@ def execute(ctx: JobContext) -> None:
     # 部分マップを信用して create すると重複行になるため §8.1-6）。このマップは
     # 上場廃止検知でも再利用し ① 全件スキャンを 2回→1回 にする。
     try:
-        master_map = upsert.load_stock_master_map(ctx.client, ctx.settings)
+        master_entries = upsert.load_stock_master_entries(ctx.client, ctx.settings)
         map_ok = True
     except Exception as exc:  # noqa: BLE001 - 失敗時は per-record 検索へフォールバック
-        master_map, map_ok = {}, False
+        master_entries, map_ok = {}, False
         logger.warning("① マップ取得失敗 → per-record 検索にフォールバック: %s", exc)
+    master_map = {code: pid for code, (pid, _props) in master_entries.items()}
 
     # 6. Upsert (冪等キー=銘柄コード)。状態/上場日/上場廃止日 は開示・消失が所有する
     #    ため codelist 同期では書かない (include_lifecycle=False § Phase3 二重所有回避)。
+    def _existing_page_id(pid: str) -> str:
+        """同値 skip 時の notion 書き込み（何も書かず既存 page_id を返す）。"""
+        return pid
+
+    skipped = 0
     for record in upsert_records:
+        # L-19: 既存行と同値なら PATCH を省く（月次 3,841 件 → 差分のみ）。
+        # ローカル系統には書く（persist の notion 側だけを no-op にする）。
+        entry = master_entries.get(record.code)
+        if map_ok and entry is not None and upsert.stock_master_matches_page(entry[1], record):
+            skipped += 1
+            notion_write = partial(_existing_page_id, entry[0])
+        else:
+            notion_write = partial(
+                upsert.upsert_stock_master,
+                ctx.client,
+                ctx.settings,
+                record,
+                include_lifecycle=False,
+                existing_page_id=master_map.get(record.code),
+                page_resolved=map_ok,
+            )
         # Notion とローカルへ独立に書く（双方向フェールセーフ）。状態/上場日/廃止日は
         # 開示・消失が所有するため include_lifecycle=False で両系統とも書かない。
         if ctx.persist(
             record,
-            lambda rec=record, pid=master_map.get(record.code): upsert.upsert_stock_master(
-                ctx.client,
-                ctx.settings,
-                rec,
-                include_lifecycle=False,
-                existing_page_id=pid,
-                page_resolved=map_ok,
-            ),
+            notion_write,
             label=f"①{record.code}",
             include_lifecycle=False,
         ):
             ctx.add_success()
         else:
             ctx.add_failure(record.code, "①: Notion/ローカル両系統に書けず")
+    if skipped:
+        logger.info("① 同値 skip: %d 件の PATCH を省いた", skipped)
 
     # 7. 上場廃止検知 (§ Phase3): コードリストから消えた銘柄を listed=False にする
     #    (状態=上場廃止 の確定は一次開示が所有)。--limit 指定時は部分取得のため
@@ -116,6 +135,7 @@ def execute(ctx: JobContext) -> None:
         return
     _detect_delistings(ctx, fetched_codes, master_map, map_ok)
     _sync_sector33(ctx, records)
+    _sync_notion_pages(ctx, master_entries, map_ok)
 
 
 def _sector33_store(ctx: JobContext) -> D1Store | None:
@@ -124,6 +144,44 @@ def _sector33_store(ctx: JobContext) -> D1Store | None:
     if not settings.d1_enabled():
         return None
     return D1Store(settings, writer=JOB_NAME)
+
+
+def _sync_notion_pages(
+    ctx: JobContext, master_entries: dict[str, tuple[str, dict]], map_ok: bool
+) -> None:
+    """① の {コード: page_id} 写しを D1 へ書く（L-20。読むのは tdnet/edinet）。
+
+    同じスキャンから EDINET 逆引きも写す（追加の req は出ない）。
+    `--dry-run` / `--limit` では書かない（sector33 と同じ扱い）。
+    マップ取得に失敗していたら書かない（`{}` で上書きしない）。
+    D1 の失敗は記録だけして同期は止めない（写しが古くても読み手は
+    Notion スキャンへフォールバックする）。
+    """
+    if ctx.settings.dry_run or ctx.args.limit:
+        return
+    if not map_ok or not master_entries:
+        return
+    store = _sector33_store(ctx)
+    if store is None:
+        return
+    stock_map = {code: pid for code, (pid, _props) in master_entries.items()}
+    edinet_map = {
+        edinet_code: code
+        for code, (_pid, props) in master_entries.items()
+        if (edinet_code := upsert._edinet_code_of(props))
+    }
+    try:
+        now = int(time.time())
+        n_stock = notion_pages.save_map(
+            store, notion_pages.DB_STOCK_MASTER, stock_map, updated_at=now
+        )
+        n_edinet = notion_pages.save_map(
+            store, notion_pages.DB_STOCK_MASTER_BY_EDINET, edinet_map, updated_at=now
+        )
+    except D1Error as exc:
+        ctx.add_failure("jss_notion_pages", f"D1 写しを書けない: {exc}")
+        return
+    logger.info("① D1 写し: stock %d 件 / edinet逆引き %d 件", n_stock, n_edinet)
 
 
 def _sync_sector33(ctx: JobContext, records: list) -> None:

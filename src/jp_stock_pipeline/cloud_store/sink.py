@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import gzip
 import logging
 import mimetypes
 from datetime import date
@@ -52,6 +53,20 @@ LEGACY_KEY_UNTIL = date(2026, 12, 31)
 def _content_type(path) -> str:
     guessed, _ = mimetypes.guess_type(str(path))
     return guessed or "application/octet-stream"
+
+
+# R2 へ置くときに gzip する拡張子（L-22縮小）。テキスト系だけ。
+# pdf/zip/parquet/bin は既に圧縮済み・バイナリなので素通し（圧縮しても減らない）。
+# キーには `.gz` を足す（`raw/…/{sha16}.csv.gz`）。`sha256` と `size_bytes` は
+# 圧縮前の値のまま（索引の意味を変えない）。読む側は `.gz` を gunzip する。
+_GZIP_EXTENSIONS = frozenset({"csv", "tsv", "json", "txt", "xml", "html", "htm"})
+
+
+def _gzip_for_r2(ext: str, body: bytes) -> tuple[bytes, str]:
+    """R2 へ置く本文とキー用拡張子を返す（純粋関数）。"""
+    if ext.lower() in _GZIP_EXTENSIONS:
+        return gzip.compress(body), f"{ext}.gz"
+    return body, ext
 
 
 class CloudSink:
@@ -112,19 +127,37 @@ class CloudSink:
         try:
             data_date = artifact.data_date or artifact.fetched_at.date()
             ext = artifact.local_path.suffix.lstrip(".") or "bin"
+            body = artifact.local_path.read_bytes()
+            stored_body, stored_ext = _gzip_for_r2(ext, body)
             key = keys.raw_key(
                 source=str(artifact.source),
                 datatype=artifact.datatype,
                 scope=artifact.scope,
                 data_date=data_date,
                 sha256=artifact.sha256,
-                ext=ext,
+                ext=stored_ext,
                 doc_id=artifact.doc_id,
             )
-            if not self.raw_bucket.exists(key):
-                legacy_key = None
-                if artifact.doc_id and data_date <= LEGACY_KEY_UNTIL:
-                    legacy_key = keys.raw_key(
+            # 実在するキーを順に探す（どれかにあれば PUT しない。R2 を増やさない）:
+            # (1) gzip 後の新キー (2) gzip 前の新キー (3) doc_id 無しの旧キー。
+            # (2)(3) のオブジェクトは非圧縮のままなので、索引の ext も合わせる。
+            candidates = [(key, stored_ext)]
+            if stored_ext != ext:
+                candidates.append((
+                    keys.raw_key(
+                        source=str(artifact.source),
+                        datatype=artifact.datatype,
+                        scope=artifact.scope,
+                        data_date=data_date,
+                        sha256=artifact.sha256,
+                        ext=ext,
+                        doc_id=artifact.doc_id,
+                    ),
+                    ext,
+                ))
+            if artifact.doc_id and data_date <= LEGACY_KEY_UNTIL:
+                candidates.append((
+                    keys.raw_key(
                         source=str(artifact.source),
                         datatype=artifact.datatype,
                         scope=artifact.scope,
@@ -132,27 +165,43 @@ class CloudSink:
                         sha256=artifact.sha256,
                         ext=ext,
                         doc_id=None,
-                    )
-                if legacy_key is not None and self.raw_bucket.exists(legacy_key):
-                    # (b) 旧キー救済: 実在するので PUT せず、以後は旧キーを正とする。
-                    key = legacy_key
-                else:
-                    self.raw_bucket.put_bytes(
-                        key,
-                        artifact.local_path.read_bytes(),
-                        content_type=_content_type(artifact.local_path),
-                    )
+                    ),
+                    ext,
+                ))
+            index_ext = stored_ext
+            for candidate, candidate_ext in candidates:
+                if self.raw_bucket.exists(candidate):
+                    key, index_ext = candidate, candidate_ext
+                    break
+            else:
+                self.raw_bucket.put_bytes(
+                    key,
+                    stored_body,
+                    content_type=_content_type(artifact.local_path),
+                )
             derived_key = derived_ext = None
             for converted in artifact.converted_paths:
                 suffix = converted.suffix.lstrip(".")
-                dkey = keys.derived_key(key, suffix=suffix)
-                if not self.raw_bucket.exists(dkey):
+                conv_body, conv_suffix = _gzip_for_r2(suffix, converted.read_bytes())
+                dkey = keys.derived_key(key, suffix=conv_suffix)
+                if self.raw_bucket.exists(dkey):
+                    pass  # 既にあれば PUT しない
+                elif conv_suffix != suffix:
+                    # gzip 前の派生キーを救済（旧オブジェクトは非圧縮のまま）。
+                    plain_dkey = keys.derived_key(key, suffix=suffix)
+                    if self.raw_bucket.exists(plain_dkey):
+                        dkey, conv_suffix = plain_dkey, suffix
+                    else:
+                        self.raw_bucket.put_bytes(
+                            dkey, conv_body, content_type=_content_type(converted)
+                        )
+                else:
                     self.raw_bucket.put_bytes(
-                        dkey, converted.read_bytes(), content_type=_content_type(converted)
+                        dkey, conv_body, content_type=_content_type(converted)
                     )
                 # 索引に載せるのは代表1件（複数変換版がある場合は最初のもの）。
                 if derived_key is None:
-                    derived_key, derived_ext = dkey, suffix
+                    derived_key, derived_ext = dkey, conv_suffix
         except (R2Error, OSError) as exc:
             logger.warning("R2 ⑤原本の保存に失敗: %s: %s", artifact.filename, exc)
             return False
@@ -171,7 +220,7 @@ class CloudSink:
                     str(artifact.source), artifact.datatype, artifact.scope,
                     artifact.doc_id,
                     artifact.scope if artifact.scope != "ALL" else None,
-                    data_date.isoformat(), ext, artifact.size_bytes,
+                    data_date.isoformat(), index_ext, artifact.size_bytes,
                     artifact.license_tag.value, artifact.convert_status.value,
                     epoch, epoch,
                 ]],

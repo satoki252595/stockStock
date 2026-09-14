@@ -138,6 +138,39 @@ class TestSeedHasARunnableEntryPoint:
         assert license_map.main([], env=dict(_D1_ENV)) == 0
         assert store.license_rows() == first
 
+    def test_一致していれば参照表へ書き込まない(self, monkeypatch) -> None:
+        """差分が無い日の upsert は D1 の書き込み課金になるだけ（L-17）。
+
+        2 回目は宣言と実表が一致しているので、参照表への書き込みは
+        0 文のはず（`jss_job_runs` の 1 行は runner が全ジョブ共通で書く）。
+        """
+        store = _FakeStore()
+        _wire(monkeypatch, store)
+        assert license_map.main([], env=dict(_D1_ENV)) == 0
+        store.sql_log.clear()
+        assert license_map.main([], env=dict(_D1_ENV)) == 0
+        assert store.reference_writes == []
+
+    def test_食い違いがあればその表だけ書き直す(self, monkeypatch) -> None:
+        """片方の表を壊しても、もう片方への書き込みは出ない。"""
+        store = _FakeStore()
+        _wire(monkeypatch, store)
+        assert license_map.main([], env=dict(_D1_ENV)) == 0
+        first = store.license_rows()
+        table, column, tag = sorted(first)[0]
+        flipped = "personal-only" if tag == "commercial-ok" else "commercial-ok"
+        store.con.execute(
+            "UPDATE jss_column_license SET license_tag=?"
+            " WHERE table_name=? AND column_name=?",
+            (flipped, table, column),
+        )
+        store.con.commit()
+        store.sql_log.clear()
+        assert license_map.main([], env=dict(_D1_ENV)) == 0
+        assert store.license_rows() == first
+        assert store.reference_writes != []
+        assert all("jss_column_license" in s for s in store.reference_writes)
+
     def test_dry_runは1文も書き込まない(self, monkeypatch) -> None:
         """`run_job` 経由で確認する。
 
@@ -209,7 +242,9 @@ class TestDoesNotScanRows:
             assert any(name in sql for name in allowed), sql
 
     def test_日次で_DDL_を流さない(self, monkeypatch) -> None:
-        """`apply_schema` の 24 文を毎日 no-op で投げると往復時間だけ増える。"""
+        """`apply_schema` の 20 文を毎日 no-op で投げると往復時間だけ増える。"""
+        # 文数は docstring の「20 文」と一致させる（ずれたら書き換え忘れ）。
+        assert len(S.SCHEMA_STATEMENTS) == 20, len(S.SCHEMA_STATEMENTS)
         store = _FakeStore()
         _wire(monkeypatch, store)
         assert license_map.main([], env=dict(_D1_ENV)) == 0
@@ -352,6 +387,10 @@ class TestWriterClaims:
         （投入する側も書込ジョブなので、照合を先にすると初回が必ず落ちる）である。
         2 段目でもその意図は変わらないので、**失敗にしたうえで**初回が成功すること、
         そして成功の理由が「投入 → 照合」の順序であることを SQL の順で確かめる。
+
+        差分書き込み化（L-17）で最初の SELECT は「差分の有無を見る読み」に
+        変わった。照合は投入のあとの**読み直し**なので、比較するのは最後の
+        SELECT である。
         """
         store = _FakeStore()
         _wire(monkeypatch, store)
@@ -363,11 +402,11 @@ class TestWriterClaims:
             i for i, s in enumerate(log)
             if s.lstrip().upper().startswith("INSERT") and "jss_writer_claims" in s
         )
-        select_at = next(i for i, s in enumerate(log) if s == G.WRITER_CLAIMS_SQL)
+        select_at = max(i for i, s in enumerate(log) if s == G.WRITER_CLAIMS_SQL)
         assert insert_at < select_at, "照合が投入より前にある = 初回が落ちる順序"
 
     def test_本番と同じく宣言と一致していれば成功する(self, monkeypatch, caplog) -> None:
-        """本番の 18 行（宣言と一致）が既にある状態。warning も出さない。"""
+        """宣言と一致する行が既にある状態。warning も出さない（件数は宣言に従う）。"""
         store = _FakeStore()
         _wire(monkeypatch, store)
         for row in G.writer_claim_rows():

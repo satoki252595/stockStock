@@ -240,6 +240,22 @@ CREATE TABLE IF NOT EXISTS jss_column_license (
 )
 """
 
+# Notion 行 ID の写し（L-20）。tdnet_hourly が毎時 ① 全 3,846 行をスキャン
+# （39 req × 14 run/日）していたのを、D1 の 1 SELECT に置き換える。
+# 書くのは月次の master_sync だけ（writer claim は jss_* 一律 all/stockStock）。
+# `db` は写しの区画: "stock_master"（code→page_id）と
+# "stock_master_by_edinet"（EDINETコード→銘柄コード。page_id 列にコードを
+# 入れる。大量保有報告書の対象会社解決用）。4 列に収めるため列を足さない。
+_NOTION_PAGES = """
+CREATE TABLE IF NOT EXISTS jss_notion_pages (
+  code       TEXT NOT NULL,
+  db         TEXT NOT NULL,
+  page_id    TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (db, code)
+)
+"""
+
 # ③財務サマリの PK。`cloud_store/financials.py` の ON CONFLICT はこれを読む。
 #
 # `_FINANCIALS` の DDL 側は同じ内容を**リテラルで別に持つ**（導出にしない）。
@@ -278,6 +294,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     _DATASET_FRESHNESS,
     _WRITER_CLAIMS,
     _COLUMN_LICENSE,
+    _NOTION_PAGES,
 )
 
 # 指数・為替の slug は7つ。旧設計の6つでは finmath_daily_ohlcv の7シンボル目
@@ -470,12 +487,12 @@ def apply_schema(store) -> int:
     return len(SCHEMA_STATEMENTS)
 
 
-def seed_reference_tables(store) -> None:
-    """参照表（指数シンボル・列ライセンス）を投入する。
+def seed_index_symbols(store) -> int:
+    """`jss_index_symbols` へ宣言を投入する。投入した行数を返す。
 
-    **呼び出し元は `jobs/license_map.py` だけ**。ここを直接呼ぶ新しい経路を
-    増やさないこと（宣言の投入口が複数あると、どれが最後に走ったかで実表の
-    内容が変わる）。
+    日次ジョブは差分があるときだけ呼ぶ（L-17）。宣言と実表が一致して
+    いれば upsert を打たない。ブートストラップ（一括投入）は
+    `seed_reference_tables` を手で 1 回流す。
     """
     symbols = index_symbol_rows()
     store.upsert(
@@ -484,6 +501,18 @@ def seed_reference_tables(store) -> None:
         symbols,
         conflict=["slug"],
     )
+    logger.info(
+        "指数シンボルを投入: %d 件（未確認 %d 件はスキップ）",
+        len(symbols), len(INDEX_SYMBOLS) - len(symbols),
+    )
+    return len(symbols)
+
+
+def seed_column_license(store) -> int:
+    """`jss_column_license` へ宣言を投入する。投入した行数を返す。
+
+    `seed_index_symbols` と同じく、日次は差分があるときだけ呼ぶ。
+    """
     rows = column_license_rows()
     store.upsert(
         "jss_column_license",
@@ -491,10 +520,20 @@ def seed_reference_tables(store) -> None:
         rows,
         conflict=["table_name", "column_name"],
     )
-    logger.info(
-        "参照表を投入: 指数 %d 件(未確認 %d 件はスキップ) / 列ライセンス %d 件",
-        len(symbols), len(INDEX_SYMBOLS) - len(symbols), len(rows),
-    )
+    logger.info("列ライセンス地図を投入: %d 件", len(rows))
+    return len(rows)
+
+
+def seed_reference_tables(store) -> None:
+    """参照表（指数シンボル・列ライセンス）を一括投入する。
+
+    **呼び出し元は `jobs/license_map.py` と手動ブートストラップだけ**。
+    ここを直接呼ぶ新しい経路を増やさないこと（宣言の投入口が複数あると、
+    どれが最後に走ったかで実表の内容が変わる）。日次ジョブは
+    `seed_index_symbols` / `seed_column_license` を差分があるときだけ呼ぶ。
+    """
+    seed_index_symbols(store)
+    seed_column_license(store)
 
 
 # `jss_*` が本番に存在するかを sqlite_master で確かめる 1 文。
@@ -530,5 +569,7 @@ __all__ = [
     "declared_tables",
     "index_symbol_diff",
     "index_symbol_rows",
+    "seed_column_license",
+    "seed_index_symbols",
     "seed_reference_tables",
 ]

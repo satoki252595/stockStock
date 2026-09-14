@@ -170,14 +170,16 @@ class TestFailOpenClosedBoundary:
 # `SELECT name FROM sqlite_master WHERE type='table'` で取得した 32 件から、
 # 内部表 `_cf_KV` を除いた 31 件（`p_momentum` は同日 0011 で追加）のうち、
 # DROP 済みの `finmath_price_snapshot` / `finmath_daily_ohlcv`（kabulab-cf
-# drizzle/d1/0012）を除いた 29 件。`TABLE_LICENSE` の登録漏れを検出するために
-# **宣言とは独立した観測値**として置く（宣言から導くとテストが自明になる）。
+# drizzle/d1/0012）を除いた 29 件に、L-20 の `jss_notion_pages` を足した 30 件。
+# `TABLE_LICENSE` の登録漏れを検出するために**宣言とは独立した観測値**として
+# 置く（宣言から導くとテストが自明になる）。
 PROD_TABLE_NAMES: frozenset[str] = frozenset(
     {
         "core_stock_annual_financials", "core_stock_financials", "core_stocks",
         "ir_disclosures",
         "jss_column_license", "jss_dataset_freshness", "jss_financials",
-        "jss_index_symbols", "jss_job_runs", "jss_raw_files", "jss_supply_latest",
+        "jss_index_symbols", "jss_job_runs", "jss_notion_pages", "jss_raw_files",
+        "jss_supply_latest",
         "jss_writer_claims", "jss_xbrl_documents", "jss_xbrl_elements",
         "otakara_stock_financials", "otakara_stock_scores", "p_momentum", "rsi_percentile",
         "swing_daily_ohlcv", "swing_entry_signals", "swing_market_context",

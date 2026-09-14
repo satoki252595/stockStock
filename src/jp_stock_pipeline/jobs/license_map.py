@@ -34,8 +34,8 @@ personal-only なら害は無いが、`commercial-ok` の孤児が残ると「�
 
 ## `apply_schema` を毎日は呼ばない
 
-`apply_schema` は `CREATE TABLE/INDEX IF NOT EXISTS` を 24 文発行する。本番には
-10 表すべてが既に存在するので、日次で呼んでも 24 往復ぶんの実行時間を使って
+`apply_schema` は `CREATE TABLE/INDEX IF NOT EXISTS` を 20 文発行する。本番には
+11 表すべてが既に存在するので、日次で呼んでも 20 往復ぶんの実行時間を使って
 必ず no-op になる。代わりに `sqlite_master` 1 文（**行を走査しない**）で存在を
 確かめ、欠けていたら「`apply_schema` を手で流せ」と報告する。ブートストラップ
 （表が無い環境）は 1 回きりの操作なので、日次 cron の仕事ではない。
@@ -183,20 +183,25 @@ def _sync_writer_claims(store: D1Store, ctx: JobContext) -> None:
     照合コードは**両リポジトリに 0 行**だった。しかも両方が書く `core_stocks` は
     誰の所有でもなかった。
 
-    **順序が仕様: 投入 → 読み直し → 照合。** claim を投入するのも書込ジョブなので、
-    照合を投入より前に置くと claim 行の無い DB に対する最初の実行が必ず異常終了し
-    ブートストラップ不能になる。この順序なら、2 段目でも初回は投入した行を読み
-    直して一致し成功する。投入のあとでも残る差分（upsert が届いていない・宣言外の
-    claim がある）だけが失敗になる。
+    **順序が仕様: 読み → 差分があれば投入 → 読み直し → 照合。** claim を投入する
+    のも書込ジョブなので、照合を投入より前に置くと claim 行の無い DB に対する
+    最初の実行が必ず異常終了しブートストラップ不能になる。この順序なら、2 段目
+    でも初回は投入した行を読み直して一致し成功する。投入のあとでも残る差分
+    （upsert が届いていない・宣言外の claim がある）だけが失敗になる。
+
+    差分が無ければ upsert を打たない（L-17）。毎日変わらない宣言を毎日
+    書き直すのは D1 の書き込み課金と `updated_at` の無駄な更新になる。
     """
     try:
-        store.upsert(
-            "jss_writer_claims",
-            ["dataset", "column_group", "writer", "updated_at"],
-            G.writer_claim_rows(),
-            conflict=["dataset", "column_group"],
-        )
         rows = store.query(G.WRITER_CLAIMS_SQL)
+        if G.writer_claims_need_seed(rows):
+            store.upsert(
+                "jss_writer_claims",
+                ["dataset", "column_group", "writer", "updated_at"],
+                G.writer_claim_rows(),
+                conflict=["dataset", "column_group"],
+            )
+            rows = store.query(G.WRITER_CLAIMS_SQL)
     except D1Error as exc:
         ctx.add_failure("jss_writer_claims", f"claim を投入・照合できない: {exc}")
         return
@@ -227,7 +232,11 @@ def _describe(diff: S.ReferenceDiff, table: str) -> list[str]:
 
 
 def _sync_column_license(store: D1Store, ctx: JobContext) -> None:
-    """投入 → 読み直し → 孤児を削除 → それでも残る差分を失敗にする。"""
+    """読み → 差分があれば投入 → 読み直し → 孤児を削除 → 残る差分を失敗にする。
+
+    以前は `execute` が無条件で全表を seed してから読んでいた。宣言が
+    変わらない日の書き込みは無駄なので、差分があるときだけ投入する（L-17）。
+    """
     try:
         rows = store.query(S.COLUMN_LICENSE_SQL)
     except D1Error as exc:
@@ -235,6 +244,14 @@ def _sync_column_license(store: D1Store, ctx: JobContext) -> None:
         return
 
     diff = S.column_license_diff(rows)
+    if diff.missing or diff.mismatched:
+        try:
+            S.seed_column_license(store)
+            rows = store.query(S.COLUMN_LICENSE_SQL)
+        except D1Error as exc:
+            ctx.add_failure("jss_column_license", f"宣言を投入できない: {exc}")
+            return
+        diff = S.column_license_diff(rows)
     for orphan in diff.orphan:
         table_name, column_name = orphan
         try:
@@ -262,14 +279,26 @@ def _sync_column_license(store: D1Store, ctx: JobContext) -> None:
     ctx.add_success()
 
 
-def _check_index_symbols(store: D1Store, ctx: JobContext) -> None:
-    """指数シンボルの照合。孤児は**削除せず報告する**（R2 オブジェクトが残る）。"""
+def _sync_index_symbols(store: D1Store, ctx: JobContext) -> None:
+    """指数シンボルの照合。孤児は**削除せず報告する**（R2 オブジェクトが残る）。
+
+    欠損・食い違いがあるときだけ投入する（L-17）。以前の `_check_*` は
+    投入を `execute` の一括 seed に頼っていたが、あれは無くなった。
+    """
     try:
         rows = store.query(S.INDEX_SYMBOLS_SQL)
     except D1Error as exc:
         ctx.add_failure("jss_index_symbols", f"実表を読めない: {exc}")
         return
     diff = S.index_symbol_diff(rows)
+    if diff.missing or diff.mismatched:
+        try:
+            S.seed_index_symbols(store)
+            rows = store.query(S.INDEX_SYMBOLS_SQL)
+        except D1Error as exc:
+            ctx.add_failure("jss_index_symbols", f"宣言を投入できない: {exc}")
+            return
+        diff = S.index_symbol_diff(rows)
     problems = _describe(diff, "jss_index_symbols")
     if diff.orphan:
         # 失敗にはしない。R2 の掃除と同じ変更で消すべきもので、日次で鳴らすと
@@ -306,14 +335,11 @@ def execute(ctx: JobContext) -> None:
         _check_coverage(store, ctx)
         return
 
-    try:
-        S.seed_reference_tables(store)
-    except D1Error as exc:
-        ctx.add_failure("seed", f"参照表を投入できない: {exc}")
-        return
-
+    # 一括 seed はしない。各表は「読む → 差分があれば投入 → 読み直し → 照合」
+    # で、自分に必要なときだけ書く（L-17）。毎日変わらない宣言を毎日
+    # 書き直すのは D1 の書き込み課金になる。
     _sync_column_license(store, ctx)
-    _check_index_symbols(store, ctx)
+    _sync_index_symbols(store, ctx)
     _sync_writer_claims(store, ctx)
     _check_coverage(store, ctx)
 

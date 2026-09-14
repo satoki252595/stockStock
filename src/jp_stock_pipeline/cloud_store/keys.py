@@ -65,10 +65,18 @@ def derived_key(raw_object_key: str, *, suffix: str) -> str:
     """原本から派生した変換版のキー（原本と同じ木構造の derived/ 側に置く）。
 
     原本キーと 1:1 で対応させることで、派生だけが孤児になることを防ぐ。
+    原本が gzip 済み（`…csv.gz`）のときは `.gz` を除いてから拡張子を
+    置き換える（L-22縮小。素朴に rpartition すると `…csv.csv.gz` になる）。
     """
     if not raw_object_key.startswith("raw/"):
         raise ValueError(f"derived_key: 原本キーではない: {raw_object_key!r}")
-    base, _, _ext = raw_object_key.rpartition(".")
+    stem = raw_object_key
+    head, _, tail = stem.rpartition(".")
+    if tail == "gz" and "." in head.rsplit("/", 1)[-1]:
+        # `.gz` は符号化なので 1 段剥がして置き換える（`…csv.csv.gz` にしない）。
+        # 末尾セグメントにドットが無い `…abc.gz`（素の .gz 原本）は剥がさない。
+        stem = head
+    base, _, _ext = stem.rpartition(".")
     return f"derived/{base[len('raw/'):]}.{_seg(suffix.lstrip('.').lower())}"
 
 

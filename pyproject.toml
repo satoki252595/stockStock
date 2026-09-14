@@ -42,7 +42,7 @@ packages = ["src/jp_stock_pipeline"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q -rs"
 filterwarnings = [
     "ignore:Using `httpx` with `starlette.testclient`",
 ]

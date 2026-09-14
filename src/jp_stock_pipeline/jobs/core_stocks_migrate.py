@@ -9,9 +9,9 @@
 
 ## 判定内容
 
-- G-core-5: 子表の孤児（`子表 LEFT JOIN core_stocks`）。`core_stocks` の索引行を
-  読む（2026-09-13 実測で `core_stock_financials` 1 表ぶんだけで `rows_read`
-  7,528）。「行を 1 行も走査しない」ではない
+- G-core-5: 子表の孤児（`子表 LEFT JOIN core_stocks`）。本番では宣言の無い
+  2 表（`jss_financials` / `p_momentum`）だけを数える（L-16。FK 宣言のある
+  14 表は DB が守る）。「行を 1 行も走査しない」ではない
 - 追加列・追加索引の有無（適用済みの確認）と型・nullability
 - E7: 本番にあって stockStock の定義に無い列・索引（superset 方向）。
   `core_stocks` の列定義は両リポジトリに散っていて**本番の PRAGMA が正**
@@ -60,6 +60,10 @@ def _observe(store: D1Store) -> dict:
     名前だけでなく**定義**まで持つ。列名の集合しか見ていないと
     「型の違う同名列」を見逃す。行の値の突き合わせ（旧 G-core-2/3）は
     適用前後の比較が要る移行時限定の判定だったので、適用済みの今は持たない。
+
+    孤児検査は `PRAGMA foreign_keys=1` の本番では宣言の無い 2 表だけを数える
+    （L-16。FK 宣言のある 14 表は DB が INSERT 時に弾く）。`0` の環境では
+    全表検査に戻す安全弁（素の SQLite の既定は 0 のため）。
     """
     columns = {
         str(r["name"]): {
@@ -70,8 +74,13 @@ def _observe(store: D1Store) -> dict:
         for r in store.query(cs.TABLE_INFO_SQL)
     }
     indexes = {str(r["name"]): r.get("sql") for r in store.query(cs.INDEX_LIST_SQL)}
+    fk_rows = store.query(cs.FOREIGN_KEYS_PRAGMA)
+    fk_on = bool(fk_rows and int(fk_rows[0].get("foreign_keys", 0) or 0))
+    statements = (
+        cs.daily_orphan_check_statements() if fk_on else cs.orphan_check_statements()
+    )
     orphans: dict[str, int] = {}
-    for sql in cs.orphan_check_statements():
+    for sql in statements:
         orphans.update({str(r["t"]): int(r["n"] or 0) for r in store.query(sql)})
     return {"columns": columns, "indexes": indexes, "orphans": orphans}
 

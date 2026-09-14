@@ -104,7 +104,7 @@ def test_cache_only_after_persistence(tmp_path, artifact, monkeypatch, raw_saved
     ctx = context(tmp_path / "cache")
     monkeypatch.setattr(job, "_fetch_financial_tidy", lambda *a: (artifact, None))
 
-    def save_raw(*a):
+    def save_raw(*a, **kw):
         events.append("raw")
         if not raw_saved:
             raise RawUploadError("not saved")
@@ -159,7 +159,7 @@ def test_amended_interim_reports_use_financial_pipeline(
     monkeypatch.setattr(job.xbrl_to_csv, "edinet_csv_zip_to_tidy", lambda *a: tidy)
     monkeypatch.setattr(job.xbrl_to_csv, "xbrl_zip_to_tidy", lambda *a: tidy)
     monkeypatch.setattr(job.xbrl_to_csv, "write_tidy", lambda *a: None)
-    monkeypatch.setattr(ctx, "upload_raw", lambda *a: persisted.append("raw") or "raw-page")
+    monkeypatch.setattr(ctx, "upload_raw", lambda *a, **kw: persisted.append("raw") or "raw-page")
     monkeypatch.setattr(ctx, "mirror_xbrl_facts", lambda *a: None)
     monkeypatch.setattr(ctx, "persist", lambda rec, *a, **kw: persisted.append(rec) or True)
     monkeypatch.setattr(job.normalize, "tidy_to_financial_record", normalize)

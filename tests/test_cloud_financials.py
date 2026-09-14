@@ -497,7 +497,7 @@ class TestEdinetDailyWiring:
             job.edinet, "fetch_document",
             lambda *a, **kw: (_ for _ in ()).throw(job.FetchError("no pdf")),
         )
-        monkeypatch.setattr(ctx, "upload_raw", lambda *a: "raw-page")
+        monkeypatch.setattr(ctx, "upload_raw", lambda *a, **kw: "raw-page")
         monkeypatch.setattr(ctx, "mirror_xbrl_facts", lambda *a: None)
         monkeypatch.setattr(ctx, "persist", lambda *a, **kw: True)
         monkeypatch.setattr(

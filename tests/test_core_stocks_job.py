@@ -27,7 +27,11 @@ CHILD_STUBS = "".join(
     f"CREATE TABLE {t} (id INTEGER PRIMARY KEY, stock_id INTEGER NOT NULL);"
     for t in cs.CHILD_TABLES
     if t != "yutai_benefits"
-) + "CREATE TABLE jss_financials (id INTEGER PRIMARY KEY, stock_id INTEGER);"
+) + (
+    "CREATE TABLE jss_financials (id INTEGER PRIMARY KEY, stock_id INTEGER);"
+    # 本番と同じく stock_id が PRIMARY KEY（NOT NULL。FK 宣言なし）。
+    "CREATE TABLE p_momentum (stock_id INTEGER PRIMARY KEY NOT NULL);"
+)
 
 
 class FakeStore:
@@ -116,6 +120,36 @@ class TestVerifyDetectsDamage:
         assert not any("G-core-5" in p for p in problems), problems
 
 
+class TestDailyOrphanScope:
+    """L-16: 日次は宣言の無い 2 表だけ。FK 強制の無い環境では全表に戻す。"""
+
+    def test_fk_on_では宣言の無い2表だけを数える(self, store: FakeStore) -> None:
+        _apply_ddl(store)
+        store.con.execute("PRAGMA foreign_keys = ON")
+        store.sqls.clear()
+        job._observe(store)  # noqa: SLF001
+        orphan_sqls = [s for s in store.sqls if "LEFT JOIN core_stocks" in s]
+        assert orphan_sqls == cs.daily_orphan_check_statements()
+        assert cs.FOREIGN_KEYS_PRAGMA in store.sqls
+
+    def test_fk_off_では全表検査に戻す(self, store: FakeStore) -> None:
+        """素の SQLite の既定は 0。安全弁が無いと FK 表の孤児を見逃す。"""
+        _apply_ddl(store)
+        assert store.con.execute("PRAGMA foreign_keys").fetchone() == (0,)
+        store.sqls.clear()
+        job._observe(store)  # noqa: SLF001
+        orphan_sqls = [s for s in store.sqls if "LEFT JOIN core_stocks" in s]
+        assert orphan_sqls == cs.orphan_check_statements()
+
+    def test_p_momentum_の孤児を日次で検出する(self, store: FakeStore) -> None:
+        _apply_ddl(store)
+        store.con.execute("PRAGMA foreign_keys = ON")
+        store.con.execute("INSERT INTO p_momentum (stock_id) VALUES (999)")
+        store.con.commit()
+        problems = job._verify(job._observe(store))  # noqa: SLF001
+        assert any("G-core-5" in p and "p_momentum" in p for p in problems), problems
+
+
 class TestColumnDriftDetection:
     """E7: 列定義のドリフトを `--verify` で捕まえる。
 
@@ -164,8 +198,9 @@ class TestColumnDriftDetection:
             assert sql.split()[0].upper() in ("SELECT", "PRAGMA"), sql
         # D1 は走査行課金。`core_stocks` の行断面は読まない（列・索引・孤児だけ）。
         allowed = (
-            {cs.TABLE_INFO_SQL, cs.INDEX_LIST_SQL}
+            {cs.TABLE_INFO_SQL, cs.INDEX_LIST_SQL, cs.FOREIGN_KEYS_PRAGMA}
             | set(cs.orphan_check_statements())
+            | set(cs.daily_orphan_check_statements())
         )
         assert set(store.sqls) <= allowed, set(store.sqls) - allowed
         # 孤児検査 (G-core-5) は判定に使うので消えていないこと。

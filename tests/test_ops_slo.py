@@ -167,7 +167,7 @@ class TestRecordJobRun:
         ops.record_job_run(
             store, job_name="edinet_daily", status="成功", processed=0, failed=0,
             failed_codes=[], run_url="https://example/1", duration_secs=70.0,
-            finished_at=1_700_000_000,
+            finished_at=int(datetime.now(UTC).timestamp()),
         )
         rows = store.query("SELECT * FROM jss_job_runs")
         assert len(rows) == 1
@@ -179,7 +179,8 @@ class TestRecordJobRun:
         codes = [f"{i:04d}" for i in range(200)]
         ops.record_job_run(
             store, job_name="j", status="一部失敗", processed=1, failed=200,
-            failed_codes=codes, run_url=None, duration_secs=None, finished_at=1,
+            failed_codes=codes, run_url=None, duration_secs=None,
+            finished_at=int(datetime.now(UTC).timestamp()),
         )
         saved = json.loads(store.query("SELECT failed_codes FROM jss_job_runs")[0]["failed_codes"])
         assert len(saved) == ops.MAX_FAILED_CODES
@@ -187,16 +188,37 @@ class TestRecordJobRun:
     def test_処理ゼロの成功も残る(self) -> None:
         """EDINET が 11 営業日「成功 processed=0」だったのを後から見つけられるように。"""
         store = _FakeStore()
+        now = int(datetime.now(UTC).timestamp())
         for day in range(11):
             ops.record_job_run(
                 store, job_name="edinet_daily", status="成功", processed=0, failed=0,
-                failed_codes=[], run_url=None, duration_secs=70.0, finished_at=day,
+                failed_codes=[], run_url=None, duration_secs=70.0,
+                finished_at=now - day * 86400,
             )
         rows = store.query(
             "SELECT COUNT(*) AS n FROM jss_job_runs"
             " WHERE job_name='edinet_daily' AND status='成功' AND processed=0"
         )
         assert rows[0]["n"] == 11
+
+    def test_90日より古い履歴は書き込みのたび剪定する(self) -> None:
+        """剪定が無いと空振り検知の ROW_NUMBER が無限に育つ (L-17)。"""
+        store = _FakeStore()
+        old = int((datetime.now(UTC) - timedelta(days=100)).timestamp())
+        store.con.execute(
+            "INSERT INTO jss_job_runs (job_name, status, processed, failed,"
+            " failed_codes, run_url, duration_secs, finished_at)"
+            " VALUES ('old_job', '成功', 0, 0, NULL, NULL, NULL, ?)",
+            (old,),
+        )
+        store.con.commit()
+        ops.record_job_run(
+            store, job_name="new_job", status="成功", processed=1, failed=0,
+            failed_codes=[], run_url=None, duration_secs=1.0,
+            finished_at=int(datetime.now(UTC).timestamp()),
+        )
+        rows = store.query("SELECT job_name FROM jss_job_runs")
+        assert [r["job_name"] for r in rows] == ["new_job"]
 
     def test_記録に失敗してもジョブを落とさない(self) -> None:
         class Broken:
@@ -263,7 +285,9 @@ class TestDatasetManifest:
         """D1 の compound SELECT 上限は 5。UNION を許すと構造的に抵触する。"""
         for src in datasets.DATASET_SOURCES:
             upper = src.sql.upper()
-            assert "COUNT(" in upper, src.dataset
+            # n は件数 (COUNT) か存在 (CASE WHEN MAX..IS NULL) のどちらか。
+            # 大きい表は存在判定にしないと索引シークが全走査に落ちる (L-17)。
+            assert "COUNT(" in upper or "CASE WHEN MAX(" in upper, src.dataset
             assert "MAX(" in upper, src.dataset
             assert "SELECT *" not in upper, src.dataset
             for forbidden in ("UNION", "INTERSECT", "EXCEPT"):
@@ -280,6 +304,33 @@ class TestDatasetManifest:
     def test_混在する表は最も厳しいタグへ倒す(self) -> None:
         """core_stocks を commercial-ok にすると JPX 由来の断面メタが公開 API に出る。"""
         assert datasets.DATASET_SOURCE_BY_NAME["core_stocks"].license_tag == "personal-only"
+
+    def test_uniform表のタグは地図と一致する(self) -> None:
+        """二重宣言にしない（L-37）。導出元が uniform で無くなったら落ちる。"""
+        from jp_stock_pipeline.cloud_store import governance as G
+
+        checked = set()
+        for src in datasets.DATASET_SOURCES:
+            spec = G.TABLE_LICENSE.get(src.location)
+            if spec is None or spec.kind is not G.TableKind.UNIFORM:
+                continue
+            checked.add(src.dataset)
+            assert spec.tag is not None, src.dataset
+            assert src.license_tag == spec.tag.value, (
+                f"{src.dataset}: マニフェスト {src.license_tag} /"
+                f" 地図 {spec.tag.value}"
+            )
+        # 空振り防止：今日 uniform 観測はこの 3 件。
+        assert checked == {
+            "d1_core_stock_financials", "tdnet_disclosures", "yutai_benefits",
+        }, checked
+
+    def test_uniformでない表は導出を拒否する(self) -> None:
+        """行タグ・列地図・絞り込み観測に `_uniform_tag` を使うと落ちる。"""
+        with pytest.raises(ValueError, match="uniform ではない"):
+            datasets._uniform_tag("jss_raw_files")
+        with pytest.raises(ValueError, match="uniform ではない"):
+            datasets._uniform_tag("core_stocks")
 
     def test_観測SQLは読み取りだけ(self) -> None:
         """観測ジョブは移行元 (kabulab-cf) の本番 DB へのハンドルも持つ。
@@ -715,7 +766,7 @@ class TestOpsCheck:
             ops.record_job_run(
                 store, job_name="ops_check", status=runner.STATUS_FAILURE, processed=0,
                 failed=1, failed_codes=["slo"], run_url=None, duration_secs=1.0,
-                finished_at=i,
+                finished_at=int(datetime.now(UTC).timestamp()) - i,
             )
         problems: list[str] = []
         ops_check._check_idle_runs(store, problems)
@@ -727,7 +778,7 @@ class TestOpsCheck:
             ops.record_job_run(
                 store, job_name="edinet_daily", status=runner.STATUS_FAILURE,
                 processed=0, failed=3, failed_codes=["x"], run_url=None,
-                duration_secs=1.0, finished_at=i,
+                duration_secs=1.0, finished_at=int(datetime.now(UTC).timestamp()) - i,
             )
         problems: list[str] = []
         ops_check._check_idle_runs(store, problems)
@@ -740,12 +791,28 @@ class TestOpsCheck:
             ops.record_job_run(
                 store, job_name="edinet_daily", status=runner.STATUS_SUCCESS,
                 processed=0, failed=0, failed_codes=[], run_url=None,
-                duration_secs=1.0, finished_at=i,
+                duration_secs=1.0, finished_at=int(datetime.now(UTC).timestamp()) - i,
             )
         problems: list[str] = []
         ops_check._check_idle_runs(store, problems)
         assert len(problems) == 1
         assert "edinet_daily" in problems[0]
+
+    def test_30日より前の実行は空振り判定に入らない(self) -> None:
+        """直近窓が無いと昔の不調をいつまでも通報し続ける (L-17)。"""
+        store = _FakeStore()
+        old = int((datetime.now(UTC) - timedelta(days=40)).timestamp())
+        for i in range(5):
+            store.con.execute(
+                "INSERT INTO jss_job_runs (job_name, status, processed, failed,"
+                " failed_codes, run_url, duration_secs, finished_at)"
+                " VALUES ('edinet_daily', '成功', 0, 0, NULL, NULL, NULL, ?)",
+                (old - i,),
+            )
+        store.con.commit()
+        problems: list[str] = []
+        ops_check._check_idle_runs(store, problems)
+        assert problems == []
 
     def test_観測ジョブが失敗しかしていないなら止まっていると報告する(self) -> None:
         """status を絞らないと runner が status に関わらず 1 行書くので
