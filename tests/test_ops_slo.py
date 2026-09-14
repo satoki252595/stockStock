@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import json
 import re
-import sqlite3
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
+
+from _doubles import SqliteD1
 
 from jp_stock_pipeline.cloud_store import datasets, ops, slo
 from jp_stock_pipeline.jobs import freshness_probe, ops_check, runner
@@ -38,43 +39,11 @@ _LEGACY_DDL: tuple[str, ...] = (
 )
 
 
-class _FakeStore:
+def _FakeStore() -> SqliteD1:
     """D1Store の代わりにローカル sqlite へ本物の SQL を流す。"""
+    from jp_stock_pipeline.cloud_store.schema import SCHEMA_STATEMENTS
 
-    def __init__(self) -> None:
-        from jp_stock_pipeline.cloud_store.schema import SCHEMA_STATEMENTS
-
-        self.con = sqlite3.connect(":memory:")
-        for stmt in SCHEMA_STATEMENTS:
-            self.con.execute(stmt)
-        for stmt in _LEGACY_DDL:
-            self.con.execute(stmt)
-        self.con.commit()
-        # dry-run が 1 文も書き込まないことを検証するため、流れた SQL を全部残す。
-        self.sql_log: list[str] = []
-
-    def query(self, sql: str, params: list | None = None):
-        from jp_stock_pipeline.cloud_store.d1 import D1Error
-
-        self.sql_log.append(sql)
-        try:
-            cur = self.con.execute(sql, params or [])
-        except sqlite3.Error as exc:
-            # D1Store は失敗を必ず D1Error に包む。表が無い・列名が違うときの
-            # 呼び出し側の分岐を本番と同じにするため、ここでも同じ型に揃える。
-            raise D1Error(f"sqlite: {exc} sql={sql[:120]!r}") from exc
-        cols = [d[0] for d in cur.description] if cur.description else []
-        rows = [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
-        self.con.commit()
-        return rows
-
-    @property
-    def write_sql(self) -> list[str]:
-        """書き込み（INSERT/UPDATE/DELETE）に見える文だけを抜く。"""
-        return [
-            s for s in self.sql_log
-            if s.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE", "REPLACE"))
-        ]
+    return SqliteD1(ddl=(*SCHEMA_STATEMENTS, *_LEGACY_DDL))
 
 
 _D1_ENV = {

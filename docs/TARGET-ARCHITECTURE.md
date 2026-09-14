@@ -540,7 +540,7 @@ jss_column_license が宣言する edinet_code / sector33 / sector17 / instrumen
 | `CLOUDFLARE_API_TOKEN` 1 本でアカウント全体の **D1 16 個**（株と無関係な 15 プロジェクト含む）を列挙できた | `CF_D1_KABULAB`（対象 DB のみ）/ `CF_R2_RAW` / `CF_R2_VWAP` / `CF_DEPLOY` に分割 |
 | `CRON_SECRET` 1 本が 3 workflow × 2 ルート兼務 | `CRON_INGEST` / `CRON_ADMIN` / `CRON_VWAP` の 3 本 |
 | 13 件すべて 2026-06-21 のまま **83 日** | 90 日ローテ。月次 workflow が `gh secret list` を見て 90 日超があれば Issue 起票（**自動ローテは過剰、督促で十分**） |
-| `TS_OAUTH_*` / `LOCAL_DB_*` が存在しないのに 7 workflow が env に並べ続ける | 削除。**死んだ二重化を生きているように見せない** |
+| ~~`TS_OAUTH_*` / `LOCAL_DB_*` が存在しないのに 7 workflow が env に並べ続ける~~ → #33 で除去済み（2026-09-14 時点で `.github/workflows/` に該当 env 0 件） | 削除。**死んだ二重化を生きているように見せない** |
 
 ---
 
@@ -703,7 +703,7 @@ Notion は現状 ③財務サマリ 34,551 行 / ④開示 62,115 行と D1 よ�
 - 鮮度（2026-09-12 時点）: core_stocks **33.0 日** / otakara **33.0 日** / yutai_benefits **81.5 日** / core_stock_financials **0.1 日** / jss_supply_latest **0.5 日**
 - **D1 の compound SELECT 5 項上限を実地で再確認**（6 項の UNION ALL はエラー、5 項は成功）
 - kabulab-cf の TS における `jss_` 参照 **0 件**、`personal-only|license_tag|licenseTag` **0 件**、`.github/workflows` に push/pull_request トリガ **0 件**
-- Python 行数内訳: collectors 2,054 / convert 740 / jobs 2,826 / transform 733 / notion 2,535 / cloud_store 1,785 / local_store 1,033 / ルート 828（本体計 12,534、テスト 9,258）。stockStock の配信 Worker は TS 613 行
+- Python 行数内訳（2026-09-14 再測。S1–S6 の削除と性能波の追加の後）: collectors 1,335 / convert 672 / jobs 2,760 / transform 411 / notion 2,593 / cloud_store 3,937 / local_store 1,172 / ルート 843（本体計 13,723、テスト 12,819）。stockStock の配信 Worker は TS 1,082 行（2026-09-13 時点は本体計 12,534、テスト 9,258、TS 613 行）
 
 **確認できなかったこと**
 

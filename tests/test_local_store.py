@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import provenance
+
 from jp_stock_pipeline.licensing import LicenseTag
 from jp_stock_pipeline.local_store import mappers
 from jp_stock_pipeline.local_store import schema as local_schema
@@ -35,14 +37,8 @@ from jp_stock_pipeline.models import (
 
 
 def _prov(**kw) -> Provenance:
-    base = dict(
-        source=Source.EDINET,
-        license_tag=LicenseTag.COMMERCIAL_OK,
-        data_date=date(2026, 6, 10),
-        fetched_at=datetime(2026, 6, 10, 12, tzinfo=JST),
-    )
-    base.update(kw)
-    return Provenance(**base)
+    kw.setdefault("fetched_at", datetime(2026, 6, 10, 12, tzinfo=JST))
+    return provenance(**kw)
 
 
 class TestStockMasterUpsert:

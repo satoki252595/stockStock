@@ -14,16 +14,15 @@ from datetime import date, timedelta
 import pytest
 
 from jp_stock_pipeline.collectors import tdnet_yanoshin as ty
-from jp_stock_pipeline.config import load_settings
 from jp_stock_pipeline.licensing import LicenseTag
 from jp_stock_pipeline.models import Source, now_jst
 from jp_stock_pipeline.rawstore import sha256_bytes
 
-from conftest import fixture_path
+from conftest import dry_settings, fixture_path
 
 
 def _settings(tmp_path):
-    return load_settings(dry_run=True, env={"RAW_DATA_DIR": str(tmp_path)})
+    return dry_settings(tmp_path)
 
 
 def _load(relative: str) -> dict:

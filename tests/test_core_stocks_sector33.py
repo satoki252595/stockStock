@@ -12,16 +12,16 @@
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import date
 from types import SimpleNamespace
 
 import pytest
 
+from _doubles import SqliteD1
 from conftest import fixture_path
 
 from jp_stock_pipeline.cloud_store import core_stocks as cs
-from jp_stock_pipeline.cloud_store.d1 import MAX_BOUND_PARAMS, D1Error
+from jp_stock_pipeline.cloud_store.d1 import MAX_BOUND_PARAMS
 from jp_stock_pipeline.collectors import edinet_codelist
 from jp_stock_pipeline.contracts.sector33 import TSE_SECTOR33_NAMES, normalize_sector33
 from jp_stock_pipeline.jobs import master_sync
@@ -158,44 +158,21 @@ class TestPlanSector33Updates:
 # --- ジョブ配線 -------------------------------------------------------------
 
 
-def _seeded_connection(rows: list[tuple[str, str | None]]) -> sqlite3.Connection:
-    con = sqlite3.connect(":memory:")
-    con.executescript(PROD_DDL)
-    for stmt in APPLIED_DDL:
-        con.execute(stmt)
-    for code, sector33 in rows:
-        con.execute(
-            "INSERT INTO core_stocks (code, name, market, sector, updated_at, sector33)"
-            " VALUES (?, ?, 'プライム（内国株式）', NULL, 1000, ?)",
-            [code, f"銘柄{code}", sector33],
-        )
-    con.commit()
-    return con
-
-
-class _FakeD1:
-    """`D1Store.query` だけをローカル sqlite へ差し替えた最小スタブ。"""
+class _FakeD1(SqliteD1):
+    """sqlite 裏打ちの `D1Store` + 本番形 `core_stocks` と sector33 seed。"""
 
     def __init__(self, rows: list[tuple[str, str | None]], *, fail_on_update: bool = False):
-        self.con = _seeded_connection(rows)
-        self.sqls: list[str] = []
-        self.fail_on_update = fail_on_update
-
-    def query(self, sql: str, params: list | None = None, *, idempotent: bool = True):
-        self.sqls.append(sql)
-        if len(params or []) > MAX_BOUND_PARAMS:
-            raise D1Error("bind 上限超過")
-        if self.fail_on_update and sql.startswith("UPDATE"):
-            raise D1Error("テスト: UPDATE 失敗")
-        cur = self.con.execute(sql, params or [])
-        cols = [d[0] for d in cur.description] if cur.description else []
-        out = [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+        super().__init__(fail_on_prefix=("UPDATE",) if fail_on_update else ())
+        self.con.executescript(PROD_DDL)
+        for stmt in APPLIED_DDL:
+            self.con.execute(stmt)
+        for code, sector33 in rows:
+            self.con.execute(
+                "INSERT INTO core_stocks (code, name, market, sector, updated_at, sector33)"
+                " VALUES (?, ?, 'プライム（内国株式）', NULL, 1000, ?)",
+                [code, f"銘柄{code}", sector33],
+            )
         self.con.commit()
-        return out
-
-    @property
-    def writes(self) -> list[str]:
-        return [s for s in self.sqls if not s.lstrip().upper().startswith("SELECT")]
 
     def values(self) -> dict[str, tuple[str | None, int]]:
         return {
@@ -255,22 +232,22 @@ class TestSyncSector33:
             "9301": ("倉庫・運輸関連業", 1000),
             "1201": ("不動産業", 1000),  # コードリストに居ないので触らない
         }
-        assert len(store.writes) == 1
+        assert len(store.write_sql) == 1
 
     def test_2回目は0文(self, fake_d1) -> None:
         store = fake_d1([("9301", None)])
         records = [_record("9301", "倉庫・運輸関連")]
         master_sync._sync_sector33(_ctx(dry_run=False), records)
-        before = len(store.writes)
+        before = len(store.write_sql)
         master_sync._sync_sector33(_ctx(dry_run=False), records)
-        assert len(store.writes) == before
+        assert len(store.write_sql) == before
 
     def test_dry_run_は書かない(self, fake_d1) -> None:
         store = fake_d1([("9301", None)])
         ctx = _ctx(dry_run=True)
         master_sync._sync_sector33(ctx, [_record("9301", "倉庫・運輸関連")])
-        assert store.writes == []
-        assert store.sqls == [cs.SECTOR33_SNAPSHOT_SQL]
+        assert store.write_sql == []
+        assert store.sql_log == [cs.SECTOR33_SNAPSHOT_SQL]
         assert store.values()["9301"] == (None, 1000)
 
     def test_D1_未設定なら触らず失敗にもしない(self, monkeypatch) -> None:
@@ -320,11 +297,11 @@ class TestMasterSyncWiring:
         self._patch_fetch(monkeypatch)
         store = fake_d1([("7203", None), ("9301", None)])
         assert master_sync.main(["--dry-run"], env=self._env(tmp_path)) == 0
-        assert store.sqls == [cs.SECTOR33_SNAPSHOT_SQL]
-        assert store.writes == []
+        assert store.sql_log == [cs.SECTOR33_SNAPSHOT_SQL]
+        assert store.write_sql == []
 
     def test_limit_指定では読みも書きもしない(self, monkeypatch, tmp_path, fake_d1) -> None:
         self._patch_fetch(monkeypatch)
         store = fake_d1([("7203", None)])
         assert master_sync.main(["--dry-run", "--limit", "5"], env=self._env(tmp_path)) == 0
-        assert store.sqls == []
+        assert store.sql_log == []

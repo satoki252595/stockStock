@@ -164,10 +164,10 @@ PERIOD_TYPE_TO_DISCLOSURE: dict[str, str] = {
 # DEI で分けると、同じ期の EDINET 行と TDnet 行が「2Q」と「中間」に割れて
 # 二重計上になる。
 #
-# 期末で決めれば、Notion ③ の既存行の移行 (scripts/migrate_halfyear_labels.py) にも
-# 同じ規則が使える。既存行には書類種別が残っていないので、書類種別で決める規則は
-# 移行できない。規則が同じなら、移行した行と後から同じ期を取り直した書き込みが
-# 必ず同じキーに着地する。
+# 期末で決めれば、Notion ③ の既存行の移行 (2026-09 実施済み) にも同じ規則が
+# 使える。既存行には書類種別が残っていないので、書類種別で決める規則は移行できない。
+# 規則が同じなら、移行した行と後から同じ期を取り直した書き込みが必ず同じキーに
+# 着地する。
 DISCLOSURE_TYPE_SECOND_QUARTER = "2Q"
 DISCLOSURE_TYPE_INTERIM = "中間"
 INTERIM_FIRST_PERIOD_END = date(2024, 6, 30)
