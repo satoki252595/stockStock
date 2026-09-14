@@ -97,7 +97,6 @@ def _wire(monkeypatch, store: _FakeStore, *modules) -> None:
         monkeypatch.setattr(module, "D1Store", factory)
     # runner は関数内で d1 を import するのでモジュール属性を差し替える
     monkeypatch.setattr(d1_module, "D1Store", factory)
-    monkeypatch.setattr(runner, "write_job_log", lambda *a, **k: "dummy")
     monkeypatch.setattr(runner, "connect_local_store", lambda *a, **k: None)
 
 
@@ -134,14 +133,14 @@ class TestFreshnessSlo:
         assert slo.judge("unknown_dataset", _epoch_days_ago(0), now=NOW) == "unknown"
 
     def test_記録が無ければ緑にしない(self) -> None:
-        assert slo.judge("prices_daily", None, now=NOW) == "unknown"
-        assert slo.judge("prices_daily", 0, now=NOW) == "unknown"
+        assert slo.judge("d1_core_stock_financials", None, now=NOW) == "unknown"
+        assert slo.judge("d1_core_stock_financials", 0, now=NOW) == "unknown"
 
     @pytest.mark.parametrize(
         ("dataset", "days", "expected"),
         [
             # 実測値そのもの
-            ("prices_daily", 0.1, "green"),      # 2.4h
+            ("d1_core_stock_financials", 0.1, "green"),      # 2.4h
             ("jsf_supply", 0.5, "green"),
             ("core_stocks", 33.0, "green"),       # 33.0日 = まだ緑（あと7日で黄）
             ("core_stocks", 41.0, "yellow"),
@@ -155,7 +154,7 @@ class TestFreshnessSlo:
         assert slo.judge(dataset, _epoch_days_ago(days), now=NOW) == expected
 
     def test_境界ちょうどは緑(self) -> None:
-        s = slo.SLO_BY_DATASET["prices_daily"]
+        s = slo.SLO_BY_DATASET["d1_core_stock_financials"]
         assert s.judge(s.green_hours) == "green"
         assert s.judge(s.green_hours + 0.01) == "yellow"
         assert s.judge(s.yellow_hours) == "yellow"
@@ -221,8 +220,8 @@ class TestRecordFreshness:
         store = _FakeStore()
         for n, ts in ((10, 100), (20, 200)):
             ops.record_freshness(
-                store, dataset="prices_daily", store_name="D1", location="core_stock_financials",
-                writer="prices_daily", latest_data_date="2026-09-11",
+                store, dataset="d1_core_stock_financials", store_name="D1", location="core_stock_financials",
+                writer="kabulab-cf daily.ts", latest_data_date="2026-09-11",
                 row_or_object_count=n, bytes_=None, license_tag="personal-only", updated_at=ts,
             )
         rows = store.query("SELECT * FROM jss_dataset_freshness")
@@ -306,7 +305,7 @@ class TestDatasetManifest:
         （`jobs/yutai_backup.py` / `jobs/core_stocks_migrate.py` が使う）、
         統合が終わるまでは 2 DB 構成でも動く必要がある。
         """
-        legacy = {"prices_daily", "tdnet_disclosures", "core_stocks", "yutai_benefits"}
+        legacy = {"d1_core_stock_financials", "tdnet_disclosures", "core_stocks", "yutai_benefits"}
         for name, src in datasets.DATASET_SOURCE_BY_NAME.items():
             expected = datasets.DB_KABULAB if name in legacy else datasets.DB_CANONICAL
             assert src.db == expected, name
@@ -326,7 +325,7 @@ class TestJudgeObservation:
 
     def test_測れていないならunknown(self) -> None:
         assert slo.judge_observation(
-            "prices_daily", latest_data_date=None, source_epoch=None,
+            "d1_core_stock_financials", latest_data_date=None, source_epoch=None,
             row_count=None, now=NOW,
         ) == "unknown"
 
@@ -358,7 +357,7 @@ class TestJudgeObservation:
 
     def test_読めない基準日は取得時刻へ落ちる(self) -> None:
         assert slo.judge_observation(
-            "prices_daily", latest_data_date="不明", source_epoch=_epoch_days_ago(0.1),
+            "d1_core_stock_financials", latest_data_date="不明", source_epoch=_epoch_days_ago(0.1),
             row_count=3764, now=NOW,
         ) == "green"
 
@@ -373,7 +372,7 @@ class TestBusinessDayAging:
         ("label", "now_jst_day"),
         [("土", 12), ("日", 13), ("月", 14)],
     )
-    @pytest.mark.parametrize("dataset", ["prices_daily", "tdnet_disclosures", "edinet_documents"])
+    @pytest.mark.parametrize("dataset", ["d1_core_stock_financials", "tdnet_disclosures", "edinet_documents"])
     def test_金曜の基準日は土日月でも赤にならない(
         self, dataset: str, label: str, now_jst_day: int
     ) -> None:
@@ -388,7 +387,7 @@ class TestBusinessDayAging:
         for day in (12, 13):
             now = datetime(2026, 9, day, 23, 30, tzinfo=slo.JST)
             assert slo.judge_observation(
-                "prices_daily", latest_data_date=self.FRIDAY, source_epoch=None,
+                "d1_core_stock_financials", latest_data_date=self.FRIDAY, source_epoch=None,
                 row_count=100, now=now,
             ) == "green"
 
@@ -397,8 +396,8 @@ class TestBusinessDayAging:
         sunday = datetime(2026, 9, 13, 23, 30, tzinfo=slo.JST)
         friday_midnight = datetime(2026, 9, 11, 0, 0, tzinfo=slo.JST)
         calendar = slo.elapsed_hours(friday_midnight, sunday, business_days=False)
-        assert calendar > slo.SLO_BY_DATASET["prices_daily"].yellow_hours
-        assert slo.SLO_BY_DATASET["prices_daily"].judge(calendar) == "red"
+        assert calendar > slo.SLO_BY_DATASET["d1_core_stock_financials"].yellow_hours
+        assert slo.SLO_BY_DATASET["d1_core_stock_financials"].judge(calendar) == "red"
 
     def test_公表遅延のあるデータセットも平常時は緑(self) -> None:
         """日証金の貸借残は翌営業日公表なので data_date は常に T-1。
@@ -416,13 +415,13 @@ class TestBusinessDayAging:
         # 火曜 23:30 に基準日が金曜 = 月・火の 2 営業日欠落
         tuesday = datetime(2026, 9, 15, 23, 30, tzinfo=slo.JST)
         assert slo.judge_observation(
-            "prices_daily", latest_data_date="2026-09-11", source_epoch=None,
+            "d1_core_stock_financials", latest_data_date="2026-09-11", source_epoch=None,
             row_count=100, now=tuesday,
         ) == "red"
         # 月曜 23:30 なら 1 営業日欠落 = 黄
         monday = datetime(2026, 9, 14, 23, 30, tzinfo=slo.JST)
         assert slo.judge_observation(
-            "prices_daily", latest_data_date="2026-09-11", source_epoch=None,
+            "d1_core_stock_financials", latest_data_date="2026-09-11", source_epoch=None,
             row_count=100, now=monday,
         ) == "yellow"
 
@@ -610,7 +609,7 @@ class TestFreshnessProbe:
             r["dataset"]: r
             for r in store.query("SELECT dataset, updated_at FROM jss_dataset_freshness")
         }
-        assert rows["prices_daily"]["updated_at"] == frozen
+        assert rows["d1_core_stock_financials"]["updated_at"] == frozen
 
     def test_空表はredとして判定される(self, monkeypatch) -> None:
         """jss_financials は 0 行。測れた上でのゼロ件を unknown に倒さない。"""
@@ -683,7 +682,6 @@ class TestFreshnessProbe:
 
         monkeypatch.setattr(freshness_probe, "D1Store", factory)
         monkeypatch.setattr(d1_module, "D1Store", factory)
-        monkeypatch.setattr(runner, "write_job_log", lambda *a, **k: "dummy")
         monkeypatch.setattr(runner, "connect_local_store", lambda *a, **k: None)
 
         code = freshness_probe.main(
@@ -745,7 +743,7 @@ class TestOpsCheck:
         today = _jst_today().isoformat()
         recent = int(datetime.now(UTC).timestamp()) - 3600
         rows = {
-            "prices_daily": (today, 3764, recent),
+            "d1_core_stock_financials": (today, 3764, recent),
             "tdnet_disclosures": (today, 37338, recent),
             "edinet_documents": (today, 100, recent),
             "jsf_supply": (today, 4351, recent),
@@ -906,7 +904,7 @@ class TestOpsCheck:
     def test_宣言外の赤があればexit1(self, monkeypatch) -> None:
         store = _FakeStore()
         self._seed_freshness(
-            store, overrides={"prices_daily": ("2026-01-01", 3764, 1)}
+            store, overrides={"d1_core_stock_financials": ("2026-01-01", 3764, 1)}
         )
         self._seed_probe_ok(store)
         _wire(monkeypatch, store, ops_check)

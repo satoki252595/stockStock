@@ -99,10 +99,13 @@ class DatasetSource:
 # （tests/test_ops_slo.py が等号で検証する。片方だけ増えたら落ちる）。
 DATASET_SOURCES: tuple[DatasetSource, ...] = (
     DatasetSource(
-        dataset="prices_daily",
+        # stockStock の prices_daily は廃止した。日足断面の実 writer は
+        # kabulab-cf の daily.ts で、旧キー 'prices_daily' の行は D1 に残るが
+        # 観測対象はこのキーだけ（旧行は無視される）。
+        dataset="d1_core_stock_financials",
         store="D1",
         location="core_stock_financials",
-        writer="prices_daily",
+        writer="kabulab-cf daily.ts",
         sql=(
             "SELECT MAX(data_date) AS latest_date, MAX(fetched_at) AS source_epoch,"
             " COUNT(*) AS n FROM core_stock_financials"

@@ -28,8 +28,6 @@ ALLOWED: frozenset[str] = frozenset(
         # EDINET は commercial-ok（公共データ利用規約準拠 §2.1）
         "tests/fixtures/edinet/Edinetcode.zip",
         "tests/fixtures/edinet/documents_error_401.json",
-        # 取得失敗時の応答断片。stooq のデータそのものではない
-        "tests/fixtures/prices/stooq_challenge_response.html",
         # 銘柄コード契約の言語横断テストベクタ（kabulab-cf と同一バイト列で共有）。
         # 取得物ではなく手書きの契約定義で、収録しているのは境界値のコード文字列
         # （大半は "07203" / "A130" / "1234567" のような合成値）と説明文だけ。

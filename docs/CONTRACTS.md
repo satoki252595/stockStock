@@ -8,7 +8,7 @@
 2. **真実性** (§3): ダミー・サンプル・推定値・補間値を生成するコードを書かない。フォールバックは実在ソースの実データのみ。取得失敗は None / 欠損として記録
 3. **来歴** (§3-3): 全レコードに `Provenance`（ソース・ライセンスタグ・データ基準日・取得日時・原本リレーション）を設定
 4. **ライセンス継承** (§2.2): 計算値は `licensing.inherit()` で最も厳しいタグを継承
-5. **冪等 upsert** (§8.1-6): キー = 銘柄コード(①②) / 銘柄×決算期末×開示種別(③) / docID(④) / SHA256(⑤)
+5. **冪等 upsert** (§8.1-6): キー = 銘柄コード(①) / 銘柄×決算期末×開示種別(③) / docID(④) / SHA256(⑤)
 6. **変換は値不変** (§5.2): 型変換・縦持ち化・文字コード正規化のみ。値の修正・丸め・補完禁止
 7. **dry-run** (§3-6): 全ジョブは `--dry-run` で Notion に書き込まずに動作する
 8. **テストフィクスチャは実レスポンスのみ** (§3-6): 捏造禁止。取得不能（要APIキー等）なら `tests/conftest.py fixture_path()` の skip 機構を使い、`scripts/capture_*.py` に取得スクリプトを置く
@@ -45,7 +45,7 @@
 | 操作 | 入力 | 出力 | 使う場面 |
 |---|---|---|---|
 | `normalize_stock_code` | 任意 | 正規化済み文字列（妥当性は見ない） | 表示・比較の前処理 |
-| `parse_stock_code` | 任意 | 4 文字の正準形 or `None` | ①②由来の値の検証、URL パラメータ |
+| `parse_stock_code` | 任意 | 4 文字の正準形 or `None` | ①由来の値の検証、URL パラメータ |
 | `source_code_to_ticker` | TDnet `company_code` / EDINET `secCode` | 4 文字の正準形 or `None` | ③④の取込 |
 | `margin_code_to_key` | JPX 信用残 PDF の 5 文字コード | 4 文字の正準形 / 種類株は 5 文字のまま / `None` | ⑧ 信用残 R2 `margin/{date}.json` の `rows[].code` |
 
@@ -141,17 +141,17 @@ DB論理キー（`Settings.db_id()` / schema.py / upsert.py で共通）:
 | A: Notion層 | `notion/schema.py`, `notion/upsert.py`, `notion/file_upload.py`, `tests/test_schema.py`, `tests/test_upsert.py`, `tests/test_file_upload.py` |
 | B: EDINET | `collectors/edinet.py`, `collectors/edinet_codelist.py`, `convert/xbrl_to_csv.py`, `scripts/capture_edinet.py`, `tests/test_edinet*.py`, `tests/test_xbrl_to_csv.py`, `tests/fixtures/edinet/` |
 | C: TDnet | `collectors/tdnet_yanoshin.py`, `collectors/tdnet_official_fallback.py`, `scripts/capture_tdnet.py`, `tests/test_tdnet*.py`, `tests/fixtures/tdnet/` |
-| D: 株価系 | `collectors/yfinance_prices.py`, `collectors/stooq_prices.py`, `scripts/capture_prices.py`, `tests/test_yfinance*.py`, `tests/test_stooq*.py`, `tests/fixtures/prices/` |
+| D: 株価系 | 廃止（`collectors/yfinance_prices.py`, `collectors/stooq_prices.py`, `scripts/capture_prices.py`, `tests/test_yfinance*.py`, `tests/test_stooq*.py` ごと） |
 | E: 変換(非XBRL) | `convert/json_to_parquet.py`, `convert/pdf_to_text.py`, `convert/xls_to_csv.py`, `scripts/capture_convert_fixtures.py`, `tests/test_convert*.py`, `tests/fixtures/convert/` |
-| F: transform | `transform/technicals.py`, `transform/normalize.py`, `transform/reconcile.py`, `scripts/capture_transform_fixtures.py`, `tests/test_technicals.py`, `tests/test_normalize.py`, `tests/test_reconcile.py`, `tests/fixtures/transform/` |
+| F: transform | `transform/normalize.py`, `scripts/capture_transform_fixtures.py`, `tests/test_normalize.py`, `tests/fixtures/transform/`（`technicals.py` / `reconcile.py` と対応テストは廃止） |
 | G: ジョブ+CI | `jobs/*.py`, `.github/workflows/*.yml`, `tests/test_jobs*.py`（A〜F完了後に実装） |
 
 ## 注意: HTTP 200 のエラーレスポンス
 
 `http.fetch()` は HTTP 200 で返る本文の真偽判定をしない（docstring 通り）。
-実在の例: EDINET は 200 + `{"StatusCode":401}` JSON、stooq は 200 + ブラウザ検証
-HTML を返す。**全コレクターは本文の内容検証必須**（マジックバイト・JSON 構造・
-CSV ヘッダ等）。エラー応答を原本として保存してはならない (§3)。
+実在の例: EDINET は 200 + `{"StatusCode":401}` JSON（stooq の 200 + ブラウザ検証
+HTML は廃止済み経路の記録）。**全コレクターは本文の内容検証必須**（マジックバイト・
+JSON 構造・CSV ヘッダ等）。エラー応答を原本として保存してはならない (§3)。
 
 ## XBRL tidy 形式（B が生成、F が消費）
 
@@ -199,6 +199,5 @@ notion.file_upload.upload_raw_artifact(client, settings, artifact: RawArtifact) 
 ## ジョブの骨格（G が実装）
 
 各ジョブ: `python -m jp_stock_pipeline.jobs.<name> [--dry-run] [--date YYYY-MM-DD] [--limit N]`
-フロー = Fetch → save_raw → convert → upload_raw_artifact → transform → upsert → ⑦ジョブログ記録 (§8.1)。
-`prices_daily` は ② upsert のあと、①銘柄ページ配下の株価テクニカル履歴子DBへ同じスナップショットを日付キーで追記する（8,000行で次シャード。`--skip-history` で省略可）。
+フロー = Fetch → save_raw → convert → upload_raw_artifact → transform → upsert → D1 `jss_job_runs` へ実行記録 (§8.1)。
 部分失敗は続行して最後に「一部失敗」でログ、原本アップロード失敗はその取得単位の構造化書き込みを中止。

@@ -38,9 +38,9 @@ def _props_by_title(client) -> dict[str, dict]:
 
 
 class TestEnsureAll:
-    def test_creates_seven_databases(self, ensured):
+    def test_creates_four_databases(self, ensured):
         client, _settings, _db_ids = ensured
-        assert len(_creates(client)) == 7
+        assert len(_creates(client)) == 4
 
     def test_titles_match_db_registry(self, ensured):
         client, _settings, _db_ids = ensured
@@ -77,10 +77,10 @@ class TestCommonProperties:
         schema.PROP_QUALITY,
     )
 
-    def test_full_common_on_master_prices_fin_disc_exports(self, ensured):
+    def test_full_common_on_master_fin_disc(self, ensured):
         client, _settings, _db_ids = ensured
         props = _props_by_title(client)
-        for key in ("stock_master", "prices", "financials", "disclosures", "exports"):
+        for key in ("stock_master", "financials", "disclosures"):
             title = DB_REGISTRY[key][1]
             for name in self.COMMON:
                 assert name in props[title], f"{title} に {name} が無い"
@@ -99,13 +99,6 @@ class TestCommonProperties:
         assert schema.PROP_RAW_RELATION not in props
         assert schema.PROP_QUALITY not in props
         assert schema.RAW_PROP_CONVERT_STATUS in props  # 代わりに変換状態 select
-
-    def test_job_log_has_no_common_properties(self, ensured):
-        """⑦: ジョブ運用ログのため共通プロパティ対象外。"""
-        client, _settings, _db_ids = ensured
-        props = _props_by_title(client)[DB_REGISTRY["job_log"][1]]
-        for name in self.COMMON:
-            assert name not in props
 
 
 class TestSelectOptionsMatchEnums:
@@ -136,11 +129,6 @@ class TestSelectOptionsMatchEnums:
             c.value for c in ConvertStatus
         ]
 
-    def test_job_status_options(self, ensured):
-        client, _settings, _db_ids = ensured
-        props = _props_by_title(client)[DB_REGISTRY["job_log"][1]]
-        assert self._options(props, schema.JOB_PROP_STATUS) == ["成功", "一部失敗", "失敗"]
-
 
 class TestSpecificProperties:
     def test_master_specific(self, ensured):
@@ -160,24 +148,6 @@ class TestSpecificProperties:
         assert status_opts == list(schema.LISTING_STATUS_OPTIONS)
         assert "date" in props[schema.MASTER_PROP_LISTING_DATE]
         assert "date" in props[schema.MASTER_PROP_DELISTING_DATE]
-        assert "rich_text" in props[schema.MASTER_PROP_HISTORY_DB_ID]
-        assert "number" in props[schema.MASTER_PROP_HISTORY_SHARD]
-        assert "number" in props[schema.MASTER_PROP_HISTORY_ROW_COUNT]
-
-    def test_prices_specific(self, ensured):
-        client, _settings, _db_ids = ensured
-        props = _props_by_title(client)[DB_REGISTRY["prices"][1]]
-        assert props[schema.PRICE_PROP_CODE] == {"title": {}}  # ②のキーは title
-        for name in (
-            schema.PRICE_PROP_CLOSE,
-            schema.PRICE_PROP_RSI14,
-            schema.PRICE_PROP_SMA25_DEV,
-            schema.PRICE_PROP_MACD_HIST,
-            schema.PRICE_PROP_BB_UPPER,
-            schema.PRICE_PROP_DIV_YIELD,
-        ):
-            assert "number" in props[name]
-        assert "relation" in props[schema.PROP_MASTER_RELATION]
 
     def test_financials_specific(self, ensured):
         client, _settings, _db_ids = ensured
@@ -210,7 +180,7 @@ class TestSpecificProperties:
 
     def test_relations_are_dual_property(self, ensured):
         client, _settings, _db_ids = ensured
-        props = _props_by_title(client)[DB_REGISTRY["prices"][1]]
+        props = _props_by_title(client)[DB_REGISTRY["financials"][1]]
         for name in (schema.PROP_MASTER_RELATION, schema.PROP_RAW_RELATION):
             assert props[name]["relation"]["type"] == "dual_property"
 
@@ -298,7 +268,7 @@ class TestMissingProperties:
         assert schema.missing_properties(desired, {}) == {"A": {"date": {}}}
 
     def test_nothing_missing_when_identical(self):
-        desired = schema.job_log_schema()
+        desired = schema.raw_files_schema()
         existing = {name: {"id": "x", **spec} for name, spec in desired.items()}
         assert schema.missing_properties(desired, existing) == {}
 
@@ -308,21 +278,21 @@ class TestEnsureDatabaseIdempotency:
         """既存DB発見時は create せず不足分のみ update_database。"""
         settings = make_settings()
         setup = schema.SchemaSetup(dry_client, settings)
-        title = DB_REGISTRY["job_log"][1]
+        title = DB_REGISTRY["disclosures"][1]
         # 親ページ子ブロックに既存DBがあるとみなす
         monkeypatch.setattr(
             setup,
             "_parent_children",
             lambda: [{"id": "db-existing", "type": "child_database", "child_database": {"title": title}}],
         )
-        desired = schema.job_log_schema()
+        desired = schema.disclosures_schema("db-master", "db-raw")
         existing_props = dict(desired)
-        removed = schema.JOB_PROP_RUN_URL
+        removed = schema.DISC_PROP_URL
         existing_props.pop(removed)
         monkeypatch.setattr(
             dry_client, "retrieve_database", lambda db_id: {"properties": existing_props}
         )
-        ensured = setup.ensure_database("job_log", desired)
+        ensured = setup.ensure_database("disclosures", desired)
         assert ensured.db_id == "db-existing"
         assert ensured.created is False
         creates = [op for op in dry_client.ops if op.op == "create_database"]
@@ -330,16 +300,3 @@ class TestEnsureDatabaseIdempotency:
         updates = [op for op in dry_client.ops if op.op == "update_database"]
         assert len(updates) == 1
         assert set(updates[0].payload["properties"]) == {removed}
-
-
-class TestHistoryPricesSchema:
-    def test_title_is_date_and_raw_relation_is_one_way(self):
-        props = schema.history_prices_schema("db-raw")
-        assert props[schema.HISTORY_PROP_DATE_TITLE] == {"title": {}}
-        assert schema.PRICE_PROP_CODE not in props
-        assert schema.PROP_MASTER_RELATION not in props
-        assert schema.PRICE_PROP_RSI14 in props
-        assert schema.PROP_QUALITY in props
-        raw = props[schema.PROP_RAW_RELATION]["relation"]
-        assert raw["database_id"] == "db-raw"
-        assert raw["type"] == "single_property"

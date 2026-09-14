@@ -21,7 +21,7 @@ from jp_stock_pipeline.models import (
     Provenance,
     Source,
 )
-from jp_stock_pipeline.notion import file_upload, price_history
+from jp_stock_pipeline.notion import file_upload
 from jp_stock_pipeline.notion import schema as S
 from jp_stock_pipeline.notion import upsert
 from jp_stock_pipeline.notion.client import NotionRequestError
@@ -29,12 +29,9 @@ from jp_stock_pipeline.notion.client import NotionRequestError
 ENV = {
     "NOTION_DB_IDS_FILE": "/nonexistent/db_ids.json",
     "NOTION_DB_STOCK_MASTER": "db-master",
-    "NOTION_DB_PRICES": "db-prices",
     "NOTION_DB_FINANCIALS": "db-fin",
     "NOTION_DB_DISCLOSURES": "db-disc",
     "NOTION_DB_RAW_FILES": "db-raw",
-    "NOTION_DB_EXPORTS": "db-exp",
-    "NOTION_DB_JOB_LOG": "db-job",
 }
 SAME_MINUTE = "2026-09-13T00:00:00.000Z"
 
@@ -287,18 +284,6 @@ class TestConcurrentCreate:
         assert fake.archived("db-disc") == ["page-0002"]
         assert len(fake.active("db-disc")) == 1
 
-    def test_export_row_goes_through_the_same_check(self):
-        fake = FakeNotion()
-        fake.before_insert = lambda: upsert.create_export_row(
-            fake, settings(), "全銘柄株価日足", period=None, row_count=1, schema_desc=None
-        )
-        page_id = upsert.create_export_row(
-            fake, settings(), "全銘柄株価日足", period=None, row_count=2, schema_desc=None
-        )
-        (active,) = fake.active("db-exp")
-        assert page_id == active["id"] == "page-0001"
-        assert active["properties"][S.EXPORT_PROP_ROW_COUNT] == {"number": 2}
-
 
 class TestExistingDuplicates:
     @pytest.mark.parametrize("created_times,ids,expected", [
@@ -341,9 +326,8 @@ class TestExistingDuplicates:
 
     @pytest.mark.parametrize("reverse", [False, True], ids=["old-last", "old-first"])
     def test_prefetched_maps_pick_the_same_canonical_page(self, reverse):
-        # ① と ② はプロパティ名が同じで型（rich_text / title）だけ違うので DB ごとに作る
+        # DB ごとにキー列の型が違うので DB ごとに作る
         key_prop = {
-            "db-prices": (S.PRICE_PROP_CODE, "title"),
             "db-master": (S.MASTER_PROP_CODE, "rich_text"),
             "db-disc": (S.DISC_PROP_DOC_ID, "rich_text"),
         }
@@ -367,11 +351,8 @@ class TestExistingDuplicates:
                 ]
 
         expected = {"7203": "p-old", "6758": "p-aa"}
-        assert upsert.load_price_page_map(_C(), settings()) == expected
         assert upsert.load_stock_master_map(_C(), settings()) == expected
         assert upsert.load_disclosure_page_map(_C(), settings()) == expected
-        states = price_history.load_stock_master_state(_C(), settings())
-        assert {code: s.page_id for code, s in states.items()} == expected
 
     def test_raw_file_lookup_returns_the_oldest_and_archives_nothing(self):
         fake = FakeNotion(ids=["raw-new", "raw-old"],

@@ -10,7 +10,7 @@
 - 全行に Provenance (ソース/ライセンスタグ/データ基準日/取得日時/原本relation/
   データ品質) を設定する (§3-3, §6.3)
 - upsert は冪等: キー検索 → update or create (§8.1-6)
-  キー = 銘柄コード(①②) / 銘柄コード×決算期末×開示種別(③) / docID(④) / データセット名(⑥)
+  キー = 銘柄コード(①) / 銘柄コード×決算期末×開示種別(③) / docID(④)
 - 原本 page_id が dry-run 合成ID ("dry-run-" 始まり) の場合は relation を設定せず
   スキップする (本番DBへテストデータ・無効IDを書かない §3-6)
 
@@ -29,10 +29,8 @@ from ..models import (
     JST,
     DisclosureRecord,
     FinancialSummaryRecord,
-    PriceTechnicalRecord,
     Provenance,
     StockMasterRecord,
-    now_jst,
 )
 from notion_client.errors import APIResponseError
 
@@ -159,8 +157,8 @@ def stock_master_properties(
     (mark_master_absent_from_codelist) が所有する」フィールドであり、月次の
     codelist 同期 (master_sync) が上書き・消去してはならない (§ Phase3 二重所有の回避)。
     名称/市場/業種/EDINETコード/listed は codelist 所有なので常に完全置換する。
-    現行履歴DB ID / 履歴シャード番号 / 履歴行数 は prices_daily が所有し、
-    この payload に含めない（月次同期でポインタを消さない）。
+    現行履歴DB ID / 履歴シャード番号 / 履歴行数（本番DBに残る廃止済み列）は
+    この payload に含めない（月次同期で既存値を消さない）。
     """
     props = {
         S.MASTER_PROP_NAME: title_prop(record.name),
@@ -177,63 +175,6 @@ def stock_master_properties(
         _set(props, S.MASTER_PROP_STATUS, select_prop, record.status)
         _set(props, S.MASTER_PROP_LISTING_DATE, date_prop, record.listing_date)
         _set(props, S.MASTER_PROP_DELISTING_DATE, date_prop, record.delisting_date)
-    return props
-
-
-# PriceTechnicalRecord のフィールド名 → ② プロパティ名 (すべて number)
-_PRICE_FIELD_TO_PROP: dict[str, str] = {
-    "open": S.PRICE_PROP_OPEN,
-    "high": S.PRICE_PROP_HIGH,
-    "low": S.PRICE_PROP_LOW,
-    "close": S.PRICE_PROP_CLOSE,
-    "prev_close_pct": S.PRICE_PROP_PREV_PCT,
-    "volume": S.PRICE_PROP_VOLUME,
-    "turnover": S.PRICE_PROP_TURNOVER,
-    "market_cap": S.PRICE_PROP_MARKET_CAP,
-    "week52_high": S.PRICE_PROP_W52_HIGH,
-    "week52_low": S.PRICE_PROP_W52_LOW,
-    "sma5": S.PRICE_PROP_SMA5,
-    "sma25": S.PRICE_PROP_SMA25,
-    "sma75": S.PRICE_PROP_SMA75,
-    "sma200": S.PRICE_PROP_SMA200,
-    "sma25_dev_pct": S.PRICE_PROP_SMA25_DEV,
-    "rsi14": S.PRICE_PROP_RSI14,
-    "macd": S.PRICE_PROP_MACD,
-    "macd_signal": S.PRICE_PROP_MACD_SIGNAL,
-    "macd_hist": S.PRICE_PROP_MACD_HIST,
-    "bb_upper": S.PRICE_PROP_BB_UPPER,
-    "bb_lower": S.PRICE_PROP_BB_LOWER,
-    "atr14": S.PRICE_PROP_ATR14,
-    "volume_ratio25": S.PRICE_PROP_VOL_RATIO25,
-    "per": S.PRICE_PROP_PER,
-    "pbr": S.PRICE_PROP_PBR,
-    "dividend_yield_pct": S.PRICE_PROP_DIV_YIELD,
-}
-
-
-def price_technical_properties(
-    record: PriceTechnicalRecord,
-    master_page_id: str | None = None,
-    extra_raw_page_ids: Iterable[str] | None = None,
-) -> dict:
-    """② 株価テクニカル。取得できなかった指標は空欄 (§3-1)。
-
-    extra_raw_page_ids: 価格原本に加えて紐付ける ⑤ 行 (例: バリュエーション原本)。
-    """
-    props = {
-        S.PRICE_PROP_CODE: title_prop(record.code),
-        **provenance_properties(record.provenance),
-    }
-    for field_name, prop_name in _PRICE_FIELD_TO_PROP.items():
-        _set(props, prop_name, number_prop, getattr(record, field_name))
-    extra_ids = [rid for rid in (extra_raw_page_ids or []) if real_page_id(rid)]
-    if extra_ids:
-        existing = props.get(S.PROP_RAW_RELATION, {"relation": []})["relation"]
-        ids = [r["id"] for r in existing] + extra_ids
-        props[S.PROP_RAW_RELATION] = relation_prop(dict.fromkeys(ids))
-    master_id = real_page_id(master_page_id)
-    if master_id:
-        props[S.PROP_MASTER_RELATION] = relation_prop([master_id])
     return props
 
 
@@ -322,11 +263,6 @@ def stock_master_filter(code: str) -> dict:
     return {"property": S.MASTER_PROP_CODE, "rich_text": {"equals": code}}
 
 
-def price_technical_filter(code: str) -> dict:
-    """② キー = 銘柄コード (title equals)。"""
-    return {"property": S.PRICE_PROP_CODE, "title": {"equals": code}}
-
-
 # ③ の旧開示種別。書き込み前のキー検索で、ラベル変更前の行も拾うために使う。
 # 決算期末 >= 2024-06-30 の第2四半期は、以前は「2Q」で書いていた
 # (transform/normalize.interim_disclosure_type)。移行スクリプト
@@ -408,11 +344,6 @@ def financial_summary_lookup_filter(
 def disclosure_filter(doc_id: str) -> dict:
     """④ キー = 書類管理番号 (docID)。"""
     return {"property": S.DISC_PROP_DOC_ID, "rich_text": {"equals": doc_id}}
-
-
-def export_filter(dataset_name: str) -> dict:
-    """⑥ キー = データセット名 (title equals)。"""
-    return {"property": S.EXPORT_PROP_NAME, "title": {"equals": dataset_name}}
 
 
 # ---------------------------------------------------------------------------
@@ -712,15 +643,14 @@ def _converge_warning(outcome: UpsertOutcome, message: str) -> UpsertOutcome:
 
 
 def find_stock_master_page(client: NotionClient, settings: Settings, code: str) -> str | None:
-    """① から銘柄コードで page_id を引く (②③④の relation 設定用ヘルパー)。"""
+    """① から銘柄コードで page_id を引く (③④の relation 設定用ヘルパー)。"""
     return _find_page(client, settings.db_id("stock_master"), stock_master_filter(code))
 
 
 def load_stock_master_map(client: NotionClient, settings: Settings) -> dict[str, str]:
     """① 全行の {銘柄コード: page_id} を一括取得する。
 
-    全銘柄ループでの find_stock_master_page (1req/銘柄) を置き換え、
-    §8.3 のレート試算 (②upsert=2req/銘柄) に収める。
+    全銘柄ループでの find_stock_master_page (1req/銘柄) を置き換える (§8.3)。
     """
     return _master_map_from_pages(client.query_database(settings.db_id("stock_master")))
 
@@ -767,23 +697,6 @@ def _edinet_map_from_pages(pages: list[dict]) -> dict[str, str]:
         if code and edinet_code:
             out[edinet_code] = code
     return out
-
-
-def load_price_page_map(client: NotionClient, settings: Settings) -> dict[str, str]:
-    """② 全行の {銘柄コード: page_id} を一括取得する。
-
-    ② upsert の per-record 検索 (1req/銘柄) を排除するための事前マップ (§8.3)。
-    ① は rich_text キーだが ②(price_technical_filter) は **title equals** キーのため、
-    title[0].plain_text を読む（rich_text ではない。混同すると全件ミス→重複行）。
-    """
-    pages = client.query_database(settings.db_id("prices"))
-
-    def code_of(page: dict) -> str:
-        title = page.get("properties", {}).get(S.PRICE_PROP_CODE, {}).get("title", [])
-        return title[0].get("plain_text", "").strip() if title else ""
-
-    # 同じコードの重複ページはキー検索と同じ規則（最古）で 1 つに決める (#13)
-    return _oldest_page_ids(pages, code_of)
 
 
 def _jst_day_start(day: date) -> str:
@@ -939,32 +852,6 @@ def apply_disclosure_lifecycle(
     return page_id
 
 
-def upsert_price_technical(
-    client: NotionClient,
-    settings: Settings,
-    record: PriceTechnicalRecord,
-    master_page_id: str | None = None,
-    extra_raw_page_ids: Iterable[str] | None = None,
-    *,
-    existing_page_id: str | None = None,
-    page_resolved: bool = False,
-) -> str:
-    """② 株価テクニカルへ冪等 upsert (キー=銘柄コード title equals)。
-
-    全銘柄ループでは load_price_page_map で得た {code: page_id} を existing_page_id に
-    渡し page_resolved=True にすると per-record 検索を省ける (§8.3)。事前マップは
-    all-or-nothing で渡すこと (_upsert 参照)。master_page_id は ① relation 用で別物。
-    """
-    return _upsert(
-        client,
-        settings.db_id("prices"),
-        price_technical_filter(record.code),
-        price_technical_properties(record, master_page_id, extra_raw_page_ids),
-        existing_page_id=existing_page_id,
-        page_resolved=page_resolved,
-    )
-
-
 def _select_name(page: dict, prop: str) -> str | None:
     value = (page.get("properties", {}).get(prop) or {}).get("select") or {}
     return value.get("name") or None
@@ -1117,62 +1004,6 @@ def upsert_disclosure(
     )
 
 
-def write_job_log(
-    client: NotionClient,
-    settings: Settings,
-    job_name: str,
-    status: str,
-    processed: int,
-    failed: int,
-    failed_codes: Iterable[str] | None = None,
-    run_url: str | None = None,
-    duration_secs: float | None = None,
-) -> str:
-    """⑦ 収集ジョブログへ1行作成 (§8.1-7)。ステータスは 成功/一部失敗/失敗。"""
-    if status not in S.JOB_STATUSES:
-        raise ValueError(f"不正なステータス: {status} (有効: {S.JOB_STATUSES})")
-    props = {
-        S.JOB_PROP_NAME: title_prop(job_name),
-        S.JOB_PROP_RUN_AT: date_prop(now_jst()),
-        S.JOB_PROP_STATUS: select_prop(status),
-        S.JOB_PROP_PROCESSED: number_prop(processed),
-        S.JOB_PROP_FAILED: number_prop(failed),
-    }
-    codes = ", ".join(failed_codes) if failed_codes else ""
-    _set(props, S.JOB_PROP_FAILED_CODES, text_prop, codes or None)
-    _set(props, S.JOB_PROP_RUN_URL, url_prop, run_url)
-    _set(props, S.JOB_PROP_DURATION, number_prop, duration_secs)
-    return client.create_page(
-        parent={"database_id": settings.db_id("job_log")}, properties=props
-    )["id"]
-
-
-def create_export_row(
-    client: NotionClient,
-    settings: Settings,
-    dataset_name: str,
-    period: str | None,
-    row_count: int | None,
-    schema_desc: str | None,
-    provenance: Provenance | None = None,
-    file_uploads: Iterable[tuple[str, str]] | None = None,
-    updated_on: date | None = None,
-) -> str:
-    """⑥ 時系列エクスポートへ冪等に作成/更新 (キー=データセット名)。
-
-    file_uploads は (file_upload_id, ファイル名) のリスト
-    (file_upload.py でアップロード済みのもの)。更新日は実際の更新時刻
-    (now_jst) を既定とする — 運用メタデータであり推定値ではない。
-    """
-    props: dict = {
-        S.EXPORT_PROP_NAME: title_prop(dataset_name),
-        S.EXPORT_PROP_UPDATED_ON: date_prop(updated_on or now_jst().date()),
-    }
-    _set(props, S.EXPORT_PROP_PERIOD, text_prop, period)
-    _set(props, S.EXPORT_PROP_ROW_COUNT, number_prop, row_count)
-    _set(props, S.EXPORT_PROP_SCHEMA_DESC, text_prop, schema_desc)
-    if file_uploads:
-        props[S.EXPORT_PROP_FILES] = files_prop(file_uploads)
-    if provenance is not None:
-        props.update(provenance_properties(provenance))
-    return _upsert(client, settings.db_id("exports"), export_filter(dataset_name), props)
+# ⑥時系列エクスポート・⑦収集ジョブログは廃止した。
+# ⑥の配布物は作らない。⑦の実行履歴は D1 jss_job_runs に一本化した
+# (jobs/runner.py が safe_record_job_run で書く)。

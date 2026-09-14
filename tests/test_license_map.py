@@ -117,7 +117,6 @@ def _wire(monkeypatch, store: _FakeStore) -> None:
 
     monkeypatch.setattr(license_map, "D1Store", factory)
     monkeypatch.setattr(d1_module, "D1Store", factory)
-    monkeypatch.setattr(runner, "write_job_log", lambda *a, **k: "dummy")
     monkeypatch.setattr(runner, "connect_local_store", lambda *a, **k: None)
 
 

@@ -1,22 +1,22 @@
-"""Notion 7DB+データカタログの冪等セットアップ (DESIGN.md §6, §7, P0)。
+"""Notion 4DB+データカタログの冪等セットアップ (DESIGN.md §6, §7, P0)。
 
-「株式情報」親ページ (settings.notion_parent_page_id) 配下に §6.2 の 7DB と
+「株式情報」親ページ (settings.notion_parent_page_id) 配下に §6.2 の 4DB と
 「📖 データカタログ」ページを冪等に作成する。DB論理キーとタイトルは
 config.DB_REGISTRY を唯一の正とする。
+（②株価テクニカル・⑥時系列エクスポート・⑦収集ジョブログは廃止）
 
 共通プロパティ (§6.3) の適用範囲:
-- ①銘柄マスタ/②株価テクニカル/③財務サマリ/④開示書類/⑥時系列エクスポート:
+- ①銘柄マスタ/③財務サマリ/④開示書類:
   全共通プロパティ（ソース/ライセンスタグ/データ基準日/取得日時/原本 relation→⑤/データ品質）
 - ⑤原本ファイル: ソース/ライセンスタグ/データ基準日/取得日時 のみ。
   自分自身への「原本」relation と「データ品質」は持たない。
   代わりに固有の「変換状態」select (§5.2) を持つ
-- ⑦収集ジョブログ: ジョブ運用ログのため共通プロパティ対象外
 
 リレーション (§6.2):
-- 作成順: ⑤ → ① → ②③④⑥⑦ → 最後に ⑤へ「関連銘柄」relation→① を後付け
+- 作成順: ⑤ → ① → ③④ → 最後に ⑤へ「関連銘柄」relation→① を後付け
   （⑤は①より先に作るため、①へのrelationは作成時に定義できない）
 - relation はすべて **dual_property** で定義する。これにより①側に
-  ②③④⑤からの逆向きプロパティが自動生成され、銘柄ページから株価・財務・
+  ③④⑤からの逆向きプロパティが自動生成され、銘柄ページから財務・
   開示・原本をすべて辿れる (§6.2「①をハブに」)
 
 冪等性:
@@ -63,7 +63,7 @@ PROP_FETCHED_AT = "取得日時"
 PROP_RAW_RELATION = "原本"
 PROP_QUALITY = "データ品質"
 
-# ②③④⑤ → ① へのリレーション名
+# ③④⑤ → ① へのリレーション名
 PROP_MASTER_RELATION = "銘柄マスタ"
 
 # ① 銘柄マスタ (§6.4)
@@ -78,43 +78,8 @@ MASTER_PROP_STATUS = "状態"  # select: 上場/監理/整理/上場廃止
 MASTER_PROP_LISTING_DATE = "上場日"
 MASTER_PROP_DELISTING_DATE = "上場廃止日"
 MASTER_PROP_LAST_UPDATED = "最終データ更新日"
-# ① 配下の株価テクニカル履歴子DBへのポインタ。master_sync は触らない
-# （prices_daily が所有。完全置換 payload に含めない）。
-MASTER_PROP_HISTORY_DB_ID = "現行履歴DB ID"
-MASTER_PROP_HISTORY_SHARD = "履歴シャード番号"
-MASTER_PROP_HISTORY_ROW_COUNT = "履歴行数"
-HISTORY_DB_TITLE = "株価テクニカル履歴"
-HISTORY_PROP_DATE_TITLE = "基準日"  # 履歴子DBの title。キー=データ基準日
-HISTORY_SHARD_THRESHOLD = 8000  # API 1クエリ1万件の手前で次DBへ
-
-# ② 株価テクニカル (§6.4)
-PRICE_PROP_CODE = "銘柄コード"  # title
-PRICE_PROP_OPEN = "始値"
-PRICE_PROP_HIGH = "高値"
-PRICE_PROP_LOW = "安値"
-PRICE_PROP_CLOSE = "終値"
-PRICE_PROP_PREV_PCT = "前日比率%"
-PRICE_PROP_VOLUME = "出来高"
-PRICE_PROP_TURNOVER = "売買代金"
-PRICE_PROP_MARKET_CAP = "時価総額"
-PRICE_PROP_W52_HIGH = "52週高値"
-PRICE_PROP_W52_LOW = "52週安値"
-PRICE_PROP_SMA5 = "SMA5"
-PRICE_PROP_SMA25 = "SMA25"
-PRICE_PROP_SMA75 = "SMA75"
-PRICE_PROP_SMA200 = "SMA200"
-PRICE_PROP_SMA25_DEV = "SMA25乖離率%"
-PRICE_PROP_RSI14 = "RSI14"
-PRICE_PROP_MACD = "MACD"
-PRICE_PROP_MACD_SIGNAL = "MACDシグナル"
-PRICE_PROP_MACD_HIST = "MACDヒストグラム"
-PRICE_PROP_BB_UPPER = "BB+2σ"
-PRICE_PROP_BB_LOWER = "BB-2σ"
-PRICE_PROP_ATR14 = "ATR14"
-PRICE_PROP_VOL_RATIO25 = "出来高25日平均比"
-PRICE_PROP_PER = "PER"
-PRICE_PROP_PBR = "PBR"
-PRICE_PROP_DIV_YIELD = "配当利回り%"
+# ① の履歴ポインタ列（現行履歴DB ID / 履歴シャード番号 / 履歴行数）と
+# ②株価テクニカル履歴子DBは廃止した。本番DBの列は放置する（無害）。
 
 # ③ 財務サマリ (§6.4)
 FIN_PROP_TITLE = "タイトル"  # title 例: 7203 2026/03期 本決算
@@ -169,23 +134,8 @@ RAW_PROP_SIZE = "サイズ"
 RAW_PROP_CONVERT_STATUS = "変換状態"
 RAW_PROP_RELATED_MASTER = "関連銘柄"
 
-# ⑥ 時系列エクスポート (§6.4)
-EXPORT_PROP_NAME = "データセット名"  # title
-EXPORT_PROP_FILES = "ファイル"
-EXPORT_PROP_PERIOD = "対象期間"
-EXPORT_PROP_ROW_COUNT = "行数"
-EXPORT_PROP_SCHEMA_DESC = "スキーマ説明"
-EXPORT_PROP_UPDATED_ON = "更新日"
-
-# ⑦ 収集ジョブログ (§6.4)
-JOB_PROP_NAME = "ジョブ名"  # title
-JOB_PROP_RUN_AT = "実行日時"
-JOB_PROP_STATUS = "ステータス"
-JOB_PROP_PROCESSED = "処理件数"
-JOB_PROP_FAILED = "失敗件数"
-JOB_PROP_FAILED_CODES = "失敗銘柄"
-JOB_PROP_RUN_URL = "GitHub Run URL"
-JOB_PROP_DURATION = "所要時間(秒)"
+# ⑥時系列エクスポート・⑦収集ジョブログは廃止した。
+# ⑥の配布物は作らない。⑦の実行履歴は D1 jss_job_runs に一本化した。
 
 # select の固定選択肢 (§6.4)。enum 由来のものは models / licensing と一致させる。
 # 「2Q」は四半期報告制度の第2四半期、「中間」は半期報告制度の中間期（決算期末が
@@ -199,7 +149,6 @@ DOC_TYPES: tuple[str, ...] = (
 )
 # ① 状態 select。上場=通常 / 監理・整理=上場廃止前段階 / 上場廃止=廃止済み
 LISTING_STATUS_OPTIONS: tuple[str, ...] = ("上場", "監理", "整理", "上場廃止")
-JOB_STATUSES: tuple[str, ...] = ("成功", "一部失敗", "失敗")
 
 CATALOG_TITLE = "📖 データカタログ"
 
@@ -246,20 +195,6 @@ def _select_schema(options: tuple[str, ...] | list[str] = ()) -> dict:
 def _relation_schema(database_id: str) -> dict:
     """dual_property relation (§6.2: ①側に逆向きプロパティを自動生成させる)。"""
     return {"relation": {"database_id": database_id, "type": "dual_property", "dual_property": {}}}
-
-
-def _relation_schema_one_way(database_id: str) -> dict:
-    """単方向 relation。銘柄ごとの履歴子DBから⑤へ張る。
-
-    dual_property にすると ⑤ 側に銘柄数ぶんの逆向きプロパティが付くため使わない。
-    """
-    return {
-        "relation": {
-            "database_id": database_id,
-            "type": "single_property",
-            "single_property": {},
-        }
-    }
 
 
 _TITLE = {"title": {}}
@@ -310,7 +245,7 @@ def raw_files_schema() -> dict:
 
 
 def stock_master_schema(raw_db_id: str) -> dict:
-    """① 銘柄マスタ (§6.4)。②③④⑤からの逆relationは dual_property で自動生成。"""
+    """① 銘柄マスタ (§6.4)。③④⑤からの逆relationは dual_property で自動生成。"""
     return {
         MASTER_PROP_NAME: _TITLE,
         MASTER_PROP_CODE: _RICH_TEXT,
@@ -323,56 +258,7 @@ def stock_master_schema(raw_db_id: str) -> dict:
         MASTER_PROP_LISTING_DATE: _DATE,
         MASTER_PROP_DELISTING_DATE: _DATE,
         MASTER_PROP_LAST_UPDATED: _DATE,
-        MASTER_PROP_HISTORY_DB_ID: _RICH_TEXT,
-        MASTER_PROP_HISTORY_SHARD: _NUMBER,
-        MASTER_PROP_HISTORY_ROW_COUNT: _NUMBER,
         **common_properties_schema(raw_db_id),
-    }
-
-
-def history_pointer_properties_schema() -> dict:
-    """① に後付けする履歴ポインタ列。既存DBへ不足分だけ追加する。"""
-    return {
-        MASTER_PROP_HISTORY_DB_ID: _RICH_TEXT,
-        MASTER_PROP_HISTORY_SHARD: _NUMBER,
-        MASTER_PROP_HISTORY_ROW_COUNT: _NUMBER,
-    }
-
-
-def _price_numeric_prop_names() -> tuple[str, ...]:
-    return (
-        PRICE_PROP_OPEN, PRICE_PROP_HIGH, PRICE_PROP_LOW, PRICE_PROP_CLOSE,
-        PRICE_PROP_PREV_PCT, PRICE_PROP_VOLUME, PRICE_PROP_TURNOVER, PRICE_PROP_MARKET_CAP,
-        PRICE_PROP_W52_HIGH, PRICE_PROP_W52_LOW,
-        PRICE_PROP_SMA5, PRICE_PROP_SMA25, PRICE_PROP_SMA75, PRICE_PROP_SMA200,
-        PRICE_PROP_SMA25_DEV, PRICE_PROP_RSI14,
-        PRICE_PROP_MACD, PRICE_PROP_MACD_SIGNAL, PRICE_PROP_MACD_HIST,
-        PRICE_PROP_BB_UPPER, PRICE_PROP_BB_LOWER, PRICE_PROP_ATR14, PRICE_PROP_VOL_RATIO25,
-        PRICE_PROP_PER, PRICE_PROP_PBR, PRICE_PROP_DIV_YIELD,
-    )
-
-
-def prices_schema(master_db_id: str, raw_db_id: str) -> dict:
-    """② 株価テクニカル (§6.4)。テクニカル列は計算値 (§3-4 加工の明示はカタログに記載)。"""
-    return {
-        PRICE_PROP_CODE: _TITLE,
-        **{name: _NUMBER for name in _price_numeric_prop_names()},
-        PROP_MASTER_RELATION: _relation_schema(master_db_id),
-        **common_properties_schema(raw_db_id),
-    }
-
-
-def history_prices_schema(raw_db_id: str) -> dict:
-    """①銘柄ページ配下の株価テクニカル履歴子DB。1行=1営業日。
-
-    原本 relation は single_property（⑤に銘柄数ぶんの逆向き列を作らない）。
-    銘柄マスタ relation は不要（親ページが①行そのもの）。
-    """
-    return {
-        HISTORY_PROP_DATE_TITLE: _TITLE,
-        **{name: _NUMBER for name in _price_numeric_prop_names()},
-        **common_properties_schema(None, include_raw_relation=False, include_quality=True),
-        PROP_RAW_RELATION: _relation_schema_one_way(raw_db_id),
     }
 
 
@@ -415,33 +301,6 @@ def disclosures_schema(master_db_id: str, raw_db_id: str) -> dict:
         DISC_PROP_EFFECTIVE_DATE: _DATE,
         PROP_MASTER_RELATION: _relation_schema(master_db_id),
         **common_properties_schema(raw_db_id),
-    }
-
-
-def exports_schema(raw_db_id: str) -> dict:
-    """⑥ 時系列エクスポート (§6.4)。1行=1データセット (バルク配布物)。"""
-    return {
-        EXPORT_PROP_NAME: _TITLE,
-        EXPORT_PROP_FILES: _FILES,
-        EXPORT_PROP_PERIOD: _RICH_TEXT,
-        EXPORT_PROP_ROW_COUNT: _NUMBER,
-        EXPORT_PROP_SCHEMA_DESC: _RICH_TEXT,
-        EXPORT_PROP_UPDATED_ON: _DATE,
-        **common_properties_schema(raw_db_id),
-    }
-
-
-def job_log_schema() -> dict:
-    """⑦ 収集ジョブログ (§6.4)。運用ログのため共通プロパティ対象外 (§6.3)。"""
-    return {
-        JOB_PROP_NAME: _TITLE,
-        JOB_PROP_RUN_AT: _DATE,
-        JOB_PROP_STATUS: _select_schema(JOB_STATUSES),
-        JOB_PROP_PROCESSED: _NUMBER,
-        JOB_PROP_FAILED: _NUMBER,
-        JOB_PROP_FAILED_CODES: _RICH_TEXT,
-        JOB_PROP_RUN_URL: _URL,
-        JOB_PROP_DURATION: _NUMBER,
     }
 
 
@@ -534,9 +393,9 @@ class SchemaSetup:
 
 
 def ensure_all(client: NotionClient, settings: Settings) -> dict[str, str]:
-    """7DB+データカタログを冪等に整備し {論理キー: DB ID} を返す (§6, P0)。
+    """4DB+データカタログを冪等に整備し {論理キー: DB ID} を返す (§6, P0)。
 
-    作成順 (§6.2): ⑤ → ① → ②③④ → ⑥⑦。relation は dual_property のため
+    作成順 (§6.2): ⑤ → ① → ③④。relation は dual_property のため
     ①側に逆向きプロパティが自動生成される。最後に⑤へ「関連銘柄」relation→①を
     後付けする (⑤作成時点では①が存在しないため)。
     """
@@ -547,11 +406,8 @@ def ensure_all(client: NotionClient, settings: Settings) -> dict[str, str]:
     ensured = [
         raw,
         master,
-        setup.ensure_database("prices", prices_schema(master.db_id, raw.db_id)),
         setup.ensure_database("financials", financials_schema(master.db_id, raw.db_id)),
         setup.ensure_database("disclosures", disclosures_schema(master.db_id, raw.db_id)),
-        setup.ensure_database("exports", exports_schema(raw.db_id)),
-        setup.ensure_database("job_log", job_log_schema()),
     ]
     # ⑤ → ① の「関連銘柄」relation を後付け (§6.4 ⑤)
     setup.add_missing_properties(raw, {RAW_PROP_RELATED_MASTER: _relation_schema(master.db_id)})
@@ -607,32 +463,7 @@ _CATALOG_DICTIONARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "状態 (select: 上場/監理/整理/上場廃止) / 上場日 (date) / 上場廃止日 (date)"
             "。一次開示由来 (tdnet_hourly が所有) で listed と二重所有を回避 (§3-7)",
             "最終データ更新日 (date)",
-            "現行履歴DB ID (text) / 履歴シャード番号 (number) / 履歴行数 (number): "
-            "①ページ配下の株価テクニカル履歴子DBへのポインタ (prices_daily が所有)",
-            "②③④⑤への relation は dual_property により自動生成 (銘柄ページから全情報を辿れる)",
-        ),
-    ),
-    (
-        "prices",
-        "ソース: yfinance/stooq+計算 (personal-only) / 更新頻度: 毎営業日19:30 (prices_daily)。"
-        "土曜は reconcile_weekly が stooq と終値突合しデータ品質=要確認を更新 (値は書換えない §3-5)。"
-        "②は最新スナップショット。日次の計算済みテクニカルとバリュエーションは"
-        "①銘柄ページ配下の「株価テクニカル履歴」子DBへ追記 (8,000行で次シャード)。"
-        "横断の全履歴OHLCVは⑥のParquet/CSVを利用",
-        (
-            "銘柄コード (title)",
-            "始値/高値/安値/終値 (number, 円)",
-            "前日比率% (number, %): 計算値 (終値/前日終値-1)×100",
-            "出来高 (number, 株) / 売買代金 (number, 円) / 時価総額 (number, 円)",
-            "52週高値/52週安値 (number, 円)",
-            "SMA5/SMA25/SMA75/SMA200 (number, 円): 計算値 単純移動平均",
-            "SMA25乖離率% (number, %): 計算値 (終値/SMA25-1)×100",
-            "RSI14 (number): 計算値 RSI(14日)",
-            "MACD/MACDシグナル/MACDヒストグラム (number): 計算値 MACD(12,26,9)",
-            "BB+2σ/BB-2σ (number, 円): 計算値 ボリンジャーバンド(20日,2σ)",
-            "ATR14 (number, 円): 計算値 ATR(14日)",
-            "出来高25日平均比 (number): 計算値 出来高/25日平均出来高",
-            "PER (number, 倍) / PBR (number, 倍) / 配当利回り% (number, %)",
+            "③④⑤への relation は dual_property により自動生成 (銘柄ページから全情報を辿れる)",
         ),
     ),
     (
@@ -681,26 +512,6 @@ _CATALOG_DICTIONARY: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "共通プロパティはソース/ライセンスタグ/データ基準日/取得日時のみ (原本relation・データ品質は持たない)",
         ),
     ),
-    (
-        "exports",
-        "更新頻度: 週1日曜 (export_weekly)。データサイエンティスト向けバルク配布物 (§7)",
-        (
-            "データセット名 (title): ユニークキー",
-            "ファイル (files): Parquet (第一推奨) + CSV",
-            "対象期間 (text) / 行数 (number) / スキーマ説明 (text) / 更新日 (date)",
-            "ライセンスタグ別にファイルを分離 (commercial-ok と personal-only は別データセット §8.2)",
-        ),
-    ),
-    (
-        "job_log",
-        "1行=1ジョブ実行。運用ログのため共通プロパティ対象外 (§6.3)",
-        (
-            "ジョブ名 (title) / 実行日時 (date)",
-            "ステータス (select: 成功/一部失敗/失敗)",
-            "処理件数/失敗件数 (number) / 失敗銘柄 (text)",
-            "GitHub Run URL (url) / 所要時間(秒) (number)",
-        ),
-    ),
 )
 
 
@@ -730,12 +541,10 @@ def catalog_blocks(db_ids: dict[str, str]) -> list[dict]:
         *[_bullet(attribution) for attribution in ATTRIBUTION.values()],
         _heading(2, "利用者別クイックスタート (§7)"),
         _heading(3, "投資家 (見る人)"),
-        _bullet("①銘柄マスタの銘柄ページを開くと、株価・財務・開示・原本がリレーションで全部辿れます"),
-        _bullet("同ページ配下の「株価テクニカル履歴」に、その銘柄の営業日ごとのテクニカルとバリュエーションが残ります"),
+        _bullet("①銘柄マスタの銘柄ページを開くと、財務・開示・原本がリレーションで全部辿れます"),
         _bullet("推奨ビュー (高ROEランキング/業種別/直近開示/決算カレンダー) でスクリーニングできます"),
         _heading(3, "データサイエンティスト"),
-        _bullet("⑥時系列エクスポートDBから全銘柄×全期間の Parquet (第一推奨) / CSV を直接ダウンロード"),
-        _bullet("各原本行 (⑤) にも機械可読な変換版 (CSV/Parquet) が併置されています"),
+        _bullet("各原本行 (⑤) に機械可読な変換版 (CSV/Parquet) が併置されています"),
         _bullet("変換は値を一切変更していません (型変換・縦持ち化・文字コード正規化のみ §5.2)"),
         _heading(3, "開発者 / API利用者"),
         _bullet("Notion API でそのまま取得できます: POST https://api.notion.com/v1/databases/{database_id}/query"),
@@ -756,7 +565,7 @@ def catalog_blocks(db_ids: dict[str, str]) -> list[dict]:
         _bullet("データ基準日 (date): その値が指す時点 / 取得日時 (date): パイプラインが取得した時刻"),
         _bullet("原本 (relation→⑤): 由来する原本ファイル行。どの値も原本まで遡れます (§3-3)"),
         _bullet("データ品質 (select): 正常/要確認(突合乖離)/欠損あり。取得失敗は空欄=欠損のまま (§3-1)"),
-        _para("適用範囲: ①〜④⑥は全共通プロパティ。⑤はソース/ライセンスタグ/データ基準日/取得日時のみ。⑦は対象外。"),
+        _para("適用範囲: ①③④は全共通プロパティ。⑤はソース/ライセンスタグ/データ基準日/取得日時のみ。"),
         _heading(2, "スキーマ辞書"),
     ]
     for key, summary, items in _CATALOG_DICTIONARY:
@@ -801,7 +610,7 @@ def ensure_catalog_page(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m jp_stock_pipeline.notion.schema",
-        description="Notion 7DB+データカタログの冪等セットアップ (§6, P0)",
+        description="Notion 4DB+データカタログの冪等セットアップ (§6, P0)",
     )
     parser.add_argument("--dry-run", action="store_true", help="Notionへ書き込まず操作を記録のみ")
     parser.add_argument(

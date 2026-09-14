@@ -24,7 +24,7 @@ from jp_stock_pipeline.cloud_store import core_stocks as cs
 from jp_stock_pipeline.cloud_store.d1 import MAX_BOUND_PARAMS, D1Error
 from jp_stock_pipeline.collectors import edinet_codelist
 from jp_stock_pipeline.contracts.sector33 import TSE_SECTOR33_NAMES, normalize_sector33
-from jp_stock_pipeline.jobs import master_sync, runner
+from jp_stock_pipeline.jobs import master_sync
 from jp_stock_pipeline.licensing import source_license
 from jp_stock_pipeline.models import Source
 from jp_stock_pipeline.rawstore import save_raw
@@ -323,7 +323,6 @@ class TestMasterSyncWiring:
             )
 
         monkeypatch.setattr(edinet_codelist, "fetch_codelist", fake_fetch)
-        monkeypatch.setattr(runner, "write_job_log", lambda *a, **k: "dummy")
 
     def _env(self, tmp_path) -> dict[str, str]:
         return {"RAW_DATA_DIR": str(tmp_path / "raw"), **_D1_ENV}

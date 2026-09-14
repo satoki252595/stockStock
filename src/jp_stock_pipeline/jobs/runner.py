@@ -22,13 +22,11 @@ from ..config import (
     DB_REGISTRY,
     DB_TARGET_CLOUD,
     DB_TARGETS,
-    ConfigError,
     Settings,
     load_settings,
 )
 from ..local_store import connect_local_store
 from ..notion.client import NotionClient
-from ..notion.upsert import write_job_log
 
 if TYPE_CHECKING:
     from ..cloud_store.sink import CloudSink
@@ -343,24 +341,9 @@ def run_job(
 
     duration = time.monotonic() - started
     status = _status(ctx, crashed)
-    try:
-        write_job_log(
-            client,
-            settings,
-            job_name,
-            status,
-            ctx.processed,
-            ctx.failed,
-            ctx.failed_codes[:50],  # rich_text 上限対策。全量はジョブ標準出力に出る
-            run_url=github_run_url(resolved_env),
-            duration_secs=round(duration, 1),
-        )
-    except ConfigError as exc:
-        logger.warning("⑦ ジョブログ未記録 (DB ID 未設定): %s", exc)
-    except Exception as exc:
-        logger.error("⑦ ジョブログ記録失敗: %s", exc)
+    # Notion ⑦ 収集ジョブログは廃止。実行履歴は D1 jss_job_runs に一本化した。
 
-    # D1 ⑦ への記録。器 (jss_job_runs) はあったが writer が存在せず 0 行のままで、
+    # D1 への実行記録。器 (jss_job_runs) はあったが writer が存在せず 0 行のままで、
     # EDINET が 11 営業日連続 processed=0 で「成功」していたことを誰も検知
     # できなかった。ここが唯一の機械可読な実行履歴になる。
     if ctx.cloud is not None and ctx.cloud.settings.d1_enabled():
@@ -396,7 +379,7 @@ def run_job(
         logger.warning(
             "書き込み degrade サマリ: Notion失敗 %d 件 / ローカルミラー失敗 %d 件"
             " / Cloudflare失敗 %d 件"
-            "（片系統失敗は継続し、両系統とも失敗した分のみ ⑦ failed に計上 §3-2）",
+            "（片系統失敗は継続し、両系統とも失敗した分のみ failed に計上 §3-2）",
             ctx.notion_failed, ctx.mirror_failed, ctx.cloud_failed,
         )
 

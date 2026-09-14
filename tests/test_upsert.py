@@ -19,7 +19,6 @@ from jp_stock_pipeline.models import (
     DisclosureRecord,
     FinancialSummaryRecord,
     JST,
-    PriceTechnicalRecord,
     Provenance,
     Source,
     StockMasterRecord,
@@ -30,12 +29,9 @@ from jp_stock_pipeline.notion import upsert
 ENV = {
     "NOTION_DB_IDS_FILE": "/nonexistent/db_ids.json",
     "NOTION_DB_STOCK_MASTER": "db-master",
-    "NOTION_DB_PRICES": "db-prices",
     "NOTION_DB_FINANCIALS": "db-fin",
     "NOTION_DB_DISCLOSURES": "db-disc",
     "NOTION_DB_RAW_FILES": "db-raw",
-    "NOTION_DB_EXPORTS": "db-exp",
-    "NOTION_DB_JOB_LOG": "db-job",
 }
 
 FETCHED_AT = datetime(2026, 6, 10, 19, 30, tzinfo=JST)
@@ -143,46 +139,6 @@ class TestStockMasterPayload:
         assert props2[S.MASTER_PROP_LISTED]["checkbox"] is False
         assert props2[S.MASTER_PROP_STATUS]["select"]["name"] == "上場廃止"
         assert props2[S.MASTER_PROP_DELISTING_DATE]["date"]["start"] == "2026-07-01"
-
-    def test_history_pointer_fields_not_in_master_payload(self):
-        """履歴ポインタは master_sync の完全置換で消さない。"""
-        rec = StockMasterRecord(code="7203", name="トヨタ自動車", provenance=prov())
-        props = upsert.stock_master_properties(rec)
-        assert S.MASTER_PROP_HISTORY_DB_ID not in props
-        assert S.MASTER_PROP_HISTORY_SHARD not in props
-        assert S.MASTER_PROP_HISTORY_ROW_COUNT not in props
-
-
-class TestPriceTechnicalPayload:
-    def test_missing_indicators_explicit_clear(self):
-        """取得できなかった指標は {"number": None} で明示クリア (§3-1)。
-
-        例: stooq フォールバック行に前回 yfinance の PER が残存しない。"""
-        rec = PriceTechnicalRecord(
-            code="7203",
-            provenance=prov(source=Source.YFINANCE, license_tag=LicenseTag.PERSONAL_ONLY),
-            close=3120.0,
-        )
-        props = upsert.price_technical_properties(rec)
-        assert props[S.PRICE_PROP_CLOSE] == {"number": 3120.0}
-        assert props[S.PRICE_PROP_RSI14] == {"number": None}
-        assert props[S.PRICE_PROP_SMA200] == {"number": None}
-        assert props[S.PRICE_PROP_PER] == {"number": None}
-
-    def test_title_is_code(self):
-        rec = PriceTechnicalRecord(code="7203", provenance=prov())
-        props = upsert.price_technical_properties(rec)
-        assert props[S.PRICE_PROP_CODE]["title"][0]["text"]["content"] == "7203"
-
-    def test_master_relation(self):
-        rec = PriceTechnicalRecord(code="7203", provenance=prov())
-        props = upsert.price_technical_properties(rec, master_page_id="master-1")
-        assert props[S.PROP_MASTER_RELATION]["relation"] == [{"id": "master-1"}]
-
-    def test_master_relation_skipped_for_dry_run_id(self):
-        rec = PriceTechnicalRecord(code="7203", provenance=prov())
-        props = upsert.price_technical_properties(rec, master_page_id="dry-run-1")
-        assert S.PROP_MASTER_RELATION not in props
 
 
 class TestFinancialSummaryPayload:
@@ -307,12 +263,6 @@ class TestKeyFilters:
         assert upsert.stock_master_filter("7203") == {
             "property": S.MASTER_PROP_CODE,
             "rich_text": {"equals": "7203"},
-        }
-
-    def test_price_filter_is_title_equals(self):
-        assert upsert.price_technical_filter("7203") == {
-            "property": S.PRICE_PROP_CODE,
-            "title": {"equals": "7203"},
         }
 
     def test_disclosure_filter_is_doc_id(self):
@@ -499,13 +449,6 @@ class TestUpsertDryRunCreatePath:
         (op,) = [o for o in dry_client.ops if o.op == "create_page"]
         assert op.payload["parent"] == {"database_id": "db-master"}
         assert S.MASTER_PROP_NAME in op.payload["properties"]
-
-    def test_upsert_price_technical_creates(self, dry_client):
-        settings = make_settings()
-        rec = PriceTechnicalRecord(code="7203", provenance=prov())
-        upsert.upsert_price_technical(dry_client, settings, rec)
-        (op,) = [o for o in dry_client.ops if o.op == "create_page"]
-        assert op.payload["parent"] == {"database_id": "db-prices"}
 
     def test_upsert_financial_summary_creates(self, dry_client):
         settings = make_settings()
@@ -754,18 +697,6 @@ class TestPrefetchedPageMap:
                 c, "db-master", {"k": 1}, {"p": 1}, existing_page_id="x", page_resolved=True
             )
 
-    def test_load_price_page_map_reads_title_key(self):
-        # ② は title equals キー。title[0].plain_text を読む（rich_text ではない）
-        settings = make_settings()
-        pages = [
-            {"id": "pg-7203", "properties": {S.PRICE_PROP_CODE: {"title": [{"plain_text": "7203"}]}}},
-            {"id": "pg-6758", "properties": {S.PRICE_PROP_CODE: {"title": [{"plain_text": "6758"}]}}},
-            {"id": "pg-empty", "properties": {S.PRICE_PROP_CODE: {"title": []}}},  # 空はスキップ
-        ]
-        c = _RecordingClient(query_result=pages)
-        out = upsert.load_price_page_map(c, settings)
-        assert out == {"7203": "pg-7203", "6758": "pg-6758"}
-
 
 class TestDisclosurePrefetch:
     """④/① 事前マップで開示ジョブの per-record 検索を排除する (§8.3)。"""
@@ -847,69 +778,3 @@ class TestDisclosurePrefetch:
         )
         assert pid is None
         assert c.calls == []  # 検索も更新もしない
-
-
-class TestJobLog:
-    def test_write_job_log(self, dry_client):
-        settings = make_settings()
-        upsert.write_job_log(
-            dry_client,
-            settings,
-            "prices_daily",
-            "一部失敗",
-            processed=3800,
-            failed=12,
-            failed_codes=["7203", "6758"],
-            run_url="https://github.com/x/y/actions/runs/1",
-            duration_secs=3120.5,
-        )
-        (op,) = [o for o in dry_client.ops if o.op == "create_page"]
-        props = op.payload["properties"]
-        assert op.payload["parent"] == {"database_id": "db-job"}
-        assert props[S.JOB_PROP_STATUS]["select"]["name"] == "一部失敗"
-        assert props[S.JOB_PROP_PROCESSED] == {"number": 3800}
-        assert props[S.JOB_PROP_FAILED_CODES]["rich_text"][0]["text"]["content"] == "7203, 6758"
-        assert props[S.JOB_PROP_DURATION] == {"number": 3120.5}
-
-    def test_invalid_status_raises(self, dry_client):
-        settings = make_settings()
-        with pytest.raises(ValueError):
-            upsert.write_job_log(dry_client, settings, "x", "完了", 1, 0)
-
-    def test_no_failed_codes_explicit_clear(self, dry_client):
-        settings = make_settings()
-        upsert.write_job_log(dry_client, settings, "master_sync", "成功", 3900, 0)
-        (op,) = [o for o in dry_client.ops if o.op == "create_page"]
-        assert op.payload["properties"][S.JOB_PROP_FAILED_CODES] == {"rich_text": []}
-        assert op.payload["properties"][S.JOB_PROP_RUN_URL] == {"url": None}
-
-
-class TestExportRow:
-    def test_create_export_row(self, dry_client):
-        settings = make_settings()
-        upsert.create_export_row(
-            dry_client,
-            settings,
-            "全銘柄株価日足 (personal-only)",
-            period="2000-01-01〜2026-06-05",
-            row_count=25_000_000,
-            schema_desc="date, code, open, high, low, close, volume, adj_close",
-            provenance=prov(source=Source.STOOQ, license_tag=LicenseTag.PERSONAL_ONLY),
-            file_uploads=[("fu-1", "prices_all.parquet")],
-        )
-        (op,) = [o for o in dry_client.ops if o.op == "create_page"]
-        props = op.payload["properties"]
-        assert op.payload["parent"] == {"database_id": "db-exp"}
-        assert (
-            props[S.EXPORT_PROP_NAME]["title"][0]["text"]["content"]
-            == "全銘柄株価日足 (personal-only)"
-        )
-        assert props[S.EXPORT_PROP_ROW_COUNT] == {"number": 25_000_000}
-        assert props[S.EXPORT_PROP_FILES]["files"][0]["file_upload"] == {"id": "fu-1"}
-        assert props[S.PROP_LICENSE_TAG]["select"]["name"] == "personal-only"
-
-    def test_export_filter_is_title_equals(self):
-        assert upsert.export_filter("dataset-x") == {
-            "property": S.EXPORT_PROP_NAME,
-            "title": {"equals": "dataset-x"},
-        }
