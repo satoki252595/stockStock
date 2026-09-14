@@ -183,11 +183,12 @@ class TestExpectedColumns:
 
 
 class TestOrphanCheck:
-    def test_14子表と_soft_参照1表と宣言無し1表を数える(self) -> None:
-        assert len(cs.CHILD_TABLES) == 14  # FK 宣言のある子表
+    def test_13子表と_soft_参照1表と宣言無し1表を数える(self) -> None:
+        # L-52 で swing_stock_screening を抜いて 13 表。
+        assert len(cs.CHILD_TABLES) == 13  # FK 宣言のある子表
         assert cs.SOFT_CHILD_TABLES == ("jss_financials",)
         assert cs.NOFK_CHILD_TABLES == ("p_momentum",)
-        assert len(cs.ALL_CHECKED_TABLES) == 16
+        assert len(cs.ALL_CHECKED_TABLES) == 15
         joined = " ".join(cs.orphan_check_statements())
         for table in cs.ALL_CHECKED_TABLES:
             assert f"FROM {table} c" in joined
@@ -246,7 +247,7 @@ class TestOrphanCheck:
         assert statements, "孤児検査の文が空"
         for sql in statements:
             assert sql.count("UNION ALL") <= MAX_COMPOUND_SELECT_TERMS - 1, sql
-        assert len(statements) == 4  # 16 表 / 5 項
+        assert len(statements) == 3  # 15 表 / 5 項（L-52 で screening を抜いた）
         assert len(cs.daily_orphan_check_statements()) == 1  # 2 表
 
 

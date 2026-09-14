@@ -133,10 +133,6 @@
       "kind": "uniform",
       "tag": "personal-only"
     },
-    "swing_stock_screening": {
-      "kind": "uniform",
-      "tag": "personal-only"
-    },
     "yuho_documents": {
       "kind": "uniform",
       "tag": "commercial-ok"

@@ -145,7 +145,7 @@ TABLE_LICENSE: dict[str, TableLicense] = {
     "swing_daily_ohlcv": _uniform(LicenseTag.PERSONAL_ONLY, _YAHOO, _CHILD),
     "swing_stock_indicators": _uniform(LicenseTag.PERSONAL_ONLY, _YAHOO, _CHILD),
     "swing_entry_signals": _uniform(LicenseTag.PERSONAL_ONLY, _YAHOO, _CHILD),
-    "swing_stock_screening": _uniform(LicenseTag.PERSONAL_ONLY, _YAHOO, _CHILD),
+    # `swing_stock_screening` は L-52 で indicators の列に畳んで DROP（kabulab-cf 0015）。
     "rsi_percentile": _uniform(LicenseTag.PERSONAL_ONLY, _YAHOO, _CHILD),
     # L2 投影（kabulab-cf PR #23 / 0011 で 2026-09-13 に本番作成）。swing_daily_ohlcv の
     # 終値列を銘柄ごとに 1 行へ畳んだもので、値の出所は Yahoo 日足のまま。
@@ -253,9 +253,10 @@ ROW_TAG_COLUMN = "license_tag"
 # 本番（`_cf_KV` を除く）の表数。finmath 2 表（`finmath_price_snapshot` /
 # `finmath_daily_ohlcv`）は kabulab-cf drizzle/d1/0012 で DROP 済み（本番
 # sqlite_master で不在を確認）。L-20 で `jss_notion_pages` を足して 30 表。
-# **この PR のマージと同時に本番へ CREATE TABLE すること。** 先にコードだけ
-# 入ると license_map の「宣言にあって本番に無い表」が失敗する。
-OBSERVED_TABLE_COUNT = 30
+# L-52 で `swing_stock_screening` を引いて 29 表（kabulab-cf 0015 で DROP）。
+# 表を消す側は stockStock の地図を先に main へ（B2）。DROP までの間は本番の
+# 残存表が「未知の表 = warning」で出るだけ（failure ではない）。
+OBSERVED_TABLE_COUNT = 29
 
 # 本番 `sqlite_master` から除く名前。SQLite と D1 の内部表。
 _INTERNAL_PREFIXES = ("sqlite_", "_cf_", "d1_", "__drizzle")
