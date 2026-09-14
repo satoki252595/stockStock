@@ -139,6 +139,4 @@ jobs:
             echo "${LABEL}は両リポジトリで一致している。"
           }
           compare_contract tests/fixtures/contracts/stock-code-vectors.json "銘柄コード共有テストベクタ"
-          # pending-peer: この PR で新設したファイル。kabulab-cf 側の公開面レーンが
-          # 同じファイルを入れたら第3引数を外して結合を有効にする。
-          compare_contract tests/fixtures/contracts/d1-license-map.json "D1 列単位ライセンス地図の契約" pending-peer
+          compare_contract tests/fixtures/contracts/d1-license-map.json "D1 列単位ライセンス地図の契約"
