@@ -407,22 +407,5 @@ def tidy_to_financial_record(
     )
 
 
-# ---------------------------------------------------------------------------
-# yfinance info → バリュエーション (§4 トラックB, personal-only)
-# ---------------------------------------------------------------------------
-
-
-def yf_info_to_valuation(info: dict) -> dict:
-    """yfinance の info dict から PER/PBR/時価総額/配当利回り% を取り出す。
-
-    キーが無い項目は None のまま（推定しない §3-1）。
-    dividendYield は yfinance 1.x 系では % 単位で返る
-    （実フィクスチャ tests/fixtures/transform/yfinance_7203T_info.json で
-    3.53 = 3.53% を確認済み）。換算はしない。
-    """
-    return {
-        "per": info.get("trailingPE"),
-        "pbr": info.get("priceToBook"),
-        "market_cap": info.get("marketCap"),
-        "dividend_yield_pct": info.get("dividendYield"),
-    }
+# yfinance info → バリュエーションは L-13 で削除した（prices_daily 廃止で
+# 呼び出し元なし。日足断面は kabulab-cf の daily.ts が D1 へ書く）。

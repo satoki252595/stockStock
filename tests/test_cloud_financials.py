@@ -175,7 +175,9 @@ class TestSql:
 
     def test_unknown_license_tag_ranks_as_the_strictest(self) -> None:
         """未知のタグを緩い側へ倒すと公開フィルタを素通りする。"""
-        expression = F._license_rank_sql("x")  # noqa: SLF001
+        from jp_stock_pipeline.licensing import strictness_rank_sql
+
+        expression = strictness_rank_sql("x")
         assert "ELSE 3 END" in expression
 
     def test_zero_rows_is_rejected(self) -> None:

@@ -6,15 +6,16 @@
 - dtype は文字列保持を基本とし、文字列からの数値推定はしない
   （数値・bool・ネスト残りは JSON リテラル文字列として無損失に保持する）
 
-本モジュールは併せて、非XBRL変換（json/pdf/xls）の共通入口
+本モジュールは併せて、非XBRL変換（json/pdf）の共通入口
 `convert_artifact(artifact, kind)` を提供する (§8.1 step 3)。
+xls/xlsx 変換は L-12 で削除した（本番経路で未使用。JPX data_j.xlsx を読む
+本番実装は kabulab-cf の TypeScript 側）。
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any
 
@@ -29,9 +30,6 @@ logger = logging.getLogger(__name__)
 
 # dict レスポンスでレコード配列を探すキー（この順で推定）
 _RECORD_ARRAY_KEYS = ("results", "items", "data")
-
-# シート名等のファイル名サニタイズ（rawstore の命名規則と同じ文字集合）
-_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 def _cell_to_str(value: Any) -> str | None:
@@ -126,8 +124,7 @@ def convert_artifact(artifact: RawArtifact, kind: str) -> RawArtifact:
 
     Args:
         artifact: rawstore.save_raw が返した原本アーティファクト（保存済みであること）
-        kind: "json" / "jsonl"（改行区切りJSON = JSON Lines）/ "pdf" /
-            "xls"（.xls/.xlsx 共通。"xlsx" も受理）
+        kind: "json" / "jsonl"（改行区切りJSON = JSON Lines）/ "pdf"
 
     挙動:
     - 成功: 変換版を原本の隣に生成し artifact.converted_paths へ追加、
@@ -139,8 +136,8 @@ def convert_artifact(artifact: RawArtifact, kind: str) -> RawArtifact:
 
     未知の kind はプログラミングエラーとして ValueError を送出する（変換失敗とは扱わない）。
     """
-    if kind not in ("json", "jsonl", "pdf", "xls", "xlsx"):
-        raise ValueError(f"未対応の変換種別: {kind!r} (json/jsonl/pdf/xls/xlsx)")
+    if kind not in ("json", "jsonl", "pdf"):
+        raise ValueError(f"未対応の変換種別: {kind!r} (json/jsonl/pdf)")
 
     new_paths: list[Path] = []
     try:
@@ -176,23 +173,6 @@ def convert_artifact(artifact: RawArtifact, kind: str) -> RawArtifact:
             # newline="" で改行変換を抑止（抽出テキストをバイト単位で不変に保つ §5.2）
             txt_path.write_text(text, encoding="utf-8", newline="")
             new_paths.append(txt_path)
-
-        else:  # xls / xlsx
-            from .xls_to_csv import xls_to_csv
-
-            sheets = xls_to_csv(raw, artifact.filename)
-            multi = len(sheets) > 1
-            for sheet_name, csv_bytes in sheets.items():
-                if multi:
-                    # 複数シートはシート名で区別（命名規則 §5.2 を維持）
-                    stem, _, ext = artifact.filename.rpartition(".")
-                    safe_sheet = _SAFE_RE.sub("-", sheet_name.strip()) or "sheet"
-                    name = converted_filename(f"{stem}_{safe_sheet}.{ext}", "csv")
-                else:
-                    name = converted_filename(artifact.filename, "csv")
-                path = artifact.local_path.parent / name
-                path.write_bytes(csv_bytes)
-                new_paths.append(path)
 
     except Exception:
         # 変換失敗でも原本保存は成立させる (§5.2)。部分生成物は記録しない

@@ -81,12 +81,6 @@ jobs:
         run: nix develop -c uv sync
 
       # 観測層: 実表を測って jss_dataset_freshness へ書く（判定も通知もしない）。
-      #
-      # KABULAB_D1_DATABASE_ID も渡す。観測対象 7 件のうち 4 件
-      # (core_stock_financials / ir_disclosures / core_stocks / yutai_benefits) は
-      # 移行元 kabulab-cf 所有の表で、正本 DB に同居しているとは限らない。
-      # 渡さないと、別 DB 構成では毎日 4 件が `no such table` で落ちて
-      # 観測ジョブが恒久的に失敗する（未設定なら正本 DB へフォールバックする）。
       - name: Record freshness
         id: probe
         env:
@@ -94,7 +88,6 @@ jobs:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
-          KABULAB_D1_DATABASE_ID: ${{ secrets.KABULAB_D1_DATABASE_ID }}
         run: nix develop -c uv run python -m jp_stock_pipeline.jobs.freshness_probe
 
       # 判定層: 何も書かない。観測が落ちても必ず走らせる（上のコメント参照）。
@@ -130,9 +123,6 @@ jobs:
       # （`cloud_store/ops.safe_record_job_run`。失敗してもジョブは落ちない）。
       # 移行対象表には触らないが、読み取り専用トークンでは動かない。
       #
-      # KABULAB_D1_DATABASE_ID を渡す理由は上の観測層と同じ。core_stocks は移行元
-      # kabulab-cf 所有の表で、正本 DB に同居しているとは限らない。
-      #
       # 上2層と同じく `if: always()`。観測や判定が落ちた日にドリフト検出だけが
       # 静かになると、「壊れているのに緑」と区別できなくなる。
       - name: Detect core_stocks schema drift
@@ -143,7 +133,6 @@ jobs:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
-          KABULAB_D1_DATABASE_ID: ${{ secrets.KABULAB_D1_DATABASE_ID }}
         run: nix develop -c uv run python -m jp_stock_pipeline.jobs.core_stocks_migrate --verify
 
       # 投入・照合層: 列単位ライセンス地図 (jss_column_license) と参照表。

@@ -265,32 +265,6 @@ def build_sector33_updates(changes: Mapping[str, str | None]) -> list[tuple[str,
     return statements
 
 
-def render_sector33_backfill(changes: Mapping[str, str | None]) -> str:
-    """一回限りの backfill 用に、値を埋め込んだ SQL ファイルの中身を返す。
-
-    `wrangler d1 execute --file` はバインドを渡せないので、ここだけ文字列へ
-    埋め込む。値は東証33業種の固定語彙か NULL、コードは正準 4 文字だけなので
-    引用符は `'` の二重化で足りる（それ以外の値は `normalize_sector33` と
-    `source_code_to_ticker` を通った時点で来ない）。
-    """
-
-    def lit(value: str | None) -> str:
-        return "NULL" if value is None else "'" + value.replace("'", "''") + "'"
-
-    # `build_sector33_updates` と同じ分割で出す（SQL の形を 2 か所で作文しない
-    # ために params から組み直す。文字列置換で `?` を埋める案は、値に `?` が
-    # 含まれた瞬間に壊れるので採らない）。
-    lines = []
-    for _sql, params in build_sector33_updates(changes):
-        value, *codes = params
-        in_list = ", ".join(lit(c) for c in codes)
-        lines.append(
-            f"UPDATE {TABLE} SET {SECTOR33_COLUMN} = {lit(value)}"
-            f" WHERE code IN ({in_list});"
-        )
-    return "\n".join(lines) + ("\n" if lines else "")
-
-
 # --- 読み取り（検証用。すべて SELECT / PRAGMA）-------------------------------
 
 TABLE_INFO_SQL = f"PRAGMA table_info({TABLE})"

@@ -32,20 +32,11 @@ writer の自己申告は「今さっき更新した」になる（実際には1
   副作用として `pubdate` が epoch ではなく文字列だった場合も、
   `freshness_probe._coerce_epoch` が ISO 文字列を解釈するので unknown に落ちない。
 
-## どの D1 を測るか（間違えると毎日必ず失敗する）
+## どの D1 を測るか
 
-`core_stock_financials` / `ir_disclosures` / `core_stocks` / `yutai_benefits` は
-**移行元 kabulab-cf 所有の表**で、正本 DB（`CF_D1_DATABASE_ID`）に同居している
-とは限らない。設計の目標形は「D1 は1個」だが、`KABULAB_D1_DATABASE_ID` という
-別 secret が現に存在し、`jobs/yutai_backup.py` は `yutai_benefits` をその DB から
-読み、`jobs/core_stocks_migrate.py` は `kabulab_d1_database_id or d1_database_id`
-で解決している。統合が終わるまでは 2 DB でも動く必要がある。
-
-そこで `db` を宣言で持ち、観測側が DB を選ぶ。`kabulab` でも secret 未設定なら
-正本 DB へフォールバックするので、同居済みの環境でも 2 DB の環境でも同じコードで
-動く。**ここを正本 DB 固定にすると、表が別 DB にあった場合に 7 件中 4 件が
-`no such table` で落ち、観測ジョブが毎日失敗する**（= 潰したかった「毎日鳴る」に
-自分で戻る。しかもテスト側の DDL は同一 DB を前提に置くので検出できない）。
+全表が正本 DB（`CF_D1_DATABASE_ID`）の 1 DB に同居していることを確認済み
+（本番 PRAGMA を正本 DB で確認。2 DB 前提のフォールバックは L-04 で削除）。
+観測は正本 DB だけを見る。
 
 ## bytes を測らないこと
 
@@ -71,15 +62,13 @@ FINANCIALS_LICENSE_TAG = inherit(
 ).value
 
 
-# 観測先 D1 の識別子。文字列リテラルを散らすと綴り間違いが静かに
-# 「正本 DB を見る」へ倒れるので定数で持つ。
-DB_CANONICAL = "canonical"
-DB_KABULAB = "kabulab"
-
-
 @dataclass(frozen=True)
 class DatasetSource:
-    """1 データセットの観測元。宣言のみ（判定も I/O も持たない）。"""
+    """1 データセットの観測元。宣言のみ（判定も I/O も持たない）。
+
+    観測先は正本 DB（CF_D1_DATABASE_ID）だけ。2 DB 前提の `db` フィールドは
+    L-04 で削除した。
+    """
 
     dataset: str
     store: str  # 'D1' | 'R2'
@@ -88,10 +77,6 @@ class DatasetSource:
     sql: str  # latest_date / source_epoch / n を返す1文
     license_tag: str  # 混在する表は最も厳しいタグへ倒す（licensing._STRICTNESS の順）
     note: str
-    # 観測先の D1。'canonical' = CF_D1_DATABASE_ID（stockStock の正本）/
-    # 'kabulab' = KABULAB_D1_DATABASE_ID（移行元。未設定なら正本へフォールバック）。
-    # 既定を canonical にしてあるのは、jss_* は必ず正本にあるため。
-    db: str = DB_CANONICAL
 
 
 # dataset のキー集合は `slo.SLO_BY_DATASET` と `slo.NOT_REFRESHED`（更新しないので
@@ -112,7 +97,6 @@ DATASET_SOURCES: tuple[DatasetSource, ...] = (
         ),
         license_tag=LicenseTag.PERSONAL_ONLY.value,
         note="yfinance 継承で personal-only。data_date は JST 営業日の文字列",
-        db=DB_KABULAB,
     ),
     DatasetSource(
         dataset="tdnet_disclosures",
@@ -128,7 +112,6 @@ DATASET_SOURCES: tuple[DatasetSource, ...] = (
             "pubdate は INTEGER epoch。JST へ寄せてから日付化する。"
             "source_epoch も pubdate を使う（取得時刻の列に頼らない理由は下記）"
         ),
-        db=DB_KABULAB,
     ),
     DatasetSource(
         dataset="edinet_documents",
@@ -187,7 +170,6 @@ DATASET_SOURCES: tuple[DatasetSource, ...] = (
             "混在するため、行としては最も厳しい personal-only へ倒す。"
             "commercial-ok にすると JPX 由来の断面メタが公開 API に出る"
         ),
-        db=DB_KABULAB,
     ),
     DatasetSource(
         dataset="financials",
@@ -214,9 +196,8 @@ DATASET_SOURCES: tuple[DatasetSource, ...] = (
         dataset="yutai_benefits",
         store="D1",
         location="yutai_benefits",
-        # ここも `core_stocks` と同じ取り違え。`jobs/yutai_backup.py` はこの表を
-        # **読んで R2 へ退避する**だけで 1 行も書かない（`cloud_store/yutai.py`
-        # の SQL は SELECT のみ）。行を書いているのは kabulab-cf で、
+        # ⑨優待の退避（旧 `yutai_backup`）は完了し、退避コードは削除した。
+        # 行を書いているのは kabulab-cf で、
         # claim は `governance.WRITER_CLAIMS` の `yutai_benefits/base`。
         writer="kabulab-cf",
         sql=(
@@ -228,7 +209,6 @@ DATASET_SOURCES: tuple[DatasetSource, ...] = (
             "データ基準日の列が無い。みんかぶ由来で personal-only。"
             "`updated_at` は core_stocks と同じく記録時刻寄りの列である点に注意"
         ),
-        db=DB_KABULAB,
     ),
 )
 
@@ -237,7 +217,5 @@ DATASET_SOURCE_BY_NAME: dict[str, DatasetSource] = {d.dataset: d for d in DATASE
 __all__ = [
     "DATASET_SOURCES",
     "DATASET_SOURCE_BY_NAME",
-    "DB_CANONICAL",
-    "DB_KABULAB",
     "DatasetSource",
 ]

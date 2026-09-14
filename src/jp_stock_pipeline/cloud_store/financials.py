@@ -82,7 +82,7 @@ import logging
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
-from ..licensing import stricter_tag_sql, strictness_rank_sql
+from ..licensing import stricter_tag_sql
 from .d1 import MAX_BOUND_PARAMS, D1Error
 from .schema import FINANCIALS_PK
 
@@ -168,16 +168,6 @@ COUNT_SQL = f"SELECT COUNT(*) AS n FROM {TABLE}"
 
 # 1 リクエストで引くコード数。バインド上限 100 に少し余裕を残す。
 STOCK_ID_BATCH = 90
-
-
-def _license_rank_sql(expression: str) -> str:
-    """ライセンスタグの厳しさ順位を SQL で再現する。
-
-    定義は `licensing.strictness_rank_sql` に一本化した。ローカル PG の ③
-    (`local_store/mappers.py`) も同じ順位で「厳しい側を残す」ので、ストアごとに
-    書くと未知タグの扱いのような端の規則だけが食い違う。
-    """
-    return strictness_rank_sql(expression)
 
 
 def build_upsert_sql(row_count: int) -> str:

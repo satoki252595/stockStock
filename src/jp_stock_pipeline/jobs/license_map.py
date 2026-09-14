@@ -109,8 +109,7 @@ def _store(ctx: JobContext) -> D1Store | None:
 
     `ctx.cloud` は `runner` が `if not settings.dry_run:` の中でしか作らないので、
     参照すると `--dry-run` が必ず即失敗する（`ops_check` / `freshness_probe` が
-    踏んだのと同じ穴）。`jss_*` は必ず正本 DB にあるので `KABULAB_D1_DATABASE_ID`
-    は見ない。
+    踏んだのと同じ穴）。
     """
     settings = ctx.settings.cloud_store
     if not settings.d1_enabled():

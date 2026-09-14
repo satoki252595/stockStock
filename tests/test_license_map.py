@@ -189,7 +189,7 @@ class TestOrphanDeclarations:
         _wire(monkeypatch, store)
         assert license_map.main([], env=dict(_D1_ENV)) == 0
         diff = S.index_symbol_diff(store.query(S.INDEX_SYMBOLS_SQL))
-        assert diff.clean, diff
+        assert not (diff.missing or diff.mismatched or diff.orphan), diff
 
 
 class TestDoesNotScanRows:
@@ -245,7 +245,7 @@ class TestReferenceDiff:
         ]
         diff = S.column_license_diff(rows)
         assert diff.mismatched[0][1:] == ("personal-only", "commercial-ok")
-        assert not diff.clean
+        assert diff.missing or diff.mismatched or diff.orphan
 
     def test_孤児と欠損を区別する(self) -> None:
         diff = S.column_license_diff(
@@ -256,7 +256,8 @@ class TestReferenceDiff:
 
     @pytest.mark.parametrize("rows", [[], None])
     def test_空でも落ちない(self, rows) -> None:
-        assert not S.column_license_diff(rows or []).clean
+        diff = S.column_license_diff(rows or [])
+        assert diff.missing or diff.mismatched or diff.orphan
 
 
 class TestWriterClaims:

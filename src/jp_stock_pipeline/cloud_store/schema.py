@@ -391,10 +391,6 @@ class ReferenceDiff:
     mismatched: tuple[tuple[tuple[str, ...], str, str], ...] = ()
     orphan: tuple[tuple[str, ...], ...] = ()
 
-    @property
-    def clean(self) -> bool:
-        return not (self.missing or self.mismatched or self.orphan)
-
 
 def _diff(declared: dict[tuple[str, ...], str], observed: dict[tuple[str, ...], str]) -> ReferenceDiff:
     return ReferenceDiff(

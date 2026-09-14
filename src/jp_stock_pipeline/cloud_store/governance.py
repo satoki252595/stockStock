@@ -247,44 +247,10 @@ TABLE_LICENSE: dict[str, TableLicense] = {
 # 行タグで判定する表は `license_tag` 列を持っていなければ嘘になる。
 ROW_TAG_COLUMN = "license_tag"
 
-# 本番（`_cf_KV` を除く）の表数。2026-09-13 の実測は 31 表だったが、そのうち
-# `RETIRED_TABLES` の 2 表は DROP する前提で地図から外したので、ここは
-# **DROP 後に残る 29 表**の数。`TABLE_LICENSE` はその 29 表すべてを登録している。
+# 本番（`_cf_KV` を除く）の表数。finmath 2 表（`finmath_price_snapshot` /
+# `finmath_daily_ohlcv`）は kabulab-cf drizzle/d1/0012 で DROP 済み（本番
+# sqlite_master で不在を確認）。`TABLE_LICENSE` は残る 29 表すべてを登録している。
 OBSERVED_TABLE_COUNT = 29
-
-# 削除すると決めて地図から外した表 → 理由。
-#
-# ## なぜ `TABLE_LICENSE` から消すだけにしないのか（切り替えの窓）
-#
-# 地図の変更（このリポジトリの main）と本番の `DROP TABLE`（人が手で流す）は
-# 同時には起きない。単に消すだけだと:
-#
-# - 地図が先に入り、本番にまだ表がある間 → 「地図に無い表が本番にある」warning
-#   が毎日出る。削除予定だと分かっている表を「未登録の表」と同じ文言で報告すると、
-#   本物の未登録（対向リポジトリが表を足した）と区別できない
-# - `TABLE_LICENSE` に残したまま本番が先に消える → 「地図にあって本番に無い表」
-#   で **failure**（`ops_check.yml` が Issue を立てる）
-#
-# ここに載せた表は、本番に**あっても無くても failure にしない**。あれば
-# 「削除予定の表がまだ本番にある」を warning で出す（DROP の流し忘れが見える）。
-# DROP が終わった後もこの宣言は残してよい。同名の表が本番へ戻ってきたら同じ
-# warning で気付ける（地図の外の表は「公開してよいと決まっていない」= 公開しない
-# 扱いなので、ライセンス上も漏れる方向には倒れない）。
-#
-# 採らなかった案: `TableKind.RETIRED` を足して `TABLE_LICENSE` に残す。
-# `TABLE_LICENSE` は共有契約 `d1-license-map.json` へそのまま出るので、
-# 契約の読み手（kabulab-cf の TypeScript 側）に 6 つ目の kind を教える変更が
-# 対向リポジトリにまで波及する。削除の窓のためだけに契約の語彙を増やさない。
-RETIRED_TABLES: dict[str, str] = {
-    "finmath_price_snapshot": (
-        "kabulab-cf PR #23 で読み取りを core_stock_financials へ振り替え、読み書きが 0 に"
-        "なった。kabulab-cf drizzle/d1/0012 で DROP する（全 3,759 行は DROP 前に退避）"
-    ),
-    "finmath_daily_ohlcv": (
-        "kabulab-cf PR #23 で swing_daily_ohlcv / swing_market_context へ振り替え、読み書きが"
-        " 0 になった。kabulab-cf drizzle/d1/0012 で DROP する（全 3,490 行は DROP 前に退避）"
-    ),
-}
 
 # 本番 `sqlite_master` から除く名前。SQLite と D1 の内部表。
 _INTERNAL_PREFIXES = ("sqlite_", "_cf_", "d1_", "__drizzle")
@@ -646,10 +612,6 @@ class CoverageReport:
     tables: int = 0
     columns: int = 0
 
-    @property
-    def clean(self) -> bool:
-        return not self.failures
-
 
 # `sqlite_master` から全表の DDL を 1 文で取る。**行を走査しない**
 # （スキーマのカタログで、実データの表には触れない）。30 表に `PRAGMA
@@ -678,17 +640,7 @@ def coverage(observed: dict[str, str | None]) -> CoverageReport:
     columns_by_table = {name: ddl_columns(ddl) for name, ddl in live.items()}
     total_columns = sum(len(c) for c in columns_by_table.values())
 
-    retiring = sorted(set(live) & set(RETIRED_TABLES))
-    if retiring:
-        # fail open。DROP の前にこの宣言が入った窓でも赤くしない
-        # （`RETIRED_TABLES` のコメント）。流し忘れは名前で見えるようにする。
-        warnings.append(
-            f"削除予定の表がまだ本番にある: {retiring}"
-            "（`governance.RETIRED_TABLES`。DROP を流したら消える。"
-            "地図の外なので公開しない扱いのまま）"
-        )
-
-    unknown = sorted(set(live) - set(TABLE_LICENSE) - set(RETIRED_TABLES))
+    unknown = sorted(set(live) - set(TABLE_LICENSE))
     if unknown:
         # fail open。対向リポジトリの migration ごとに毎日赤くする検査は
         # 読まれなくなる。名前を出して追随 PR を促す側に倒す。
@@ -698,12 +650,6 @@ def coverage(observed: dict[str, str | None]) -> CoverageReport:
             " TableKind.UNCLASSIFIED で登録してよい。宣言が無い表の列は"
             "「公開してよいと決まっていない」= 公開しない扱いになる）"
         )
-
-    both = sorted(set(TABLE_LICENSE) & set(RETIRED_TABLES))
-    if both:
-        # 「削除予定」と「区分あり」を同時に主張すると、本番から消えたときに
-        # failure になるかどうかが宣言の読み方次第になる。
-        failures.append(f"地図と削除予定の両方に載っている表: {both}")
 
     vanished = sorted(set(TABLE_LICENSE) - set(live))
     if vanished:
@@ -781,7 +727,6 @@ __all__ = [
     "writer_claim_problems",
     "writer_claim_rows",
     "OBSERVED_TABLE_COUNT",
-    "RETIRED_TABLES",
     "ROW_TAG_COLUMN",
     "TABLE_LICENSE",
     "CoverageReport",

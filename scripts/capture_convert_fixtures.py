@@ -9,8 +9,6 @@
    上記一覧の document_url から実開示PDFを1件
    （factual-cite §2.1: 原文は内部保管・テスト検証のみに留める）
    併せて出所を tdnet_disclosure_sample.source.txt に記録する
-3. data_j.xls
-   JPX 上場銘柄一覧（personal-only §2.1: 私的検証用。詳細は同階層 README.md）
 
 使い方:
     uv run --no-sync python scripts/capture_convert_fixtures.py
@@ -28,12 +26,6 @@ from jp_stock_pipeline.models import now_jst
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "convert"
 
 YANOSHIN_RECENT_URL = "https://webapi.yanoshin.jp/webapi/tdnet/list/recent.json?limit=5"
-# JPX は 2026-09 に配布形式を .xls から .xlsx へ差し替えた。旧 URL は HTTP 404。
-# 一覧ページ https://www.jpx.co.jp/markets/statistics-equities/misc/01.html が正。
-JPX_DATA_J_URL = (
-    "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xlsx"
-)
-JPX_DATA_J_NAME = "data_j.xlsx"
 
 
 def _direct_pdf_url(document_url: str) -> str:
@@ -78,24 +70,6 @@ def capture_tdnet_pdf(listing: dict) -> None:
     print("WARN: 一覧にPDFの document_url が見つからなかった（PDF未保存）", file=sys.stderr)
 
 
-def capture_jpx_data_j() -> None:
-    """JPX data_j.xlsx（上場銘柄一覧）を取得・保存する。personal-only (§2.1)。
-
-    マジックバイトを検証する。JPX が配布形式を差し替えたとき（実際 2026-09 に
-    .xls → .xlsx が起きた）、404 でない HTML を掴んで「取得できた」ことにしない。
-    """
-    resp = fetch(JPX_DATA_J_URL)
-    # .xlsx は zip (PK\x03\x04)。旧 .xls の OLE2 ヘッダとも HTML とも違う。
-    if not resp.content.startswith(b"PK\x03\x04"):
-        raise FetchError(
-            f"JPX 上場銘柄一覧が xlsx (zip) でない: head={resp.content[:16]!r}"
-            " — 配布形式/URL が変わっていないか一覧ページで確認すること"
-        )
-    out = FIXTURES_DIR / JPX_DATA_J_NAME
-    out.write_bytes(resp.content)
-    print(f"saved: {out} ({len(resp.content)} bytes)")
-
-
 def main() -> int:
     FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
     failures = 0
@@ -111,14 +85,6 @@ def main() -> int:
         except FetchError as exc:
             failures += 1
             print(f"WARN: TDnet PDF取得失敗（テストは skip される）: {exc}", file=sys.stderr)
-    try:
-        capture_jpx_data_j()
-    except FetchError as exc:
-        failures += 1
-        print(
-            f"WARN: JPX {JPX_DATA_J_NAME} 取得失敗（テストは skip される）: {exc}",
-            file=sys.stderr,
-        )
     return 1 if failures else 0
 
 

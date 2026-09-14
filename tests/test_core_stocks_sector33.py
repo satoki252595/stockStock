@@ -84,8 +84,6 @@ class TestBuildSector33Updates:
         assert statements
         for sql, _ in statements:
             assert "updated_at" not in sql.lower(), sql
-        backfill = cs.render_sector33_backfill(self._changes(500))
-        assert "updated_at" not in backfill.lower()
 
     def test_SET_するのは_sector33_だけ(self) -> None:
         """G-core-1: サロゲートキーも既存列も SET 句に現れない。"""
@@ -113,15 +111,6 @@ class TestBuildSector33Updates:
 
     def test_差分が無ければ0文(self) -> None:
         assert cs.build_sector33_updates({}) == []
-        assert cs.render_sector33_backfill({}) == ""
-
-    def test_backfill_の_SQL_は実行でき結果が同じ(self) -> None:
-        """`wrangler d1 execute --file` に渡す形を実際の sqlite で流して確かめる。"""
-        con = _seeded_connection([("7203", None), ("9101", "海運業"), ("8801", None)])
-        changes = {"7203": "輸送用機器", "9101": None}
-        con.executescript(cs.render_sector33_backfill(changes))
-        rows = dict(con.execute("SELECT code, sector33 FROM core_stocks"))
-        assert rows == {"7203": "輸送用機器", "9101": None, "8801": None}
 
 
 class TestPlanSector33Updates:

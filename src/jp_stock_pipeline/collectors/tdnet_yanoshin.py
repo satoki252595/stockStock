@@ -81,12 +81,9 @@ KW_ACQUIRE = "取得"
 KW_LARGE_HOLDING = "大量保有"
 KW_ANNUAL_REPORT = "有価証券報告書"
 KW_QUARTERLY_REPORT = "四半期報告書"
-KW_SPLIT = "株式分割"
-KW_CONSOLIDATION = "株式併合"
 # 実開示には「株式の分割」のように助詞「の」を挟む表記が存在する（実測1件、
-# 2026-09-11時点のTDnetフィクスチャ全3,137タイトル中）。KW_SPLIT の単純部分一致
-# では拾えないため、判定だけは正規表現で助詞ありも同一視する（KW_SPLIT/
-# KW_CONSOLIDATION 自体は他の用途にも使う定数なので変更しない）。
+# 2026-09-11時点のTDnetフィクスチャ全3,137タイトル中）。単純部分一致では
+# 拾えないため、判定は正規表現で助詞ありも同一視する。
 _SPLIT_RE = re.compile(r"株式の?分割")
 _CONSOLIDATION_RE = re.compile(r"株式の?併合")
 
@@ -172,7 +169,6 @@ def classify_title(title: str) -> str:
         return DOC_TYPE_DIVIDEND_REVISION
     # 優待は業績修正・配当修正より後。実開示に「期末配当予想の修正及び株主優待制度の
     # 変更」のような複合開示があり、投資判断上は配当修正の方が重い（実データ 3 件で確認）。
-    # 複合開示でも parse_yutai_action は優待の区分を返すので、優待の情報は失われない。
     if KW_YUTAI in title:
         return DOC_TYPE_YUTAI
     if KW_TREASURY in title and KW_ACQUIRE in title:
@@ -184,42 +180,6 @@ def classify_title(title: str) -> str:
     if KW_QUARTERLY_REPORT in title:
         return DOC_TYPE_QUARTERLY_REPORT
     return DOC_TYPE_OTHER
-
-
-# 優待の下位区分。判定はキーワード一致のみで、内容の推測はしない (§3-1)。
-# 実開示のタイトルで確認した表現に基づく（新設/導入/変更/拡充/廃止/再開/記念）。
-YUTAI_ACTION_NEW = "新設"
-YUTAI_ACTION_CHANGE = "変更"
-YUTAI_ACTION_ABOLISH = "廃止"
-YUTAI_ACTION_RESUME = "再開"
-YUTAI_ACTION_COMMEMORATIVE = "記念"
-YUTAI_ACTION_UNKNOWN = ""
-
-# 上から順に判定する。「廃止」は「変更」より先（“一部廃止を含む変更”は廃止として
-# 扱わないよう、廃止の語が単独で出るものだけを拾う想定）。
-_YUTAI_ACTION_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    (YUTAI_ACTION_ABOLISH, ("廃止",)),
-    (YUTAI_ACTION_RESUME, ("再開",)),
-    (YUTAI_ACTION_NEW, ("新設", "導入", "実施")),
-    (YUTAI_ACTION_COMMEMORATIVE, ("記念",)),
-    (YUTAI_ACTION_CHANGE, ("変更", "拡充", "一部変更")),
-)
-
-
-def parse_yutai_action(title: str) -> str:
-    """優待開示の下位区分（新設/変更/廃止/再開/記念）。判定できなければ空文字。
-
-    「記念」は先に「実施」で新設と判定されないよう、新設の後に置いている
-    （例: 「創業30周年記念株主優待の実施に関するお知らせ」は記念扱い）。
-    """
-    if KW_YUTAI not in title:
-        return YUTAI_ACTION_UNKNOWN
-    if "記念" in title:
-        return YUTAI_ACTION_COMMEMORATIVE
-    for action, keywords in _YUTAI_ACTION_RULES:
-        if any(kw in title for kw in keywords):
-            return action
-    return YUTAI_ACTION_UNKNOWN
 
 
 # 全角→半角（数字・コロン）正規化。値の改変ではなく形式変換のみ (§5.2)
@@ -483,29 +443,3 @@ def list_disclosures(
     )
     records = parse_list_payload(payload, fetched_at=artifact.fetched_at)
     return artifact, records
-
-
-def fetch_disclosure_pdf(settings: Settings, record: DisclosureRecord) -> RawArtifact:
-    """開示原文 PDF を実取得し原本保存する（datatype="tdnet_pdf"）。
-
-    原文の著作権は各上場会社 (§2.1) → factual-cite として内部保管に留める。
-    PDF でないレスポンス（エラーページ等）は原本として保存せず FetchError
-    （ダミー原本を作らない §3）。
-    """
-    if not record.source_url:
-        raise FetchError(f"開示 {record.doc_id} に document_url が無い")
-    resp = fetch(record.source_url)
-    content = resp.content
-    if not content.startswith(b"%PDF"):
-        raise FetchError(f"PDF でないレスポンス: {record.source_url}")
-    return save_raw(
-        content,
-        source=Source.TDNET,
-        datatype="tdnet_pdf",
-        scope=record.doc_id,  # 1開示=1原本。doc_id でファイル名が衝突しない
-        data_date=record.disclosed_at.date(),
-        url=record.source_url,
-        ext="pdf",
-        license_tag=source_license(Source.TDNET),
-        base_dir=settings.raw_data_dir,
-    )
