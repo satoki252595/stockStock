@@ -220,13 +220,16 @@ class JobContext:
             notion_write, lambda s: s.apply_disclosure_lifecycle(record), label
         )
 
-    def upload_raw(self, artifact) -> str | None:
+    def upload_raw(self, artifact, *, sha_map=None, sha_map_date=None) -> str | None:
         """原本を Notion ⑤ とローカル ⑤ へ独立に保存する（双方向フェールセーフ）。
 
         Notion ⑤ の raw_page_id を返す（Notion 失敗時は None）。両系統とも原本を
         保存できなかった場合のみ RawUploadError を送出し、呼び出し側はその取得単位の
         構造化書き込みを中止する（原本ゼロ＝トレーサビリティ喪失 §3-3/§8.1-4）。
         どちらか一方にでも原本が残れば構造化書き込みを許可する。
+
+        `sha_map` / `sha_map_date` は ⑤ 重複検索の事前マップ（L-21）。
+        省略時は従来どおり原本ごとに検索する。
         """
         from ..notion import file_upload
 
@@ -234,7 +237,8 @@ class JobContext:
         raw_page_id: str | None = None
         try:
             raw_page_id = file_upload.upload_raw_artifact(
-                self.client, self.settings, artifact
+                self.client, self.settings, artifact,
+                sha_map=sha_map, sha_map_date=sha_map_date,
             )
         except Exception as exc:  # noqa: BLE001 - ローカル ⑤ への保存を試みるため一旦握る
             notion_err = exc

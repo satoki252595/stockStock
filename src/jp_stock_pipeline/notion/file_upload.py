@@ -38,6 +38,7 @@ from .client import NotionClient
 from .upsert import (
     KEY_QUERY_PAGE_SIZE,
     KEY_QUERY_SORTS,
+    _oldest_page_ids,
     date_prop,
     files_prop,
     number_prop,
@@ -247,19 +248,61 @@ def find_raw_page_by_sha256(
     return page["id"] if page else None
 
 
+def load_raw_page_map(
+    client: NotionClient, settings: Settings, *, data_date
+) -> dict[str, str]:
+    """⑤ の {SHA256: page_id} を対象日 1 回のクエリで作る（L-21）。
+
+    原本ごとに `find_raw_page_by_sha256`（1 req/件）を打っていたのを、
+    対象日の ⑤ 1 スキャンにまとめる（④ の date-scoped map と同じ手法）。
+    日付はデータ基準日（`PROP_DATA_DATE` の equals）で絞る。
+    同じ SHA256 の重複行は最古勝ち（`find_raw_page_by_sha256` と同じ規則）。
+    """
+    pages = client.query_database(
+        settings.db_id("raw_files"),
+        filter={
+            "property": S.PROP_DATA_DATE,
+            "date": {"equals": data_date.isoformat()},
+        },
+    )
+
+    def sha_of(page: dict) -> str:
+        rich = page.get("properties", {}).get(S.RAW_PROP_SHA256, {}).get("rich_text", [])
+        return rich[0].get("plain_text", "").strip() if rich else ""
+
+    return _oldest_page_ids(pages, sha_of)
+
+
 def upload_raw_artifact(
-    client: NotionClient, settings: Settings, artifact: RawArtifact
+    client: NotionClient, settings: Settings, artifact: RawArtifact,
+    *,
+    sha_map: dict[str, str] | None = None,
+    sha_map_date=None,
 ) -> str:
     """原本+変換版を ⑤ へアップロードし行作成、page_id を返す (契約 §8.1-2〜4)。
 
     - SHA256 一致の既存行があれば再アップロードせずその page_id を返す (冪等)
     - 失敗時は RawUploadError (呼び出し側は構造化書き込みを中止すること)
     - 成功時は artifact.notion_page_id を設定する
+
+    `sha_map`（`load_raw_page_map` の結果）を渡すと、原本ごとの重複クエリを
+    省く（L-21）。信用するのは `artifact.data_date == sha_map_date` の原本
+    だけ（④ の date-scoped と同じ規則）。日付が違う・無い原本は従来どおり
+    per-record 検索する。作った行は map へ足す（同一 run 内の再送に効く）。
     """
     try:
-        # SHA256 重複クエリの失敗も契約例外に揃える (§8.1-4。NotionRequestError 等を
-        # 漏らさず、呼び出し側は RawUploadError のみ握れば取得単位を degrade できる)
-        existing = find_raw_page_by_sha256(client, settings, artifact.sha256)
+        trusted = (
+            sha_map is not None
+            and sha_map_date is not None
+            and artifact.data_date is not None
+            and artifact.data_date == sha_map_date
+        )
+        if trusted:
+            existing = (sha_map or {}).get(artifact.sha256)
+        else:
+            # SHA256 重複クエリの失敗も契約例外に揃える (§8.1-4。NotionRequestError 等を
+            # 漏らさず、呼び出し側は RawUploadError のみ握れば取得単位を degrade できる)
+            existing = find_raw_page_by_sha256(client, settings, artifact.sha256)
         if existing:
             logger.info("⑤ 重複スキップ (SHA256=%s): %s", artifact.sha256[:12], existing)
             artifact.notion_page_id = existing
@@ -282,5 +325,7 @@ def upload_raw_artifact(
         raise RawUploadError(f"⑤ への原本アップロード失敗: {artifact.filename}: {exc}") from exc
 
     artifact.notion_page_id = page_id
+    if trusted and sha_map is not None:
+        sha_map[artifact.sha256] = page_id
     logger.info("⑤ 行作成: %s -> %s (添付 %d ファイル)", artifact.filename, page_id, len(uploads))
     return page_id

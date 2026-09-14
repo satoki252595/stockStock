@@ -183,14 +183,23 @@ class TestExpectedColumns:
 
 
 class TestOrphanCheck:
-    def test_14子表と_soft_参照1表を数える(self) -> None:
+    def test_14子表と_soft_参照1表と宣言無し1表を数える(self) -> None:
         assert len(cs.CHILD_TABLES) == 14  # FK 宣言のある子表
         assert cs.SOFT_CHILD_TABLES == ("jss_financials",)
-        assert len(cs.ALL_CHECKED_TABLES) == 15
+        assert cs.NOFK_CHILD_TABLES == ("p_momentum",)
+        assert len(cs.ALL_CHECKED_TABLES) == 16
         joined = " ".join(cs.orphan_check_statements())
         for table in cs.ALL_CHECKED_TABLES:
             assert f"FROM {table} c" in joined
         assert not _FORBIDDEN_RE.search(joined)
+
+    def test_日次は宣言の無い2表だけを数える(self) -> None:
+        assert cs.DAILY_CHECK_TABLES == ("jss_financials", "p_momentum")
+        joined = " ".join(cs.daily_orphan_check_statements())
+        assert "FROM jss_financials c" in joined
+        assert "FROM p_momentum c" in joined
+        for table in cs.CHILD_TABLES:
+            assert f"FROM {table} c" not in joined
 
     def test_soft参照だけ_stock_id_NULL_を除外する(self) -> None:
         joined = " ".join(cs.orphan_check_statements())
@@ -237,7 +246,8 @@ class TestOrphanCheck:
         assert statements, "孤児検査の文が空"
         for sql in statements:
             assert sql.count("UNION ALL") <= MAX_COMPOUND_SELECT_TERMS - 1, sql
-        assert len(statements) == 3  # 15 表 / 5 項
+        assert len(statements) == 4  # 16 表 / 5 項
+        assert len(cs.daily_orphan_check_statements()) == 1  # 2 表
 
 
 class _RecordingD1Store(D1Store):
@@ -260,13 +270,15 @@ class TestObserveShape:
         state = csm._observe(store)  # noqa: SLF001
         assert set(state) == {"columns", "indexes", "orphans"}
         allowed = (
-            {cs.TABLE_INFO_SQL, cs.INDEX_LIST_SQL}
+            {cs.TABLE_INFO_SQL, cs.INDEX_LIST_SQL, cs.FOREIGN_KEYS_PRAGMA}
             | set(cs.orphan_check_statements())
+            | set(cs.daily_orphan_check_statements())
         )
         assert store.sqls, "1 文も発行していない（観測していない）"
         assert set(store.sqls) <= allowed, set(store.sqls) - allowed
         assert cs.TABLE_INFO_SQL in store.sqls
         assert cs.INDEX_LIST_SQL in store.sqls
+        assert cs.FOREIGN_KEYS_PRAGMA in store.sqls
 
 
 class TestMigrationPrepSymbolsAreGone:

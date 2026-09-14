@@ -203,6 +203,99 @@ class TestSha256DuplicateSkip:
         }
 
 
+class TestShaMap:
+    """L-21: 対象日の {SHA256: page_id} を 1 回作り原本ごとの検索を省く。"""
+
+    DAY = date(2026, 6, 10)  # make_artifact の data_date と同じ
+
+    def _boom_query(self, monkeypatch, client):
+        def boom(*a, **kw):
+            raise AssertionError("per-record 検索を打ってはならない")
+
+        monkeypatch.setattr(client, "query_database", boom)
+
+    def test_ヒットすれば検索も作成もしない(self, dry_client, tmp_path, monkeypatch):
+        settings = make_settings()
+        artifact = make_artifact(tmp_path)
+        self._boom_query(monkeypatch, dry_client)
+        page_id = file_upload.upload_raw_artifact(
+            dry_client, settings, artifact,
+            sha_map={artifact.sha256: "page-mapped"}, sha_map_date=self.DAY,
+        )
+        assert page_id == "page-mapped"
+        assert artifact.notion_page_id == "page-mapped"
+        assert dry_client.ops == []
+
+    def test_ミスなら検索せず作ってmapへ足す(self, dry_client, tmp_path, monkeypatch):
+        """対象日内は map を信用する。作った行は同一 run 内に見える。"""
+        settings = make_settings()
+        artifact = make_artifact(tmp_path)
+        self._boom_query(monkeypatch, dry_client)
+        sha_map: dict[str, str] = {}
+        page_id = file_upload.upload_raw_artifact(
+            dry_client, settings, artifact, sha_map=sha_map, sha_map_date=self.DAY
+        )
+        assert page_id.startswith("dry-run-")
+        assert sha_map == {artifact.sha256: page_id}
+        # 同一 run の再送は map ヒットで作成しない
+        page_id2 = file_upload.upload_raw_artifact(
+            dry_client, settings, artifact, sha_map=sha_map, sha_map_date=self.DAY
+        )
+        assert page_id2 == page_id
+        creates = [o for o in dry_client.ops if o.op == "create_page"]
+        assert len(creates) == 1
+
+    def test_日付が違えばper_recordへ落とす(self, dry_client, tmp_path, monkeypatch):
+        """遅延提出など対象日外の原本に map を信用しない（④ と同じ規則）。"""
+        settings = make_settings()
+        artifact = make_artifact(tmp_path)
+        seen = []
+        monkeypatch.setattr(
+            dry_client, "query_database",
+            lambda *a, **kw: seen.append(kw.get("filter")) or [],
+        )
+        file_upload.upload_raw_artifact(
+            dry_client, settings, artifact,
+            sha_map={}, sha_map_date=date(2026, 6, 11),
+        )
+        assert seen == [
+            {"property": S.RAW_PROP_SHA256, "rich_text": {"equals": artifact.sha256}}
+        ]
+
+    def test_対象日で絞って最古勝ち(self, dry_client, tmp_path, monkeypatch):
+        settings = make_settings()
+        captured = {}
+
+        def fake_query(db_id, *, filter=None, **kwargs):
+            captured["db_id"] = db_id
+            captured["filter"] = filter
+            return [
+                {
+                    "id": "new",
+                    "created_time": "2026-06-10T02:00:00.000Z",
+                    "properties": {
+                        S.RAW_PROP_SHA256: {"rich_text": [{"plain_text": "ab12"}]}
+                    },
+                },
+                {
+                    "id": "old",
+                    "created_time": "2026-06-10T01:00:00.000Z",
+                    "properties": {
+                        S.RAW_PROP_SHA256: {"rich_text": [{"plain_text": "ab12"}]}
+                    },
+                },
+            ]
+
+        monkeypatch.setattr(dry_client, "query_database", fake_query)
+        out = file_upload.load_raw_page_map(dry_client, settings, data_date=self.DAY)
+        assert out == {"ab12": "old"}
+        assert captured["db_id"] == "db-raw"
+        assert captured["filter"] == {
+            "property": S.PROP_DATA_DATE,
+            "date": {"equals": "2026-06-10"},
+        }
+
+
 class TestNewUploadSinglePart:
     def test_raw_api_call_sequence_and_row_creation(self, dry_client, tmp_path):
         settings = make_settings()

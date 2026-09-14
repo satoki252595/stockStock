@@ -40,7 +40,14 @@ def record_job_run(
     duration_secs: float | None,
     finished_at: int,
 ) -> None:
-    """1 回の実行結果を残す。失敗しても呼び出し側のジョブ結果は変えない。"""
+    """1 回の実行結果を残す。失敗しても呼び出し側のジョブ結果は変えない。
+
+    書き込みのたび 90 日より古い行を剪定する (L-17)。
+    空振り検知の 30 日窓より長く保ち、履歴が無限に育たないようにする。
+    """
+    store.query(
+        "DELETE FROM jss_job_runs WHERE finished_at < strftime('%s','now','-90 days')"
+    )
     store.query(
         "INSERT INTO jss_job_runs"
         " (job_name, status, processed, failed, failed_codes, run_url,"

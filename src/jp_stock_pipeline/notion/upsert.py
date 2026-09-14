@@ -655,18 +655,114 @@ def load_stock_master_map(client: NotionClient, settings: Settings) -> dict[str,
     return _master_map_from_pages(client.query_database(settings.db_id("stock_master")))
 
 
+def _master_code_of(page: dict) -> str:
+    """① ページの銘柄コードを読む（事前マップのキー）。"""
+    rich = page.get("properties", {}).get(S.MASTER_PROP_CODE, {}).get("rich_text", [])
+    return rich[0].get("plain_text", "").strip() if rich else ""
+
+
 def _master_map_from_pages(pages: list[dict]) -> dict[str, str]:
     """① のページ配列から {銘柄コード: page_id} を組み立てる（純粋関数）。
 
     同じスキャン結果から EDINETコード逆引き (_edinet_map_from_pages) も作れるよう、
     取得と組み立てを分けている。
     """
-    def code_of(page: dict) -> str:
-        rich = page.get("properties", {}).get(S.MASTER_PROP_CODE, {}).get("rich_text", [])
-        return rich[0].get("plain_text", "").strip() if rich else ""
-
     # 同じコードの重複ページはキー検索と同じ規則（最古）で 1 つに決める (#13)
-    return _oldest_page_ids(pages, code_of)
+    return _oldest_page_ids(pages, _master_code_of)
+
+
+def _master_entries_from_pages(pages: list[dict]) -> dict[str, tuple[str, dict]]:
+    """① のページ配列から {銘柄コード: (page_id, properties)} を組む（純粋関数）。
+
+    L-19 の同値 skip 用。`_master_map_from_pages` と同じ最古勝ちで、
+    page ごとの properties も保持する（比較に使う）。
+    """
+    chosen: dict[str, dict] = {}
+    for page in pages:
+        key = _master_code_of(page)
+        if not key:
+            continue
+        current = chosen.get(key)
+        if current is None or _is_older(page, current):
+            chosen[key] = page
+    return {
+        key: (page["id"], page.get("properties", {}))
+        for key, page in chosen.items()
+    }
+
+
+def load_stock_master_entries(
+    client: NotionClient, settings: Settings
+) -> dict[str, tuple[str, dict]]:
+    """① 全行の {銘柄コード: (page_id, properties)} を一括取得する。
+
+    `load_stock_master_map` の properties 付き版。master_sync の同値 skip
+    （L-19）が既存行との比較に使う。余分な req は出ない（同じ 1 スキャン）。
+    """
+    return _master_entries_from_pages(
+        client.query_database(settings.db_id("stock_master"))
+    )
+
+
+def _read_text_value(properties: dict, name: str) -> str:
+    """title / rich_text の plain_text を連結して読む。読めなければ ""。"""
+    blocks = properties.get(name, {}).get(
+        "title", properties.get(name, {}).get("rich_text", [])
+    )
+    if not isinstance(blocks, list):
+        return ""
+    return "".join(
+        b.get("plain_text", "") for b in blocks if isinstance(b, dict)
+    ).strip()
+
+
+def _read_select_name(properties: dict, name: str) -> str | None:
+    """select の選択名を読む。未選択・読めなければ None。"""
+    sel = properties.get(name, {}).get("select")
+    if not isinstance(sel, dict):
+        return None
+    return sel.get("name")
+
+
+def stock_master_matches_page(
+    properties: dict, record: StockMasterRecord
+) -> bool:
+    """① の既存行が record と同値か（L-19。月次 3,841 PATCH → 差分のみ）。
+
+    比較するのは codelist 所有の意味フィールド（名称/コード/上場状態/
+    市場/33業種/17業種/EDINETコード）だけ。次は見ない:
+
+    - 時刻系（最終データ更新日/取得日時/データ基準日）: 毎 run 変わるので
+      見ると skip が永遠に発火しない。意味が変わった run の PATCH で更新される
+    - 由来系（ソース/ライセンス/品質/原本）: master_sync では実行ごとに同一
+    - ライフサイクル 3 項目: 開示・消失が所有し master_sync は書かない
+
+    読めない形の行は False（書く側に倒す。欠損より二重 PATCH がまし）。
+    """
+    want_name = _clip(record.name)
+    if _read_text_value(properties, S.MASTER_PROP_NAME) != want_name:
+        return False
+    if _read_text_value(properties, S.MASTER_PROP_CODE) != record.code:
+        return False
+    if bool(properties.get(S.MASTER_PROP_LISTED, {}).get("checkbox", False)) != bool(
+        record.listed
+    ):
+        return False
+    for prop, want in (
+        (S.MASTER_PROP_MARKET, record.market),
+        (S.MASTER_PROP_SECTOR33, record.sector33),
+        (S.MASTER_PROP_SECTOR17, record.sector17),
+    ):
+        if _read_select_name(properties, prop) != want:
+            return False
+    want_edinet = record.edinet_code or ""
+    return _read_text_value(properties, S.MASTER_PROP_EDINET_CODE) == want_edinet
+
+
+def _edinet_code_of(properties: dict) -> str:
+    """① ページの properties から EDINETコードを読む。無ければ ""。"""
+    rich = properties.get(S.MASTER_PROP_EDINET_CODE, {}).get("rich_text", [])
+    return rich[0].get("plain_text", "").strip() if rich else ""
 
 
 def _edinet_map_from_pages(pages: list[dict]) -> dict[str, str]:
@@ -679,12 +775,8 @@ def _edinet_map_from_pages(pages: list[dict]) -> dict[str, str]:
     out: dict[str, str] = {}
     for page in pages:
         props = page.get("properties", {})
-        code_rich = props.get(S.MASTER_PROP_CODE, {}).get("rich_text", [])
-        edinet_rich = props.get(S.MASTER_PROP_EDINET_CODE, {}).get("rich_text", [])
-        if not code_rich or not edinet_rich:
-            continue
-        code = code_rich[0].get("plain_text", "").strip()
-        edinet_code = edinet_rich[0].get("plain_text", "").strip()
+        code = _master_code_of(page)
+        edinet_code = _edinet_code_of(props)
         if code and edinet_code:
             out[edinet_code] = code
     return out
@@ -707,18 +799,20 @@ def _jst_day_start(day: date) -> str:
     return datetime(day.year, day.month, day.day, tzinfo=JST).isoformat()
 
 
-def load_disclosure_page_map(
-    client: NotionClient, settings: Settings, *, disclosed_date: date | None = None
-) -> dict[str, str]:
-    """④ の {書類管理番号(docID): page_id} を一括取得する (§8.3 per-record 検索排除)。
+def _disclosure_doc_id_of(page: dict) -> str:
+    """④ ページの書類管理番号を読む（事前マップのキー）。"""
+    rich = page.get("properties", {}).get(S.DISC_PROP_DOC_ID, {}).get("rich_text", [])
+    return rich[0].get("plain_text", "").strip() if rich else ""
+
+
+def _query_disclosure_pages(
+    client: NotionClient, settings: Settings, disclosed_date: date | None
+) -> list[dict]:
+    """④ を対象日スコープで 1 回スキャンする（L-20。map/entries で共有）。
 
     ④ は無制限に増える追記型のため、disclosed_date を渡して **その日の開示のみ** に
-    絞る（JST の [d 0:00, d+1 0:00) の半開区間。境界の理由は `_jst_day_start`）。開示ジョブは対象日の
-    一覧を処理し doc_id は開示日に生成されるので、その日のウィンドウに対象 doc_id の
-    既存行が必ず入る＝date-scoped でも create/update を取り違えない。呼び出し側は
-    record.disclosed_at.date() が disclosed_date と一致するレコードにのみ page_resolved を
-    立てること（ウィンドウ外は per-record 検索へフォールバック=重複防止）。
-    キーは DISC_PROP_DOC_ID(rich_text)。disclosed_date=None なら全件（小規模時のみ）。
+    絞る（JST の [d 0:00, d+1 0:00) の半開区間。境界の理由は `_jst_day_start`）。
+    disclosed_date=None なら全件（小規模時のみ）。
     """
     flt = None
     if disclosed_date is not None:
@@ -729,14 +823,146 @@ def load_disclosure_page_map(
                 {"property": S.DISC_PROP_DISCLOSED_AT, "date": {"before": _jst_day_start(nxt)}},
             ]
         }
-    pages = client.query_database(settings.db_id("disclosures"), filter=flt)
+    return client.query_database(settings.db_id("disclosures"), filter=flt)
 
-    def doc_id_of(page: dict) -> str:
-        rich = page.get("properties", {}).get(S.DISC_PROP_DOC_ID, {}).get("rich_text", [])
-        return rich[0].get("plain_text", "").strip() if rich else ""
 
+def load_disclosure_page_map(
+    client: NotionClient, settings: Settings, *, disclosed_date: date | None = None
+) -> dict[str, str]:
+    """④ の {書類管理番号(docID): page_id} を一括取得する (§8.3 per-record 検索排除)。
+
+    開示ジョブは対象日の一覧を処理し doc_id は開示日に生成されるので、その日の
+    ウィンドウに対象 doc_id の既存行が必ず入る＝date-scoped でも create/update を
+    取り違えない。呼び出し側は record.disclosed_at.date() が disclosed_date と一致する
+    レコードにのみ page_resolved を立てること（ウィンドウ外は per-record 検索へ
+    フォールバック=重複防止）。キーは DISC_PROP_DOC_ID(rich_text)。
+    """
+    pages = _query_disclosure_pages(client, settings, disclosed_date)
     # 同じ docID の重複ページはキー検索と同じ規則（最古）で 1 つに決める (#13)
-    return _oldest_page_ids(pages, doc_id_of)
+    return _oldest_page_ids(pages, _disclosure_doc_id_of)
+
+
+def _disclosure_entries_from_pages(pages: list[dict]) -> dict[str, tuple[str, dict]]:
+    """④ のページ配列から {doc_id: (page_id, properties)} を組む（純粋関数）。
+
+    L-20 の同値 skip 用。`load_disclosure_page_map` と同じ最古勝ちで、
+    page ごとの properties も保持する（比較に使う）。
+    """
+    chosen: dict[str, dict] = {}
+    for page in pages:
+        key = _disclosure_doc_id_of(page)
+        if not key:
+            continue
+        current = chosen.get(key)
+        if current is None or _is_older(page, current):
+            chosen[key] = page
+    return {
+        key: (page["id"], page.get("properties", {}))
+        for key, page in chosen.items()
+    }
+
+
+def load_disclosure_page_entries(
+    client: NotionClient, settings: Settings, *, disclosed_date: date | None = None
+) -> dict[str, tuple[str, dict]]:
+    """④ の {doc_id: (page_id, properties)} を対象日スコープで一括取得する。
+
+    `load_disclosure_page_map` の properties 付き版。同値 skip（L-20）が
+    既存行との比較に使う。余分な req は出ない（同じ 1 スキャン）。
+    """
+    return _disclosure_entries_from_pages(
+        _query_disclosure_pages(client, settings, disclosed_date)
+    )
+
+
+def _read_date_start(properties: dict, name: str) -> str | None:
+    """date の start 文字列を読む。未設定・読めなければ None。"""
+    dt = properties.get(name, {}).get("date")
+    if not isinstance(dt, dict):
+        return None
+    start = dt.get("start")
+    return start if isinstance(start, str) else None
+
+
+def _read_relation_ids(properties: dict, name: str) -> list[str]:
+    """relation の id 一覧を読む。読めなければ []。"""
+    rel = properties.get(name, {}).get("relation", [])
+    if not isinstance(rel, list):
+        return []
+    return [r.get("id", "") for r in rel if isinstance(r, dict)]
+
+
+def _same_moment(want_iso: str, got_start: str | None) -> bool:
+    """日時の同値判定。表記揺れ（+09:00 / Z）は時刻として吸収する。
+
+    Notion が start を正規化して返しても skip が死なないようにする。
+    読めなければ False（書く側に倒す）。
+    """
+    if got_start is None:
+        return False
+    if want_iso == got_start:
+        return True
+    try:
+        return datetime.fromisoformat(want_iso) == datetime.fromisoformat(got_start)
+    except ValueError:
+        return False
+
+
+def disclosure_matches_page(
+    properties: dict, record: DisclosureRecord, master_page_id: str | None
+) -> bool:
+    """④ の既存行が record と同値か（L-20。毎時再 PATCH → 差分のみ）。
+
+    比較するのは `disclosure_properties` の意味フィールド（タイトル/開示日時/
+    書類種別/管理番号/XBRL有無/銘柄コード/URL/分割 3 項目）+ 2 つの relation。
+    次は見ない:
+
+    - 取得日時（fetched_at）: 毎 run 変わるので見ると skip が死ぬ
+    - データ基準日・由来系（ソース/ライセンス/品質）: 同一書類では実行ごとに同一
+
+    relation は「書きたい値があるときだけ」比べる。`master_page_id` が None の
+    run は payload に relation を含めないので、既存行に relation があっても
+    書き直す意味が無い（比べると毎回不一致で skip が死ぬ）。原本 relation も同じ。
+    読めない形の行は False（書く側に倒す）。
+    """
+    if _read_text_value(properties, S.DISC_PROP_TITLE) != _clip(record.title):
+        return False
+    if not _same_moment(
+        record.disclosed_at.isoformat(),
+        _read_date_start(properties, S.DISC_PROP_DISCLOSED_AT),
+    ):
+        return False
+    if _read_select_name(properties, S.DISC_PROP_DOC_TYPE) != record.doc_type:
+        return False
+    if _read_text_value(properties, S.DISC_PROP_DOC_ID) != record.doc_id:
+        return False
+    if bool(properties.get(S.DISC_PROP_HAS_XBRL, {}).get("checkbox", False)) != bool(
+        record.has_xbrl
+    ):
+        return False
+    if _read_text_value(properties, S.DISC_PROP_CODE) != (record.code or ""):
+        return False
+    got_url = properties.get(S.DISC_PROP_URL, {}).get("url")
+    if (got_url or None) != (record.source_url or None):
+        return False
+    if _read_text_value(properties, S.DISC_PROP_SPLIT_RATIO) != (record.split_ratio or ""):
+        return False
+    got_factor = properties.get(S.DISC_PROP_SPLIT_FACTOR, {}).get("number")
+    if (got_factor if got_factor is not None else None) != record.split_factor:
+        return False
+    want_effective = record.effective_date.isoformat() if record.effective_date else None
+    if _read_date_start(properties, S.DISC_PROP_EFFECTIVE_DATE) != want_effective:
+        return False
+    if master_page_id is not None and _read_relation_ids(
+        properties, S.PROP_MASTER_RELATION
+    ) != [master_page_id]:
+        return False
+    raw_id = real_page_id(record.provenance.raw_page_id)
+    if raw_id is not None and _read_relation_ids(
+        properties, S.PROP_RAW_RELATION
+    ) != [raw_id]:
+        return False
+    return True
 
 
 def upsert_stock_master(

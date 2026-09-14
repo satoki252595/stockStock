@@ -68,7 +68,11 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           TITLE="[ジョブ失敗] $WF"
-          EXISTING=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          export TITLE  # jq の env.TITLE 用（gh issue list に --arg は無い）
+          # 部分一致 (in:title) では無関係な Issue を拾う。タイトル一覧を
+          # 取って jq で完全一致させる（ops_check.yml と同じ形。L-37）。
+          EXISTING=$(gh issue list --state open --limit 200 --json number,title \
+            --jq '[.[] | select(.title == env.TITLE)][0].number // empty')
           BODY=$(printf '%s が失敗しました。\n\n実行: %s\n検知: %s' "$WF" "$RUN_URL" "$(date -u '+%Y-%m-%d %H:%M UTC')")
           if [ -n "$EXISTING" ]; then
             gh issue comment "$EXISTING" --body "$BODY"

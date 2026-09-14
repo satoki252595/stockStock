@@ -156,7 +156,7 @@ class TestMasterSync:
         """(c) §8.1-4: 原本UL失敗 → 構造化データを書かず異常終了。"""
         self._patch_fetch(monkeypatch, tmp_path)
 
-        def boom(client, settings, artifact):
+        def boom(client, settings, artifact, **kw):
             raise file_upload.RawUploadError("テスト: アップロード失敗")
 
         monkeypatch.setattr(file_upload, "upload_raw_artifact", boom)

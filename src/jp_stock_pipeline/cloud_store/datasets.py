@@ -50,6 +50,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..licensing import LicenseTag, inherit
+from .governance import TABLE_LICENSE, TableKind
 
 # ③財務サマリは EDINET(commercial-ok) と TDnet(factual-cite) が**同じ表に混ざる**。
 # dataset レベルのタグは固定文字列にせず、混ざる可能性のあるタグから
@@ -60,6 +61,20 @@ from ..licensing import LicenseTag, inherit
 FINANCIALS_LICENSE_TAG = inherit(
     [LicenseTag.COMMERCIAL_OK, LicenseTag.FACTUAL_CITE]
 ).value
+
+
+def _uniform_tag(table: str) -> str:
+    """`TABLE_LICENSE` の uniform 表のタグを引く（L-37）。
+
+    datasets 側にタグのリテラルを置くと地図と二重宣言になり、どちらが
+    古いか分からなくなる。表全体が 1 タグの uniform 表は地図が正。
+    uniform でない表（行タグ・列地図・絞り込み観測）はここでは導出せず、
+    呼び出し側が理由付きのリテラルを持つ。
+    """
+    spec = TABLE_LICENSE[table]
+    if spec.kind is not TableKind.UNIFORM or spec.tag is None:
+        raise ValueError(f"{table} は uniform ではないため地図から導出できない")
+    return spec.tag.value
 
 
 @dataclass(frozen=True)
@@ -95,7 +110,7 @@ DATASET_SOURCES: tuple[DatasetSource, ...] = (
             "SELECT MAX(data_date) AS latest_date, MAX(fetched_at) AS source_epoch,"
             " COUNT(*) AS n FROM core_stock_financials"
         ),
-        license_tag=LicenseTag.PERSONAL_ONLY.value,
+        license_tag=_uniform_tag("core_stock_financials"),
         note="yfinance 継承で personal-only。data_date は JST 営業日の文字列",
     ),
     DatasetSource(
@@ -103,14 +118,22 @@ DATASET_SOURCES: tuple[DatasetSource, ...] = (
         store="D1",
         location="ir_disclosures",
         writer="tdnet_hourly",
+        # `COUNT(*)` を付けると索引シークが全走査に落ちる（実測 37,533 行）。
+        # `n` は存在 (0/1) だけ見れば足りるので `MAX` の NULL 判定にする
+        # （実測 1 行。L-17）。`yutai_benefits` / `d1_core_stock_financials`
+        # には同じ効果が無い（`MAX` 列に索引が無く走査が必須）のを確認済みで、
+        # そちらは件数シグナルを残すため `COUNT(*)` のまま。
         sql=(
             "SELECT date(MAX(pubdate),'unixepoch','+9 hours') AS latest_date,"
-            " MAX(pubdate) AS source_epoch, COUNT(*) AS n FROM ir_disclosures"
+            " MAX(pubdate) AS source_epoch,"
+            " CASE WHEN MAX(pubdate) IS NULL THEN 0 ELSE 1 END AS n"
+            " FROM ir_disclosures"
         ),
-        license_tag=LicenseTag.FACTUAL_CITE.value,
+        license_tag=_uniform_tag("ir_disclosures"),
         note=(
             "pubdate は INTEGER epoch。JST へ寄せてから日付化する。"
-            "source_epoch も pubdate を使う（取得時刻の列に頼らない理由は下記）"
+            "source_epoch も pubdate を使う（取得時刻の列に頼らない理由は下記）。"
+            "n は件数ではなく存在 (0/1)"
         ),
     ),
     DatasetSource(
@@ -122,6 +145,7 @@ DATASET_SOURCES: tuple[DatasetSource, ...] = (
             "SELECT MAX(data_date) AS latest_date, MAX(last_fetched_at) AS source_epoch,"
             " COUNT(*) AS n FROM jss_raw_files WHERE source = 'EDINET'"
         ),
+        # 行タグ表の絞り込み観測（EDINET 分だけ）。地図は表単位なので導出しない。
         license_tag=LicenseTag.COMMERCIAL_OK.value,
         note="11 営業日の空振りを検知できなかった対象。原本索引の EDINET 分だけを測る",
     ),
@@ -134,6 +158,7 @@ DATASET_SOURCES: tuple[DatasetSource, ...] = (
             "SELECT MAX(data_date) AS latest_date, MAX(fetched_at) AS source_epoch,"
             " COUNT(*) AS n FROM jss_supply_latest WHERE data_type = 'jsf_zandaka'"
         ),
+        # 行タグ表の絞り込み観測（日証金分だけ）。地図は表単位なので導出しない。
         license_tag=LicenseTag.PERSONAL_ONLY.value,
         note=(
             "日証金の規約は私的利用限定。fetched_at は毎回 now_jst() で塗り直される"
@@ -156,6 +181,8 @@ DATASET_SOURCES: tuple[DatasetSource, ...] = (
             "SELECT NULL AS latest_date, MAX(updated_at) AS source_epoch,"
             " COUNT(*) AS n FROM core_stocks"
         ),
+        # 列地図表（EDINET と JPX が 1 行に混在）。地図に表単位のタグが
+        # 無いので、厳しい側への倒しをここに書く（理由は下の note）。
         license_tag=LicenseTag.PERSONAL_ONLY.value,
         note=(
             "データ基準日の列が無い（src_data_date は実測で全行 NULL）ので"
@@ -204,7 +231,7 @@ DATASET_SOURCES: tuple[DatasetSource, ...] = (
             "SELECT NULL AS latest_date, MAX(updated_at) AS source_epoch,"
             " COUNT(*) AS n FROM yutai_benefits"
         ),
-        license_tag=LicenseTag.PERSONAL_ONLY.value,
+        license_tag=_uniform_tag("yutai_benefits"),
         note=(
             "データ基準日の列が無い。みんかぶ由来で personal-only。"
             "`updated_at` は core_stocks と同じく記録時刻寄りの列である点に注意"

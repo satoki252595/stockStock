@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import ast
 import subprocess
 from pathlib import Path
 
@@ -106,3 +107,92 @@ def test_EDINET_は除外しない() -> None:
         check=False,
     )
     assert result.returncode != 0, "EDINET 原本まで ignore されている"
+
+
+# skip を許す fixture_path の一覧（L-28）。未取得なら該当テストは skip する。
+# 新しい実レスポンス依存を足すときはここへ足すこと（黙って増やさない）。
+# f-string は `{…}` に正規化する（`jsf/{name}.csv` → `jsf/{…}.csv`）。
+SKIP_ALLOWED: frozenset[str] = frozenset(
+    {
+        "convert/tdnet_disclosure_sample.pdf",
+        "convert/yanoshin_tdnet_recent.json",
+        "edinet/Edinetcode.zip",
+        "edinet/csv_sample.meta.json",
+        "edinet/csv_sample.zip",
+        "edinet/documents_error_401.json",
+        "edinet/documents_list_sample.json",
+        "edinet/xbrl_sample.meta.json",
+        "edinet/xbrl_sample.zip",
+        "jsf/shina.csv",
+        "jsf/zandaka.csv",
+        "jsf/{…}.csv",
+        "tdnet/official_I_list_{…}_20260610.html",
+        "tdnet/tanshin_xbrl_2751_20260610.zip",
+        "tdnet/yanoshin_list_20260610.json",
+        "tdnet/yanoshin_list_recent.json",
+    }
+)
+
+# fixture_path へ渡す値を保持するモジュール定数（動的呼び出しの解決用）。
+# 新しい定数経由の参照を足すときはここへ足すこと。
+_FIXTURE_CONSTANTS = ("FIXTURE_REL", "PDF_REL", "ZIP_FIXTURE")
+
+# fixture_path を包むヘルパー（引数をそのまま渡すもの）。呼び出し側のリテラル
+# を拾うために名前を固定する。`_bytes(name)` のように名前だけ受けるものは
+# 含めない（`fixture_path(f"jsf/{name}.csv")` の f-string 側で拾う）。
+_FIXTURE_WRAPPERS = ("_load", "_doc_meta")
+
+
+def _rendered_joined(node: ast.JoinedStr) -> str:
+    return "".join(
+        v.value if isinstance(v, ast.Constant) else "{…}" for v in node.values
+    )
+
+
+def _fixture_refs() -> set[str]:
+    """テスト群が参照する fixture_path の集合を AST で集める。"""
+    refs: set[str] = set()
+    for path in sorted(REPO_ROOT.glob("tests/test_*.py")):
+        if path.name == "test_fixture_policy.py":
+            continue
+        tree = ast.parse(path.read_text())
+        constants: dict[str, str] = {}
+        for node in tree.body:
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id in _FIXTURE_CONSTANTS
+                and isinstance(node.value, ast.Constant)
+            ):
+                constants[node.targets[0].id] = node.value.value
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else ""
+            if name not in ("fixture_path", *_FIXTURE_WRAPPERS):
+                continue
+            if not node.args:
+                continue
+            arg = node.args[0]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                refs.add(arg.value)
+            elif isinstance(arg, ast.JoinedStr):
+                refs.add(_rendered_joined(arg))
+            elif isinstance(arg, ast.Name) and arg.id in constants:
+                refs.add(constants[arg.id])
+    return refs
+
+
+def test_skipを許すフィクスチャ以外を参照していない() -> None:
+    """実レスポンス依存（= 未取得で skip）の増加を検出する（L-28）。"""
+    refs = _fixture_refs()
+    assert refs, "参照を 1 件も拾えていない（抽出ロジックの故障）"
+    unknown = sorted(refs - SKIP_ALLOWED)
+    assert not unknown, (
+        f"SKIP_ALLOWED に無いフィクスチャ参照: {unknown}\n"
+        "新しい実レスポンス依存は SKIP_ALLOWED へ追加してから使うこと"
+    )
+    stale = sorted(SKIP_ALLOWED - refs)
+    assert not stale, f"参照されなくなった許可エントリ（掃除すること）: {stale}"

@@ -52,11 +52,16 @@ DIAGNOSTIC_JOBS: tuple[str, ...] = ("ops_check", "cloud_check", PROBE_JOB_NAME)
 # `AND status = ?` が無いと**失敗した実行まで「処理ゼロで成功している」と報告する**。
 # 実測で `jss_job_runs` の 2 行はどちらも ops_check 自身の
 # `status='失敗' processed=0` で、このまま 3 日続けば発火する状態だった。
+#
+# `finished_at >= ... -30 days` (L-17): 全行の ROW_NUMBER は表が育つと
+# 全走査になる。`idx_jss_job (job_name, finished_at)` を効かせるため
+# 直近 30 日に窓を切る。`record_job_run` の 90 日剪定と対で範囲を保つ。
 IDLE_RUNS_SQL = (
     "SELECT job_name, COUNT(*) AS n FROM ("
     "  SELECT job_name, processed, status, ROW_NUMBER() OVER"
     "   (PARTITION BY job_name ORDER BY finished_at DESC) AS rn"
     "  FROM jss_job_runs WHERE job_name NOT IN ({placeholders})"
+    "  AND finished_at >= strftime('%s','now','-30 days')"
     ") WHERE rn <= ? AND processed = 0 AND status = ? GROUP BY job_name"
     " HAVING COUNT(*) >= ?"
 ).format(placeholders=", ".join("?" for _ in DIAGNOSTIC_JOBS))

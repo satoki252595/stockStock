@@ -73,6 +73,10 @@
       "kind": "operational",
       "tag": "commercial-ok"
     },
+    "jss_notion_pages": {
+      "kind": "operational",
+      "tag": "commercial-ok"
+    },
     "jss_raw_files": {
       "kind": "row-tag",
       "tag": null
@@ -187,6 +191,12 @@
     },
     {
       "dataset": "jss_job_runs",
+      "column_group": "all",
+      "writer": "stockStock",
+      "declared": "2026-09-13"
+    },
+    {
+      "dataset": "jss_notion_pages",
       "column_group": "all",
       "writer": "stockStock",
       "declared": "2026-09-13"

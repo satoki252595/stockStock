@@ -736,14 +736,14 @@ def _notion_writer(ok: bool):
 
 
 def _ok_uploader(page_id: str = "raw-page-1"):
-    def _f(client, settings, artifact):
+    def _f(client, settings, artifact, **kw):
         artifact.notion_page_id = page_id
         return page_id
 
     return _f
 
 
-def _fail_uploader(client, settings, artifact):
+def _fail_uploader(client, settings, artifact, **kw):
     raise RuntimeError("notion ⑤ down")
 
 

@@ -47,6 +47,7 @@ class TestSchemaShape:
             "jss_dataset_freshness",
             "jss_writer_claims",
             "jss_column_license",
+            "jss_notion_pages",
         }
 
     def test_no_table_for_unbounded_time_series(self):

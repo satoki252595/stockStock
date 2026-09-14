@@ -141,6 +141,110 @@ class TestStockMasterPayload:
         assert props2[S.MASTER_PROP_DELISTING_DATE]["date"]["start"] == "2026-07-01"
 
 
+def _read_page(code="7203", **overrides):
+    """① の query 返却形状（読み取り形）の properties を作る。"""
+
+    def text(value):
+        return {
+            "rich_text": [
+                {"type": "text", "plain_text": value, "text": {"content": value}}
+            ]
+        }
+
+    def title(value):
+        return {
+            "title": [{"type": "text", "plain_text": value, "text": {"content": value}}]
+        }
+
+    def select(value):
+        return {"select": {"name": value} if value is not None else None}
+
+    props = {
+        S.MASTER_PROP_NAME: title("トヨタ自動車"),
+        S.MASTER_PROP_CODE: text(code),
+        S.MASTER_PROP_LISTED: {"checkbox": True},
+        S.MASTER_PROP_MARKET: select("プライム"),
+        S.MASTER_PROP_SECTOR33: select("輸送用機器"),
+        S.MASTER_PROP_SECTOR17: select("自動車・輸送機"),
+        S.MASTER_PROP_EDINET_CODE: text("E02144"),
+        # 時刻系は古いまま（同値 skip では見ないので一致しなくてよい）。
+        S.MASTER_PROP_LAST_UPDATED: {"date": {"start": "2026-06-10"}},
+        S.PROP_FETCHED_AT: {"date": {"start": "2026-06-10T19:30:00+09:00"}},
+    }
+    props.update(overrides)
+    return props
+
+
+def _master_rec(**overrides):
+    kwargs = dict(
+        code="7203",
+        name="トヨタ自動車",
+        provenance=prov(),
+        market="プライム",
+        sector33="輸送用機器",
+        sector17="自動車・輸送機",
+        edinet_code="E02144",
+        listed=True,
+    )
+    kwargs.update(overrides)
+    return StockMasterRecord(**kwargs)
+
+
+class TestStockMasterMatchesPage:
+    """L-19: 既存行と同値なら PATCH を省く（月次 3,841 件 → 差分のみ）。"""
+
+    def test_同値なら真(self):
+        assert upsert.stock_master_matches_page(_read_page(), _master_rec()) is True
+
+    def test_由来や時刻が違っても同値(self):
+        """data_date/fetched_at は毎 run 変わる。見ると skip が死ぬ。"""
+        rec = _master_rec(
+            provenance=prov(
+                data_date=date(2026, 7, 10),
+                fetched_at=datetime(2026, 7, 10, 19, 30, tzinfo=JST),
+            )
+        )
+        assert upsert.stock_master_matches_page(_read_page(), rec) is True
+
+    def test_ライフサイクルは見ない(self):
+        """状態 3 項目は開示・消失が所有し master_sync は書かない。"""
+        props = _read_page()
+        props[S.MASTER_PROP_STATUS] = {"select": {"name": "上場廃止"}}
+        rec = _master_rec(status="上場", listed=True)
+        assert upsert.stock_master_matches_page(props, rec) is True
+
+    @pytest.mark.parametrize(
+        "prop,value",
+        [
+            (S.MASTER_PROP_NAME, {"title": [{"plain_text": "別名"}]}),
+            (S.MASTER_PROP_LISTED, {"checkbox": False}),
+            (S.MASTER_PROP_MARKET, {"select": {"name": "スタンダード"}}),
+            (S.MASTER_PROP_SECTOR33, {"select": None}),
+            (S.MASTER_PROP_EDINET_CODE, {"rich_text": []}),
+        ],
+    )
+    def test_意味が違えば偽(self, prop, value):
+        assert upsert.stock_master_matches_page(_read_page(**{prop: value}), _master_rec()) is False
+
+    def test_読めない形は偽に倒す(self):
+        """欠損より二重 PATCH がまし（書く側に倒す）。"""
+        assert upsert.stock_master_matches_page({}, _master_rec()) is False
+        props = _read_page()
+        props[S.MASTER_PROP_MARKET] = {"select": {"id": "xxx"}}
+        assert upsert.stock_master_matches_page(props, _master_rec()) is False
+
+    def test_エントリは最古勝ちで_properties_を保持する(self):
+        pages = [
+            {"id": "new", "created_time": "2026-07-02T00:00:00.000Z",
+             "properties": _read_page()},
+            {"id": "old", "created_time": "2026-07-01T00:00:00.000Z",
+             "properties": _read_page()},
+        ]
+        entries = upsert._master_entries_from_pages(pages)
+        assert entries["7203"][0] == "old"
+        assert entries["7203"][1][S.MASTER_PROP_CODE]["rich_text"][0]["plain_text"] == "7203"
+
+
 class TestFinancialSummaryPayload:
     def make_record(self, **overrides) -> FinancialSummaryRecord:
         kwargs = dict(
@@ -734,6 +838,113 @@ class TestDisclosurePrefetch:
 
         upsert.load_disclosure_page_map(_C(), settings)
         assert captured["filter"] is None
+
+    def test_load_disclosure_page_entries_keeps_properties(self):
+        settings = make_settings()
+
+        class _C:
+            def query_database(self, db_id, *, filter=None, **kw):
+                return [
+                    {
+                        "id": "d-1",
+                        "properties": {
+                            S.DISC_PROP_DOC_ID: {"rich_text": [{"plain_text": "S100A"}]},
+                            S.DISC_PROP_TITLE: {"title": [{"plain_text": "決算短信"}]},
+                        },
+                    },
+                ]
+
+        out = upsert.load_disclosure_page_entries(_C(), settings, disclosed_date=date(2026, 6, 28))
+        assert out["S100A"][0] == "d-1"
+        assert out["S100A"][1][S.DISC_PROP_TITLE]["title"][0]["plain_text"] == "決算短信"
+
+
+def _disc_page(**overrides):
+    """④ の query 返却形状（読み取り形）の properties を作る。"""
+
+    def text(value):
+        return {"rich_text": [{"plain_text": value}]} if value else {"rich_text": []}
+
+    props = {
+        S.DISC_PROP_TITLE: {"title": [{"plain_text": "決算短信"}]},
+        S.DISC_PROP_DISCLOSED_AT: {"date": {"start": "2026-06-28T15:00:00+09:00"}},
+        S.DISC_PROP_DOC_TYPE: {"select": {"name": "短信"}},
+        S.DISC_PROP_DOC_ID: text("S100A"),
+        S.DISC_PROP_HAS_XBRL: {"checkbox": True},
+        S.DISC_PROP_CODE: text("7203"),
+        S.DISC_PROP_URL: {"url": "https://example/doc"},
+        S.DISC_PROP_SPLIT_RATIO: text(""),
+        S.DISC_PROP_SPLIT_FACTOR: {"number": None},
+        S.DISC_PROP_EFFECTIVE_DATE: {"date": None},
+        S.PROP_MASTER_RELATION: {"relation": [{"id": "m-1"}]},
+        S.PROP_RAW_RELATION: {"relation": [{"id": "raw-1"}]},
+        # 取得日時は古いまま（同値 skip では見ない）。
+        S.PROP_FETCHED_AT: {"date": {"start": "2026-06-28T16:00:00+09:00"}},
+    }
+    props.update(overrides)
+    return props
+
+
+def _disc_rec(**overrides):
+    kwargs = dict(
+        doc_id="S100A",
+        title="決算短信",
+        disclosed_at=datetime(2026, 6, 28, 15, 0, tzinfo=JST),
+        provenance=prov(raw_page_id="raw-1"),
+        code="7203",
+        doc_type="短信",
+        source_url="https://example/doc",
+        has_xbrl=True,
+    )
+    kwargs.update(overrides)
+    return DisclosureRecord(**kwargs)
+
+
+class TestDisclosureMatchesPage:
+    """L-20: 既存行と同値なら再 PATCH を省く（毎時 395 件 → 差分のみ）。"""
+
+    def test_同値なら真(self):
+        assert upsert.disclosure_matches_page(_disc_page(), _disc_rec(), "m-1") is True
+
+    def test_取得日時が違っても同値(self):
+        rec = _disc_rec(provenance=prov(raw_page_id="raw-1", fetched_at=datetime(2026, 7, 1, 12, 0)))
+        assert upsert.disclosure_matches_page(_disc_page(), rec, "m-1") is True
+
+    def test_日時の表記揺れを吸収する(self):
+        """Notion が Z 正規化で返しても skip が死なない。"""
+        props = _disc_page(**{S.DISC_PROP_DISCLOSED_AT: {"date": {"start": "2026-06-28T06:00:00Z"}}})
+        # JST 15:00 == UTC 06:00
+        assert upsert.disclosure_matches_page(props, _disc_rec(), "m-1") is True
+
+    def test_master_noneならrelationがあっても同値(self):
+        """relation を書かない run が既存 relation で不一致にしない。"""
+        assert upsert.disclosure_matches_page(_disc_page(), _disc_rec(), None) is True
+
+    def test_原本が変われば偽(self):
+        """⑤ を上げ直した run は relation を張り替えるため PATCH する。"""
+        rec = _disc_rec(provenance=prov(raw_page_id="raw-2"))
+        assert upsert.disclosure_matches_page(_disc_page(), rec, "m-1") is False
+
+    @pytest.mark.parametrize(
+        "prop,value",
+        [
+            (S.DISC_PROP_TITLE, {"title": [{"plain_text": "訂正短信"}]}),
+            (S.DISC_PROP_DOC_TYPE, {"select": {"name": "その他"}}),
+            (S.DISC_PROP_HAS_XBRL, {"checkbox": False}),
+            (S.DISC_PROP_CODE, {"rich_text": []}),
+            (S.DISC_PROP_URL, {"url": None}),
+            (S.DISC_PROP_SPLIT_FACTOR, {"number": 3.0}),
+        ],
+    )
+    def test_意味が違えば偽(self, prop, value):
+        assert upsert.disclosure_matches_page(_disc_page(**{prop: value}), _disc_rec(), "m-1") is False
+
+    def test_masterが変われば偽(self):
+        props = _disc_page(**{S.PROP_MASTER_RELATION: {"relation": [{"id": "m-2"}]}})
+        assert upsert.disclosure_matches_page(props, _disc_rec(), "m-1") is False
+
+    def test_読めない形は偽に倒す(self):
+        assert upsert.disclosure_matches_page({}, _disc_rec(), "m-1") is False
 
     def test_upsert_disclosure_resolved_skips_dedup_query(self):
         settings = make_settings()

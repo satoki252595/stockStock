@@ -17,8 +17,11 @@ import stat
 import tempfile
 import zipfile
 from datetime import date, datetime, timedelta
+from functools import partial
 from pathlib import Path
 
+from ..cloud_store import notion_pages
+from ..cloud_store.d1 import D1Error, D1Store
 from ..collectors import edinet
 from ..collectors.edinet_codelist import normalize_sec_code
 from ..convert import json_to_parquet, xbrl_to_csv
@@ -175,9 +178,10 @@ def _process_document(
     master_map: dict[str, str] | None = None,
     master_map_ok: bool = False,
     edinet_map: dict[str, str] | None = None,
-    disc_map: dict[str, str] | None = None,
+    disc_map: dict[str, tuple[str, dict]] | None = None,
     disc_map_ok: bool = False,
     target_date: date | None = None,
+    sha_map: dict[str, str] | None = None,
 ) -> None:
     master_map = master_map or {}
     disc_map = disc_map or {}
@@ -205,7 +209,7 @@ def _process_document(
     # 財務系: CSV/XBRL → tidy 変換版付き原本を ⑤ へ (変換失敗でも原本は上げる §5.2)
     if doc_type_code in FINANCIAL_DOC_TYPES:
         tidy_artifact, tidy = _fetch_financial_tidy(ctx, doc_id, code, data_date)
-        doc_raw_page = ctx.upload_raw(tidy_artifact)
+        doc_raw_page = ctx.upload_raw(tidy_artifact, sha_map=sha_map, sha_map_date=target_date)
 
     # PDF 原本 (§4 書類一覧の対象すべて)。失敗しても書類処理自体は継続
     try:
@@ -213,7 +217,7 @@ def _process_document(
             ctx.settings, doc_id, 2, code=code, data_date=data_date
         )
         json_to_parquet.convert_artifact(pdf_artifact, "pdf")
-        pdf_page = ctx.upload_raw(pdf_artifact)
+        pdf_page = ctx.upload_raw(pdf_artifact, sha_map=sha_map, sha_map_date=target_date)
         doc_raw_page = doc_raw_page or pdf_page
     except (FetchError, file_upload.RawUploadError) as exc:
         logger.warning("PDF取得/UL失敗 (書類処理は継続 doc_id=%s): %s", doc_id, exc)
@@ -233,13 +237,25 @@ def _process_document(
         disc_map_ok and target_date is not None
         and record.disclosed_at.date() == target_date
     )
+    disc_entry = disc_map.get(doc_id) if disc_resolved else None
+    existing_pid = disc_entry[0] if disc_entry else None
+    existing_props = disc_entry[1] if disc_entry else None
+    # L-20: 既存行と同値なら再 PATCH を省く（tdnet_hourly と同じ）。
+    # ローカル系統には書く（persist の notion 側だけを no-op にする）。
+    if existing_props is not None and upsert.disclosure_matches_page(
+        existing_props, record, master_id
+    ):
+        notion_write = partial(_existing_page_id, existing_pid)
+    else:
+        notion_write = partial(
+            upsert.upsert_disclosure,
+            ctx.client, ctx.settings, record, master_id,
+            existing_page_id=existing_pid, page_resolved=disc_resolved,
+        )
     # ④ を Notion とローカルへ独立に書く（双方向フェールセーフ）
     if not ctx.persist(
         record,
-        lambda: upsert.upsert_disclosure(
-            ctx.client, ctx.settings, record, master_id,
-            existing_page_id=disc_map.get(doc_id), page_resolved=disc_resolved,
-        ),
+        notion_write,
         label=f"④{doc_id}",
     ):
         raise RuntimeError(f"④ を Notion/ローカル両系統に書けず: {doc_id}")
@@ -306,10 +322,20 @@ def execute(ctx: JobContext) -> None:
         "あり" if ctx.args.date else "なし",
     )
 
+    # ⑤ 重複検索の事前マップ（L-21）。原本ごとの 1 req を対象日 1 回にまとめる。
+    # 失敗時は per-record 検索へ（upload 側の既定動作）。
+    try:
+        sha_map: dict[str, str] | None = file_upload.load_raw_page_map(
+            ctx.client, ctx.settings, data_date=target_date
+        )
+    except Exception as exc:  # noqa: BLE001 - 失敗時は per-record 検索へフォールバック
+        logger.warning("⑤ 事前マップ取得失敗 → per-record 検索にフォールバック: %s", exc)
+        sha_map = None
+
     # 1-4. 書類一覧取得・原本⑤UL（Notion⑤/ローカル⑤ 独立。両系統とも失敗時のみ中止 §7.1/§3-3）
     list_artifact, docs = edinet.list_documents(ctx.settings, target_date)
     json_to_parquet.convert_artifact(list_artifact, "json")
-    list_page_id = ctx.upload_raw(list_artifact)
+    list_page_id = ctx.upload_raw(list_artifact, sha_map=sha_map, sha_map_date=target_date)
 
     # 大量保有報告書(350/360)は保有者が提出するため secCode が入らない。実測で
     # 992件中956件(96%)が空で、secCode だけで絞ると ほぼ全て取りこぼしていた。
@@ -334,18 +360,10 @@ def execute(ctx: JobContext) -> None:
     # 取得失敗時は per-record 検索へ degrade(all-or-nothing)。
     # ① は1回のスキャンで {コード: page_id} と {EDINETコード: コード} の両方を作る
     # （大量保有報告書の対象会社解決に後者が要る。追加の API 呼び出しは発生しない）。
-    master_pages: list[dict] = []
-
-    def _load_master() -> dict[str, str]:
-        master_pages.clear()
-        master_pages.extend(ctx.client.query_database(ctx.settings.db_id("stock_master")))
-        return upsert._master_map_from_pages(master_pages)
-
-    master_map, master_map_ok = _load_map_guarded(_load_master, "①")
-    edinet_map = upsert._edinet_map_from_pages(master_pages) if master_map_ok else {}
+    master_map, edinet_map, master_map_ok = _load_master_maps(ctx)
     logger.info("① マップ: 銘柄 %d 件 / EDINETコード逆引き %d 件", len(master_map), len(edinet_map))
     disc_map, disc_map_ok = _load_map_guarded(
-        lambda: upsert.load_disclosure_page_map(
+        lambda: upsert.load_disclosure_page_entries(
             ctx.client, ctx.settings, disclosed_date=target_date
         ),
         "④",
@@ -358,13 +376,55 @@ def execute(ctx: JobContext) -> None:
                 master_map=master_map, master_map_ok=master_map_ok,
                 edinet_map=edinet_map,
                 disc_map=disc_map, disc_map_ok=disc_map_ok, target_date=target_date,
+                sha_map=sha_map,
             )
             ctx.add_success()
         except Exception as exc:
             ctx.add_failure(doc.get("docID", "?"), f"書類処理失敗: {exc}")
 
 
-def _load_map_guarded(loader, label: str) -> tuple[dict[str, str], bool]:
+def _existing_page_id(pid: str) -> str:
+    """同値 skip 時の notion 書き込み（何も書かず既存 page_id を返す）。"""
+    return pid
+
+
+def _load_master_maps(
+    ctx: JobContext,
+) -> tuple[dict[str, str], dict[str, str], bool]:
+    """① マップ 2 種を D1 写しから読む。無ければ Notion スキャンへ（L-20）。
+
+    EDINET 逆引きも D1 区画 `stock_master_by_edinet` から読む。どちらか一方
+    でも空なら両方スキャンで取り直す（1 回のスキャンで両方作れるため）。
+    """
+    settings = ctx.settings.cloud_store
+    if settings.d1_enabled():
+        try:
+            store = D1Store(settings, writer=JOB_NAME)
+            stock = notion_pages.load_stock_master_map(store)
+            by_edinet = notion_pages.load_edinet_code_map(store)
+        except D1Error as exc:
+            logger.warning("① D1 写しを読めない → Notion スキャンにフォールバック: %s", exc)
+        else:
+            if stock and by_edinet:
+                logger.info(
+                    "① マップ: D1 写し stock %d 件 / edinet逆引き %d 件（スキャンを省いた）",
+                    len(stock), len(by_edinet),
+                )
+                return stock, by_edinet, True
+            logger.warning("① D1 写しが空 → Notion スキャンにフォールバック")
+    master_pages: list[dict] = []
+
+    def _load_master() -> dict[str, str]:
+        master_pages.clear()
+        master_pages.extend(ctx.client.query_database(ctx.settings.db_id("stock_master")))
+        return upsert._master_map_from_pages(master_pages)
+
+    master_map, master_map_ok = _load_map_guarded(_load_master, "①")
+    edinet_map = upsert._edinet_map_from_pages(master_pages) if master_map_ok else {}
+    return master_map, edinet_map, master_map_ok
+
+
+def _load_map_guarded(loader, label: str):
     """事前マップを all-or-nothing でロードする。失敗時は ({}, False) で per-record へ。"""
     try:
         return loader(), True

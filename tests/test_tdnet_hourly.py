@@ -31,7 +31,7 @@ def _ctx(raw_data_dir: str) -> JobContext:
     )
     # ①③の Notion/ローカル/Cloudflare 書込は本テストの対象外。呼ばれたことだけ
     # 分かればよいので no-op に差し替える（実 SQL/API を叩かない）。
-    ctx.upload_raw = lambda artifact: "raw-page-id"  # noqa: ARG005
+    ctx.upload_raw = lambda artifact, **kw: "raw-page-id"  # noqa: ARG005
     ctx.mirror_xbrl_facts = lambda tidy, artifact: None  # noqa: ARG005
     ctx.persist = lambda record, notion_write, *, label, include_lifecycle=True: True  # noqa: ARG005
     ctx.cloud_financial_summary = lambda fin, *, doc_id, raw_sha256: None  # noqa: ARG005

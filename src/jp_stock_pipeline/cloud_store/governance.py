@@ -209,6 +209,9 @@ TABLE_LICENSE: dict[str, TableLicense] = {
     ),
     "jss_writer_claims": _operational("列単位の writer 排他の宣言"),
     "jss_column_license": _operational("列単位ライセンス地図そのもの"),
+    "jss_notion_pages": _operational(
+        "Notion 行 ID の写し（L-20）。page_id とコードだけを持ち値は持たない"
+    ),
     # --- 2026-09-13 に `sqlite_master` の読み取りで名前と DDL が判明した 3 表 ---
     # 当初「本番 PRAGMA を読めないので登録できない」としていたが、読み取り専用の
     # カタログ照会で足りた。未登録のままだと「地図に無い表」が恒久的に warning で
@@ -249,8 +252,10 @@ ROW_TAG_COLUMN = "license_tag"
 
 # 本番（`_cf_KV` を除く）の表数。finmath 2 表（`finmath_price_snapshot` /
 # `finmath_daily_ohlcv`）は kabulab-cf drizzle/d1/0012 で DROP 済み（本番
-# sqlite_master で不在を確認）。`TABLE_LICENSE` は残る 29 表すべてを登録している。
-OBSERVED_TABLE_COUNT = 29
+# sqlite_master で不在を確認）。L-20 で `jss_notion_pages` を足して 30 表。
+# **この PR のマージと同時に本番へ CREATE TABLE すること。** 先にコードだけ
+# 入ると license_map の「宣言にあって本番に無い表」が失敗する。
+OBSERVED_TABLE_COUNT = 30
 
 # 本番 `sqlite_master` から除く名前。SQLite と D1 の内部表。
 _INTERNAL_PREFIXES = ("sqlite_", "_cf_", "d1_", "__drizzle")
@@ -494,7 +499,7 @@ WRITER_CLAIMS: tuple[WriterClaim, ...] = tuple(
 # 投入するのも書込ジョブなので、claim 行の無い DB に対する最初の実行が必ず異常終了し、
 # ブートストラップ不能になる（鶏と卵）。`jobs/license_map._sync_writer_claims` は
 # **投入 → 読み直し → 照合** の順で、失敗にするのは照合の結果だけである。したがって
-# 2 段目でも、行の無い DB への初回は投入した 18 行を読み直して一致し、成功する。
+# 2 段目でも、行の無い DB への初回は投入した 19 行を読み直して一致し、成功する。
 #
 # ## 2 段目で失敗になるもの（= 投入のあとでも残る差分）
 #
@@ -559,6 +564,25 @@ def writer_claim_rows() -> list[list[object]]:
         [c.dataset, c.column_group, c.writer, declared_epoch(c.declared)]
         for c in WRITER_CLAIMS
     ]
+
+
+def writer_claims_need_seed(observed_rows: list[dict]) -> bool:
+    """宣言にあって実表に無い・食い違う claim があれば True。
+
+    日次ジョブは True のときだけ upsert を打つ（L-17）。宣言に無い claim
+    （prune しない方針）は投入では直らないので対象外。
+    """
+    declared = {(c.dataset, c.column_group): c.writer for c in WRITER_CLAIMS}
+    observed = {
+        (str(r.get("dataset") or ""), str(r.get("column_group") or "")): str(
+            r.get("writer") or ""
+        )
+        for r in observed_rows
+    }
+    return any(
+        key not in observed or observed[key] != writer
+        for key, writer in declared.items()
+    )
 
 
 def writer_claim_problems(observed_rows: list[dict]) -> tuple[list[str], list[str]]:
@@ -726,6 +750,7 @@ __all__ = [
     "declared_epoch",
     "writer_claim_problems",
     "writer_claim_rows",
+    "writer_claims_need_seed",
     "OBSERVED_TABLE_COUNT",
     "ROW_TAG_COLUMN",
     "TABLE_LICENSE",
