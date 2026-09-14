@@ -28,11 +28,17 @@ const contract = JSON.parse(readFileSync(MAP_PATH, "utf8")) as {
 describe("RESTRICTED_COLUMNS は列単位ライセンス地図と一致する", () => {
   it("core_stocks の personal-only 集合が地図と一致する", () => {
     const columns = contract.column_license.core_stocks;
-    expect(columns, "地図に core_stocks が無い").toBeDefined();
+    if (columns === undefined) {
+      throw new Error("地図に core_stocks が無い");
+    }
     const masked = Object.entries(columns)
       .filter(([, tag]) => tag === PERSONAL_ONLY)
       .map(([column]) => column)
       .sort();
-    expect([...RESTRICTED_COLUMNS.core_stocks].sort()).toEqual(masked);
+    const restricted = RESTRICTED_COLUMNS.core_stocks;
+    if (restricted === undefined) {
+      throw new Error("RESTRICTED_COLUMNS に core_stocks が無い");
+    }
+    expect([...restricted].sort()).toEqual(masked);
   });
 });
