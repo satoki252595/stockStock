@@ -107,13 +107,25 @@ class D1Store:
         return max(1, MAX_BOUND_PARAMS // column_count)
 
     def upsert(
-        self, table: str, columns: list[str], rows: list[list], *, conflict: list[str]
+        self,
+        table: str,
+        columns: list[str],
+        rows: list[list],
+        *,
+        conflict: list[str],
+        keep: list[str] | None = None,
     ) -> int:
         """ON CONFLICT DO UPDATE の upsert。複数行を 1 文にまとめて往復を減らす。
 
         更新する列は conflict に含まれないものだけ（主キーを自分で上書きしない）。
         途中のチャンクで失敗したら、そこで例外を投げて止める。既に適用済みの
         チャンクは残るが、upsert なので再実行で収束する（部分適用を隠さない §3-2）。
+
+        `keep` に挙げた列は conflict 時に更新しない（`{table}.{col}` で既存値を
+        そのまま書き戻す）。取得のたびの再送で「初回取得時刻」のような来歴列が
+        `excluded.*` で毎回上書きされるのを防ぐために使う。SQLite の upsert では
+        テーブル名で修飾した列参照が更新前の既存値を指す（`excluded.col` は
+        逆に挿入しようとした側の値を指す）。
         """
         if not rows:
             return 0
@@ -125,7 +137,12 @@ class D1Store:
                 )
         chunk_size = self.rows_per_request(width)
         one = "(" + ", ".join("?" for _ in columns) + ")"
-        updates = ", ".join(f"{c} = excluded.{c}" for c in columns if c not in conflict)
+        keep_set = set(keep or ())
+        updates = ", ".join(
+            f"{c} = {table}.{c}" if c in keep_set else f"{c} = excluded.{c}"
+            for c in columns
+            if c not in conflict
+        )
         if not updates:
             raise D1Error(
                 f"更新できる列が無い（全列が conflict キー）: {table} {columns}"

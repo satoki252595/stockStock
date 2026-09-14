@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+from datetime import date
 from typing import TYPE_CHECKING
 
 from ..config import CloudStoreSettings
@@ -28,6 +29,24 @@ _RAW_COLUMNS = (
     "size_bytes", "license_tag", "convert_status",
     "first_fetched_at", "last_fetched_at",
 )
+
+# 収集側 (edinet.py / tdnet_hourly.py) が doc_id を渡すようになる前
+# (2026-09-11〜) に保存された原本は、キーの doc_id セグメントが
+# `keys.DOC_ID_FALLBACK`（"_"）の「旧キー」のまま R2 にある。この日付までの
+# data_date だけ旧キーを HEAD して救済し（実在すれば新キーへ PUT せず旧キー
+# を索引する）、R2 のオブジェクト数を増やさない (docs/CF-CANONICAL-DESIGN.md
+# §3.2)。
+#
+# レビュー・マージが延びても救済対象から漏れないよう、想定マージ日
+# (2026-09-14 ごろ) よりかなり先の日付に余裕を持たせて設定してある。この
+# 日付までは新規に保存される文書についても「新キー未実在→旧キーを HEAD」
+# を1回余分に行うが、旧キーは実在しないため即座に新キーへ PUT するだけで
+# R2 のオブジェクト数・バイトは増えない。増えるのは R2 Class B (HEAD) 呼出
+# 回数のみで、無料枠 (1,000万回/月) に対して無視できる量 (PR #56 の
+# 「コスト影響」参照)。この定数を過ぎた data_date では旧キーを HEAD しない
+# ため、以後は追加コストそのものが発生しない。マージが本定数を過ぎてから
+# 行われる場合は、値をマージ日以降に伸ばしてから push すること。
+LEGACY_KEY_UNTIL = date(2026, 12, 31)
 
 
 def _content_type(path) -> str:
@@ -77,6 +96,14 @@ class CloudSink:
 
         原本キーは SHA256 を含む immutable なので、同一内容の再取得は PUT を
         省略する（R2 にバージョニングが無いため上書き自体が起こらない設計）。
+
+        `LEGACY_KEY_UNTIL` までの `data_date` は、doc_id 付きの新キーが無くても
+        すぐには PUT せず、doc_id 無しの旧キー（收集側が doc_id を渡していな
+        かった間に書かれたもの）を先に HEAD する。旧キーに実在すれば PUT を
+        省略し、索引の `r2_key` にその旧キーを入れる（R2 を増やさずに doc_id
+        だけ埋める。docs/CF-CANONICAL-DESIGN.md §3.2）。派生ファイルのキーは
+        `derived_key(key, ...)` で作るので、`key` が旧キーに切り替われば派生も
+        自動的に旧キー側の位置を指す。
         """
         if not self.enabled:
             return None
@@ -95,11 +122,26 @@ class CloudSink:
                 doc_id=artifact.doc_id,
             )
             if not self.raw_bucket.exists(key):
-                self.raw_bucket.put_bytes(
-                    key,
-                    artifact.local_path.read_bytes(),
-                    content_type=_content_type(artifact.local_path),
-                )
+                legacy_key = None
+                if artifact.doc_id and data_date <= LEGACY_KEY_UNTIL:
+                    legacy_key = keys.raw_key(
+                        source=str(artifact.source),
+                        datatype=artifact.datatype,
+                        scope=artifact.scope,
+                        data_date=data_date,
+                        sha256=artifact.sha256,
+                        ext=ext,
+                        doc_id=None,
+                    )
+                if legacy_key is not None and self.raw_bucket.exists(legacy_key):
+                    # (b) 旧キー救済: 実在するので PUT せず、以後は旧キーを正とする。
+                    key = legacy_key
+                else:
+                    self.raw_bucket.put_bytes(
+                        key,
+                        artifact.local_path.read_bytes(),
+                        content_type=_content_type(artifact.local_path),
+                    )
             derived_key = derived_ext = None
             for converted in artifact.converted_paths:
                 suffix = converted.suffix.lstrip(".")
@@ -134,6 +176,9 @@ class CloudSink:
                     epoch, epoch,
                 ]],
                 conflict=["sha256"],
+                # 再取得のたびに excluded.* で上書きすると初回取得時刻が消える。
+                # 既存行があれば first_fetched_at はそのまま残す。
+                keep=["first_fetched_at"],
             )
         except D1Error as exc:
             # R2 には原本が残っている＝トレーサビリティは失われていない。

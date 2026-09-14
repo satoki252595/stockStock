@@ -315,6 +315,22 @@ class TestD1Store:
         assert "data_date = excluded.data_date" in sql
         assert "code = excluded.code" not in sql  # 主キーは自分で上書きしない
 
+    def test_keep_columns_are_written_back_from_the_table_not_excluded(self, monkeypatch):
+        """`keep` に挙げた列は再送のたびに excluded.* で上書きしない (overlaps_refactor)。"""
+        captured: list = []
+        store = self._store(monkeypatch, captured, {"success": True, "result": []})
+        store.upsert(
+            "jss_raw_files",
+            ["sha256", "first_fetched_at", "last_fetched_at"],
+            [["a" * 64, 1, 2]],
+            conflict=["sha256"],
+            keep=["first_fetched_at"],
+        )
+        sql = captured[0]["body"]["sql"]
+        assert "first_fetched_at = jss_raw_files.first_fetched_at" in sql
+        assert "first_fetched_at = excluded.first_fetched_at" not in sql
+        assert "last_fetched_at = excluded.last_fetched_at" in sql
+
 
 class TestD1BatchUpsert:
     """複数行を1文にまとめて往復を減らす。
@@ -396,3 +412,53 @@ class TestD1BatchUpsert:
         store = self._store(monkeypatch, captured)
         assert store.upsert("t", ["a"], [], conflict=["a"]) == 0
         assert captured == []
+
+
+class TestD1UpsertKeepAgainstRealSqlite:
+    """文字列一致だけでなく、実際に SQLite (D1 と同じエンジン) に流して確認する。
+
+    `jss_raw_files.first_fetched_at` が再取得のたびに上書きされていたバグ
+    (overlaps_refactor) の回帰テスト。
+    """
+
+    def test_keep_column_survives_a_conflicting_upsert(self, monkeypatch):
+        import sqlite3
+
+        from jp_stock_pipeline import http
+        from jp_stock_pipeline.cloud_store.d1 import D1Store
+        from jp_stock_pipeline.config import CloudStoreSettings
+
+        con = sqlite3.connect(":memory:")
+        con.execute(
+            "CREATE TABLE jss_raw_files (sha256 TEXT PRIMARY KEY, "
+            "first_fetched_at INTEGER, last_fetched_at INTEGER)"
+        )
+
+        class _Resp:
+            def json(self):
+                return {"success": True, "result": [{"results": []}]}
+
+        def fake_post(url, *, json_body, headers, idempotent=False, **kwargs):
+            con.execute(json_body["sql"], json_body["params"])
+            con.commit()
+            return _Resp()
+
+        monkeypatch.setattr(http, "post_json", fake_post)
+        store = D1Store(
+            CloudStoreSettings(cf_account_id="a", cf_api_token="t", d1_database_id="d"),
+            writer="w",
+        )
+        columns = ["sha256", "first_fetched_at", "last_fetched_at"]
+        store.upsert(
+            "jss_raw_files", columns, [["s1", 100, 100]],
+            conflict=["sha256"], keep=["first_fetched_at"],
+        )
+        # 再取得（同一原本の再送）: 初回取得時刻はそのまま、最終取得時刻だけ進む。
+        store.upsert(
+            "jss_raw_files", columns, [["s1", 999, 200]],
+            conflict=["sha256"], keep=["first_fetched_at"],
+        )
+        row = con.execute(
+            "SELECT first_fetched_at, last_fetched_at FROM jss_raw_files WHERE sha256='s1'"
+        ).fetchone()
+        assert row == (100, 200)

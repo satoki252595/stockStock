@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from jp_stock_pipeline.cloud_store.sink import CloudSink
 from jp_stock_pipeline.config import CloudStoreSettings
@@ -52,9 +52,11 @@ class _FakeR2:
     def __init__(self, existing: set[str] | None = None, *, fail_on_put=False):
         self.existing = set(existing or ())
         self.puts: list[str] = []
+        self.heads: list[str] = []
         self.fail_on_put = fail_on_put
 
     def exists(self, key):
+        self.heads.append(key)
         return key in self.existing
 
     def put_bytes(self, key, body, *, content_type):
@@ -71,12 +73,12 @@ class _FakeD1:
         self.calls: list[tuple] = []
         self.fail = fail
 
-    def upsert(self, table, columns, rows, *, conflict):
+    def upsert(self, table, columns, rows, *, conflict, keep=None):
         if self.fail:
             from jp_stock_pipeline.cloud_store.d1 import D1Error
 
             raise D1Error("boom")
-        self.calls.append((table, columns, rows, conflict))
+        self.calls.append((table, columns, rows, conflict, keep))
         return len(rows)
 
 
@@ -94,11 +96,13 @@ class TestRawArtifact:
         assert r2.puts == [
             "raw/edinet/csv/2026/2026-06-30/7203/S100XU9L/cccccccccccccccc.zip"
         ]
-        table, columns, rows, conflict = d1.calls[0]
+        table, columns, rows, conflict, keep = d1.calls[0]
         assert table == "jss_raw_files"
         assert conflict == ["sha256"]
         assert rows[0][columns.index("r2_key")] == r2.puts[0]
         assert rows[0][columns.index("doc_id")] == "S100XU9L"
+        # first_fetched_at は再取得のたびに excluded.* で上書きしない (overlaps_refactor)。
+        assert keep == ["first_fetched_at"]
 
     def test_d1_is_not_touched_when_r2_fails(self, tmp_path):
         """索引が嘘をつく状態を作らない（R2 → D1 の順序）。"""
@@ -112,11 +116,75 @@ class TestRawArtifact:
         assert _sink(r2=r2).upsert_raw_artifact(_artifact(tmp_path)) is True
         assert r2.puts == []  # 同一内容は PUT しない
 
+    def test_legacy_key_is_used_when_it_already_exists(self, tmp_path):
+        """(b)-(i): 新キーが無く旧キー(doc_id 無し)が実在すれば PUT せず旧キーを索引する。"""
+        new_key = "raw/edinet/csv/2026/2026-06-30/7203/S100XU9L/cccccccccccccccc.zip"
+        legacy = "raw/edinet/csv/2026/2026-06-30/7203/_/cccccccccccccccc.zip"
+        r2, d1 = _FakeR2({legacy}), _FakeD1()
+        assert _sink(r2=r2, d1=d1).upsert_raw_artifact(_artifact(tmp_path)) is True
+        assert r2.puts == []  # 新キーへは PUT しない（R2 を増やさない）
+        # HEAD は新キー→旧キーの2回だけ（PUT が無いことに加えて、無駄な
+        # HEAD が追加で発行されないことも固定する）。
+        assert r2.heads == [new_key, legacy]
+        _table, columns, rows, _c, _keep = d1.calls[0]
+        assert rows[0][columns.index("r2_key")] == legacy  # 索引の r2_key が正
+        assert rows[0][columns.index("doc_id")] == "S100XU9L"  # doc_id は埋まる
+
+    def test_legacy_derived_key_is_used_when_it_already_exists(self, tmp_path):
+        """(b)-(ii): 派生は derived_key(key) で計算するので、旧キー救済時は派生も旧位置。"""
+        new_key = "raw/edinet/csv/2026/2026-06-30/7203/S100XU9L/cccccccccccccccc.zip"
+        legacy = "raw/edinet/csv/2026/2026-06-30/7203/_/cccccccccccccccc.zip"
+        legacy_derived = "derived/edinet/csv/2026/2026-06-30/7203/_/cccccccccccccccc.csv"
+        r2, d1 = _FakeR2({legacy, legacy_derived}), _FakeD1()
+        _sink(r2=r2, d1=d1).upsert_raw_artifact(_artifact(tmp_path, converted=True))
+        assert r2.puts == []  # 原本も派生も PUT しない
+        assert r2.heads == [new_key, legacy, legacy_derived]
+        _table, columns, rows, _c, _keep = d1.calls[0]
+        assert rows[0][columns.index("derived_key")] == legacy_derived
+
+    def test_neither_key_exists_puts_to_the_new_doc_id_key(self, tmp_path):
+        """(b)-(iii): 新旧どちらにも無ければ新キーへ PUT する（doc_id 付き）。"""
+        new_key = "raw/edinet/csv/2026/2026-06-30/7203/S100XU9L/cccccccccccccccc.zip"
+        legacy = "raw/edinet/csv/2026/2026-06-30/7203/_/cccccccccccccccc.zip"
+        r2, d1 = _FakeR2(), _FakeD1()
+        assert _sink(r2=r2, d1=d1).upsert_raw_artifact(_artifact(tmp_path)) is True
+        assert r2.puts == [new_key]
+        # 旧キーも存在確認はする（無ければ諦めて新キーへ PUT）。
+        assert r2.heads == [new_key, legacy]
+        _table, columns, rows, _c, _keep = d1.calls[0]
+        assert rows[0][columns.index("r2_key")] == new_key
+
+    def test_legacy_key_is_not_checked_past_the_switchover_date(self, tmp_path):
+        """LEGACY_KEY_UNTIL より新しい data_date では旧キーが実在しても無視する。"""
+        from jp_stock_pipeline.cloud_store import keys
+        from jp_stock_pipeline.cloud_store.sink import LEGACY_KEY_UNTIL
+
+        # 定数を将来伸ばす運用（left_undone）と衝突しないよう、固定の月日では
+        # なく相対計算で「必ず未来」の日付を作る。
+        future = LEGACY_KEY_UNTIL + timedelta(days=1)
+        artifact = _artifact(tmp_path)
+        artifact.data_date = future
+        legacy = keys.raw_key(
+            source="EDINET", datatype="csv", scope="7203", data_date=future,
+            sha256="c" * 64, ext="zip", doc_id=None,
+        )
+        new_key = keys.raw_key(
+            source="EDINET", datatype="csv", scope="7203", data_date=future,
+            sha256="c" * 64, ext="zip", doc_id="S100XU9L",
+        )
+        r2, d1 = _FakeR2({legacy}), _FakeD1()
+        assert _sink(r2=r2, d1=d1).upsert_raw_artifact(artifact) is True
+        assert r2.puts == [new_key]  # 旧キーが実在しても切替日後は使わない
+        # 切替日を過ぎたら旧キーは HEAD すらしない（追加コストが本当に
+        # ゼロであることを固定する。exists() 呼び出し回数を数えない実装
+        # だと、採用条件だけ日付で絞っていても本テストは気づけない）。
+        assert r2.heads == [new_key]
+
     def test_converted_file_goes_to_derived_and_is_indexed(self, tmp_path):
         r2, d1 = _FakeR2(), _FakeD1()
         _sink(r2=r2, d1=d1).upsert_raw_artifact(_artifact(tmp_path, converted=True))
         assert any(k.startswith("derived/") for k in r2.puts)
-        _table, columns, rows, _c = d1.calls[0]
+        _table, columns, rows, _c, _keep = d1.calls[0]
         assert rows[0][columns.index("derived_ext")] == "csv"
 
     def test_r2_success_without_d1_config_is_still_success(self, tmp_path):
