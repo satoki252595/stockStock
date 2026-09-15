@@ -2,8 +2,8 @@
 name: edinet_daily
 
 on:
-  schedule:
-    - cron: "0 12 * * 1-5"
+  # カットオーバー済み（Wave 5）。実行は kabulab_tool_cloudflare 側へ移管。
+  # 元: cron: "0 12 * * 1-5"
   workflow_dispatch:
     inputs:
       date:
