@@ -2,8 +2,8 @@
 name: master_sync
 
 on:
-  schedule:
-    - cron: "0 21 1 * *"
+  # カットオーバー済み（Wave 5）。実行は kabulab_tool_cloudflare 側へ移管。
+  # 元: cron: "0 21 1 * *"
   workflow_dispatch:
 
 concurrency:

@@ -412,8 +412,14 @@ class TestWorkflowCrons:
     def test_cron(self, name):
         path = Path(__file__).parent.parent / ".github" / "workflows" / f"{name}.yml"
         text = path.read_text(encoding="utf-8")
-        m = re.search(r'cron:\s*"([^"]+)"', text)
-        assert m, f"{name}.yml に cron が無い"
+        # カットオーバー後は cron を外して dispatch のみにする。コメントの申送り
+        # （`# 元: cron: "..."`）には反応せず、live の cron が無ければ skip する。
+        live = "\n".join(
+            line for line in text.splitlines() if not line.strip().startswith("#")
+        )
+        m = re.search(r'cron:\s*"([^"]+)"', live)
+        if not m:
+            pytest.skip(f"{name}.yml はカットオーバー済み（実行は kabulab 側）")
         assert m.group(1) == self.EXPECTED[name]
         assert "workflow_dispatch" in text  # 手動実行可
         assert f"jp_stock_pipeline.jobs.{name}" in text

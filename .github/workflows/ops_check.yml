@@ -51,10 +51,8 @@
 name: ops_check
 
 on:
-  schedule:
-    # 日次ジョブ（edinet_daily 12:00 UTC）が出揃った後。
-    # 14:30 UTC = 23:30 JST
-    - cron: "30 14 * * *"
+  # カットオーバー済み（Wave 5）。実行は kabulab_tool_cloudflare 側へ移管。
+  # 元: cron: "30 14 * * *"（14:30 UTC = 23:30 JST）
   workflow_dispatch:
 
 concurrency:
